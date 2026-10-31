@@ -1,0 +1,18 @@
+{
+  "name": "eufy-time-lapse",
+  "mode": "vendored",
+  "dependencies": {
+    "jbaruch/coding-policy": {
+      "version": "latest"
+    }
+  },
+  "agents": [
+    "claude-code",
+    "cursor",
+    "gemini",
+    "antigravity",
+    "codex",
+    "copilot",
+    "copilot-vscode"
+  ]
+}
