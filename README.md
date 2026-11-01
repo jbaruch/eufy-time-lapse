@@ -101,6 +101,7 @@ Run anything else alongside it with `docker compose run --rm timelapse <command>
 | `status [--json]` | Last frame, next slot, completeness, battery, pauses, budgets, reliability by connection path |
 | `calibration [--hours N]` | Battery, solar input and capture load, hour by hour |
 | `capture` | One manual frame now. Never counts toward completeness |
+| `framing set` / `framing off` | Keep the camera on target, or stop. See "Using it as a camera too" |
 | `pause` / `resume` | Stop and restart new captures. `resume --battery-checked` overrides a low-battery pause |
 | `render --from YYYY-MM-DD --to YYYY-MM-DD` | Builds an MP4 from stored frames, with a manifest. Never touches the camera |
 | `export-manifest` | Every capture, one JSON object per line |
@@ -124,6 +125,28 @@ In this order, and nothing waits for a slot:
 3. **All set: production pace.** Take the test overrides out of `data/config.json`, restart, then
    `docker compose run --rm timelapse resume`. The defaults are 08:00 to 18:00 daily, every 5 minutes at 60% battery or
    more, every 15 at 40%, hourly below that, and a pause at 25%.
+
+## Using it as a camera too
+
+You can watch and pan in the app at any time. A slot that fires during live view still gets its frame, and the picture
+flickers once. To keep frames on target while people do that:
+
+```bash
+docker compose run --rm timelapse framing set
+```
+
+This saves where the camera points now, in the first empty saved-position slot. It shows in the app, so leave it there.
+From then on, each frame is compared with the last good one:
+
+- One frame off target is flagged, and renders leave it out. `render --include-off-target` keeps it.
+- If the next slot is off target too, the camera goes back to the saved position, so you get about 5 to 10 minutes of
+  looking around. The first frame after that is the next slot's.
+- It lands 10 to 18 pixels from where it was, which is close enough to count as on target.
+- A return runs at most every 30 minutes and 6 times in 24 hours. If going back doesn't fix it, an alert says so.
+- Fog, darkness or a frame it can't judge count as unsure, and unsure never moves the camera.
+
+If you meant to change the view, run `framing set` again. `framing off` stops all of it. `"framing": { "return_enabled": false }`
+in `data/config.json` keeps the flags and the verdicts in `status`, but never moves the camera.
 
 The service also answers on `127.0.0.1:8787`. `/status` has the full report. `/healthz` means only that the
 process is alive, so check `/status` to know frames are arriving. If the capture loop makes no progress for 15 minutes,

@@ -442,6 +442,12 @@ describe("the command line", () => {
     assert.match(stdout, /^Usage: timelapse/);
   });
 
+  it("asks what the framing command should do, rather than guessing", async () => {
+    const dir = await tempDir();
+    await assert.rejects(run(process.execPath, [cli, "framing", "nonsense"], { env: { ...process.env, TIMELAPSE_DATA_DIR: dir.path } }), (error: { stderr: string }) => /framing needs "set"/.test(error.stderr));
+    await dir.remove();
+  });
+
   it("refuses an unknown command, with the usage and a failing exit code", async () => {
     await assert.rejects(run(process.execPath, [cli, "nonsense"]), (error: { code: number; stderr: string }) => error.code === 2 && /Usage: timelapse/.test(error.stderr));
   });

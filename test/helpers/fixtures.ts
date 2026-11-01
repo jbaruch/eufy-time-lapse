@@ -134,6 +134,7 @@ export class MockAdapter implements CameraAdapter {
   savedPositions: number[] = [];
   positionReturns: number[] = [];
   forgottenPositions: number[] = [];
+  forgetFailure: Error | undefined;
   private readonly behavior: MockBehavior;
 
   constructor(behavior: MockBehavior = {}) {
@@ -200,6 +201,7 @@ export class MockAdapter implements CameraAdapter {
   }
 
   async forgetPosition(_cameraKey: string, positionId: number): Promise<void> {
+    if (this.forgetFailure !== undefined) throw this.forgetFailure;
     this.forgottenPositions.push(positionId);
   }
 

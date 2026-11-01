@@ -16,6 +16,7 @@ export interface StatusReport {
   disk_free_mb: number;
   reliability_24h: Reliability;
   active_alerts: string[];
+  framing: { position_saved: boolean; last_check: { status: string; at: string; dx: number | null; dy: number | null; detail: string } | null; off_target_slots_in_a_row: number };
 }
 
 export interface Completeness {
@@ -95,6 +96,7 @@ export function summarizeAttempts(attempts: AttemptRow[]): Reliability {
 }
 
 export function buildStatus(state: State, config: ServiceConfig, now: Date, diskFreeMb: number, revision = "unknown"): StatusReport {
+  const lastFraming = state.latestFramingCheck();
   const zone = config.project.site_time_zone;
   const local = localParts(now, zone);
   const dayAgo = new Date(now.getTime() - 86_400_000).toISOString();
@@ -142,6 +144,11 @@ export function buildStatus(state: State, config: ServiceConfig, now: Date, disk
     disk_free_mb: diskFreeMb,
     reliability_24h: summarizeAttempts(state.attemptsSince(dayAgo)),
     active_alerts: state.listAlerts().map((alert) => alert.key),
+    framing: {
+      position_saved: state.getFlag("framing_position_id") !== undefined,
+      last_check: lastFraming === undefined ? null : { status: lastFraming.status, at: lastFraming.checked_at, dx: lastFraming.dx, dy: lastFraming.dy, detail: lastFraming.detail },
+      off_target_slots_in_a_row: state.offTargetSlotsInARow(),
+    },
   };
 }
 

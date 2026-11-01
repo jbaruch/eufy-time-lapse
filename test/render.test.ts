@@ -195,6 +195,19 @@ describe("render", () => {
     assert.ok(manifest.warnings.some((warning) => warning.includes("scaled")));
   });
 
+  it("leaves out a frame the framing check flagged, and keeps it when asked", async () => {
+    const day = { local_date: "2026-07-03" };
+    await keep(state, capture("10", { ...(await frame("10", 640, 360, "2026-07-03")), ...day, frame_received_at: "2026-07-03T13:00:00.000Z" }));
+    await keep(state, capture("11", { ...(await frame("11", 640, 360, "2026-07-03")), ...day, frame_received_at: "2026-07-03T13:05:00.000Z" }));
+    state.recordFramingCheck({ capture_id: "11", checked_at: "2026-07-03T13:05:01.000Z", status: "off_target", reference_capture_id: "10", dx: 400, dy: 0, detail: "test" });
+    const range = { from: "2026-07-03", to: "2026-07-03" };
+    const left = await render({ ...base, ...range, state, dataDir: dir.path, outputPath: join(dir.path, "renders", "on-target.mp4") });
+    assert.deepEqual(left.inputs.map((input) => input.capture_id), ["10"]);
+    assert.deepEqual(left.exclusions.map((exclusion) => exclusion.capture_id), ["11"]);
+    const kept = await render({ ...base, ...range, state, dataDir: dir.path, outputPath: join(dir.path, "renders", "all.mp4"), includeOffTarget: true });
+    assert.deepEqual(kept.inputs.map((input) => input.capture_id), ["10", "11"]);
+  });
+
   it("explains an empty selection", async () => {
     await assert.rejects(render({ ...base, state, dataDir: dir.path, from: "2020-01-01", to: "2020-01-02", outputPath: join(dir.path, "renders", "none.mp4") }), (error: RenderError) => error instanceof RenderError && /No frames/.test(error.message));
   });
