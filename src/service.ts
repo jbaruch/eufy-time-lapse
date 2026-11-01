@@ -495,6 +495,7 @@ export class CaptureService {
     if (chosen.frame !== null) {
       const captureId = randomUUID();
       const relativeDir = await this.publish(captureId, chosen, otherTries.length + 1, {
+        adapter,
         kind: "scheduled",
         slot,
         camera,
@@ -561,7 +562,7 @@ export class CaptureService {
     captureId: string,
     record: AttemptRecord,
     attemptCount: number,
-    context: { kind: "scheduled" | "manual"; slot: SlotRow | null; camera: CameraInfo; reading: BatteryReading | null; everyMinutes: number | null },
+    origin: { adapter: CameraAdapter; kind: "scheduled" | "manual"; slot: SlotRow | null; camera: CameraInfo; reading: BatteryReading | null; everyMinutes: number | null },
   ): Promise<string> {
     if (record.frame === null) throw new Error("publish needs a frame");
     const receivedAt = record.timing.frame_saved_at ?? this.now().toISOString();
@@ -577,11 +578,11 @@ export class CaptureService {
       capture_id: captureId,
       project_id: this.config.project.id,
       camera_id: this.config.camera.id,
-      kind: context.kind,
-      slot_id: context.slot?.slot_id ?? null,
+      kind: origin.kind,
+      slot_id: origin.slot?.slot_id ?? null,
       attempt_id: record.attempt_id,
-      schedule_revision: context.slot?.schedule_revision ?? null,
-      scheduled_at_utc: context.slot?.scheduled_at_utc ?? null,
+      schedule_revision: origin.slot?.schedule_revision ?? null,
+      scheduled_at_utc: origin.slot?.scheduled_at_utc ?? null,
       request_started_at: record.timing.request_started_at,
       stream_started_at: record.timing.stream_started_at,
       frame_received_at: receivedAt,
@@ -594,9 +595,9 @@ export class CaptureService {
       freshness_basis: record.freshness.basis,
       cold_connection: record.freshness.cold_connection,
       retained: false,
-      adapter: this.adapter?.name ?? "unknown",
-      adapter_version: this.adapter?.version ?? "unknown",
-      camera_firmware: context.camera.firmware,
+      adapter: origin.adapter.name,
+      adapter_version: origin.adapter.version,
+      camera_firmware: origin.camera.firmware,
       connection_type: this.options.link,
       connection_path: record.connection_path,
       cellular_operator: this.options.operator,
@@ -611,10 +612,10 @@ export class CaptureService {
       session_ms: record.timing.session_ms,
       cleanup_status: record.cleanup.status,
       cleanup_detail: record.cleanup.detail,
-      battery_percent: context.reading?.percent ?? null,
-      battery_observed_at: context.reading?.observedAt ?? null,
-      battery_note: context.reading?.note ?? "no reading was available",
-      every_minutes: context.everyMinutes,
+      battery_percent: origin.reading?.percent ?? null,
+      battery_observed_at: origin.reading?.observedAt ?? null,
+      battery_note: origin.reading?.note ?? "no reading was available",
+      every_minutes: origin.everyMinutes,
       media_video_bytes: record.traffic.video_bytes,
       media_audio_bytes: record.traffic.audio_bytes,
       traffic_measurement_basis: TRAFFIC_BASIS,
@@ -726,7 +727,7 @@ export class CaptureService {
       return new CaptureFailure(result.chosen.failure?.reason ?? "capture_timeout", result.chosen.failure?.phase ?? "first_media", result.chosen.failure?.message ?? "No frame arrived.");
     }
     const captureId = randomUUID();
-    await this.publish(captureId, result.chosen, 1, { kind: "manual", slot: null, camera, reading, everyMinutes: null });
+    await this.publish(captureId, result.chosen, 1, { adapter, kind: "manual", slot: null, camera, reading, everyMinutes: null });
     await rm(join(this.options.dataDir, "work", key), { recursive: true, force: true });
     await this.adapter.shutdown();
     this.adapter = undefined;

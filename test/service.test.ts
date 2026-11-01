@@ -591,6 +591,16 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("records the client that took a frame in its metadata, even when that client is retired right after", async () => {
+      const h = await harness({ teardown: async () => ({ status: "timeout", detail: "still running" }) });
+      await runAt(h, [0]);
+      const [capture] = h.state.allCaptures();
+      const metadata = JSON.parse(await readFile(join(h.dataDir, capture?.relative_dir ?? "", "metadata.json"), "utf8")) as { adapter: string; adapter_version: string };
+      assert.deepEqual([metadata.adapter, metadata.adapter_version], ["mock", "0.0.0"]);
+      assert.equal(h.adapter.shutdowns, 1, "and it was retired");
+      h.state.close();
+    });
+
     it("retires a client whose teardown timed out, stops retrying on it, and starts fresh for the next slot", async () => {
       let hung = true;
       const h = await harness({ teardown: async () => (hung ? { status: "timeout", detail: "still running" } : { status: "ok", detail: null }), open: async () => await hangUp() });
