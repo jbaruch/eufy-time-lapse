@@ -583,3 +583,50 @@ describe("MegaAdapter, telling an outage from a refusal from a bug", () => {
     await assert.rejects(adapter.openLiveSession(SERIAL, openSignal()), /something nobody expected/);
   });
 });
+
+describe("MegaAdapter, when disconnecting fails", () => {
+  function refusing(): { client: FakeClient; adapter: MegaAdapter; warnings: string[] } {
+    const parts = setup();
+    parts.client.disconnect = async () => {
+      throw new Error("socket stuck");
+    };
+    return parts;
+  }
+
+  it("survives a failed sweep, says so, and restores the login next time", async () => {
+    const { client, adapter, warnings } = refusing();
+    client.sessions.set(SERIAL, {});
+    await adapter.sweepConnections();
+    assert.match(warnings.join(), /couldn't close a camera connection.*socket stuck/);
+    assert.equal(adapter.unexpectedConnectionCount(), 1);
+    const logins = client.logins;
+    await adapter.discoverCamera();
+    assert.equal(client.logins, logins + 1);
+    await adapter.shutdown();
+  });
+
+  it("survives a failed shutdown, and says so", async () => {
+    const { adapter, warnings } = refusing();
+    await adapter.shutdown();
+    assert.match(warnings.join(), /didn't shut down cleanly.*socket stuck/);
+  });
+
+  it("keeps a rejected sweep from becoming an unhandled rejection", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval"] });
+    const unhandled: unknown[] = [];
+    const listener = (reason: unknown): void => void unhandled.push(reason);
+    process.on("unhandledRejection", listener);
+    t.after(() => process.off("unhandledRejection", listener));
+    const { client, adapter, warnings } = setup();
+    client.getP2pSessions = () => {
+      throw new RangeError("the sweep itself broke");
+    };
+    t.mock.timers.tick(5_000);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+    assert.match(warnings.join(), /the connection sweep failed.*the sweep itself broke/);
+    client.getP2pSessions = () => client.sessions;
+    await adapter.shutdown();
+  });
+});

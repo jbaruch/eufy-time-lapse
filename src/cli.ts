@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { appendFileSync, createWriteStream, mkdirSync } from "node:fs";
 import { statfs } from "node:fs/promises";
-import { createServer } from "node:http";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
@@ -11,6 +10,7 @@ import { createMegaClient, MegaAdapter } from "./adapters/mega.ts";
 import { createNotifier } from "./alerts.ts";
 import { ConfigError, loadConfig, loadSettings } from "./config.ts";
 import type { AppConfig, AppSettings } from "./config.ts";
+import { createStatusServer } from "./http.ts";
 import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "./lock.ts";
 import { runLogin } from "./login.ts";
 import { createRedactingLogger, Redactor } from "./logging.ts";
@@ -231,25 +231,7 @@ async function commandRun(paths: Paths): Promise<number> {
   const service = buildService(config, serviceConfig, paths, state, write);
   const signal = terminationSignal();
 
-  // /healthz says only that this process is alive. Whether frames are arriving is /status's job.
-  const server = createServer((request, response) => {
-    if (request.url === "/healthz") {
-      response.writeHead(200, { "content-type": "text/plain" }).end("alive\n");
-      return;
-    }
-    if (request.url === "/status") {
-      diskFreeMb(paths.dataDir).then(
-        (free) => {
-          response.writeHead(200, { "content-type": "application/json" }).end(`${JSON.stringify(buildStatus(state, serviceConfig, new Date(), free, REVISION), null, 2)}\n`);
-        },
-        (error: Error) => {
-          response.writeHead(500, { "content-type": "text/plain" }).end(`${error.message}\n`);
-        },
-      );
-      return;
-    }
-    response.writeHead(404).end();
-  });
+  const server = createStatusServer(async () => buildStatus(state, serviceConfig, new Date(), await diskFreeMb(paths.dataDir), REVISION));
   server.listen(serviceConfig.http.port, serviceConfig.http.bind);
   log(`service running at revision ${REVISION}; status on http://${serviceConfig.http.bind}:${serviceConfig.http.port}/status`);
 

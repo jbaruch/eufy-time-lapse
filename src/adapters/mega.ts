@@ -191,7 +191,10 @@ export class MegaAdapter implements CameraAdapter {
     this.client = client;
     this.warn = warn;
     this.registerSecret = registerSecret;
-    this.sweepTimer = setInterval(() => void this.sweepConnections(), SWEEP_INTERVAL_MS);
+    this.sweepTimer = setInterval(() => {
+      // A rejection here would have no handler, and Node would end the process.
+      this.sweepConnections().catch((error: Error) => this.warn(`the connection sweep failed: ${error.message}`));
+    }, SWEEP_INTERVAL_MS);
     this.sweepTimer.unref();
   }
 
@@ -204,9 +207,15 @@ export class MegaAdapter implements CameraAdapter {
   async sweepConnections(): Promise<void> {
     if (this.attemptActive || this.client.getP2pSessions().size === 0) return;
     this.unexpectedConnections += 1;
-    this.warn("closed a camera connection that opened outside a capture attempt");
-    await this.client.disconnect();
+    // disconnect() ends the login too, whether or not it closes cleanly, so the next attempt restores it either way.
     this.loginNeeded = true;
+    try {
+      await this.client.disconnect();
+      this.warn("closed a camera connection that opened outside a capture attempt");
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      this.warn(`couldn't close a camera connection that opened outside a capture attempt, and will try again: ${error.message}`);
+    }
   }
 
   async authenticate(input?: AuthInput): Promise<AuthState> {
@@ -396,6 +405,6 @@ export class MegaAdapter implements CameraAdapter {
 
   async shutdown(): Promise<void> {
     clearInterval(this.sweepTimer);
-    await this.client.disconnect();
+    await this.client.disconnect().catch((error: Error) => this.warn(`the camera client didn't shut down cleanly: ${error.message}`));
   }
 }
