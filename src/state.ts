@@ -273,6 +273,10 @@ export class State {
       WHERE s.capture_id IS NULL OR s.capture_id != c.capture_id`);
   }
 
+  runningSlots(): SlotRow[] {
+    return this.all<SlotRow>("SELECT * FROM slots WHERE state = 'running'");
+  }
+
   /** A slot left running means the process died mid-capture. Whether the camera connection closed is unknowable. */
   markInterruptedSlots(): SlotRow[] {
     const rows = this.all<SlotRow>("SELECT * FROM slots WHERE state = 'running'");

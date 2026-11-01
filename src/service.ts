@@ -5,9 +5,9 @@ import { CaptureFailure } from "./adapters/adapter.ts";
 import type { BatteryReading, CameraAdapter, CameraInfo } from "./adapters/adapter.ts";
 import { AlertTracker } from "./alerts.ts";
 import type { Notify } from "./alerts.ts";
-import { TRAFFIC_BASIS } from "./capture/acquire.ts";
-import type { AttemptRecord } from "./capture/acquire.ts";
-import { abortableSleep, captureSlot } from "./capture/slot.ts";
+import { recoverAttempt, TRAFFIC_BASIS } from "./capture/acquire.ts";
+import type { AttemptRecord, RecoveredAttempt } from "./capture/acquire.ts";
+import { abortableSleep, captureSlot, chooseBest, tryDirectory } from "./capture/slot.ts";
 import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "./lock.ts";
 import type { LockOptions } from "./lock.ts";
 import { dataBudgetSpent, decide, nextBatteryPaused, reservedSessionMs, sessionBudgetSpent } from "./policy.ts";
@@ -52,6 +52,11 @@ export function scheduleConfigOf(config: ServiceConfig): ScheduleConfig {
     windowEndExclusive: config.schedule.window_end_exclusive,
     days: config.schedule.days,
   };
+}
+
+/** Where a slot's tries keep their files, worked out from the slot so that crash recovery can find them. */
+function workKeyFor(slot: Pick<SlotRow, "scheduled_at_utc">): string {
+  return slot.scheduled_at_utc.replace(/[^0-9A-Z]/g, "");
 }
 
 export function scheduleRevision(config: ServiceConfig): string {
@@ -111,6 +116,7 @@ export class CaptureService {
   async reconcile(): Promise<void> {
     await this.adoptPublishedFrames();
     await this.repairSlotLinks();
+    await this.recoverInterruptedSlots();
     for (const slot of this.state.markInterruptedSlots()) {
       this.state.addEvent("slot_interrupted", slot.slot_id);
       this.options.log(`slot ${slot.local_date} ${slot.local_time} was interrupted by a restart; marked missed`);
@@ -226,6 +232,31 @@ export class CaptureService {
       }
     }
     await this.alerts.set("slot_links_disputed", disputed.length > 0, `${disputed.length} stored frame(s) and their slots disagree about each other, starting with capture ${disputed[0] ?? ""}. Both are left as they are for a person to look at`);
+  }
+
+  /**
+   * Decoding waits until the camera is released, so a crash can land after a frame's bytes have arrived and before they're a
+   * frame. Those bytes are still this slot's, so they get finished here. Anything that won't decode counts as missed.
+   */
+  private async recoverInterruptedSlots(): Promise<void> {
+    for (const slot of this.state.runningSlots()) {
+      if (slot.every_minutes === null) continue;
+      const slotDir = join(this.options.dataDir, "work", workKeyFor(slot));
+      const recovered: RecoveredAttempt[] = [];
+      for (let index = 0; index < this.config.capture.max_attempts; index += 1) {
+        const attempt = await recoverAttempt({ outputDir: tryDirectory(slotDir, index), minWidth: this.options.minWidth, minHeight: this.options.minHeight });
+        if (attempt !== null) recovered.push(attempt);
+      }
+      const [first] = recovered;
+      if (first === undefined) continue;
+      const chosen = chooseBest(recovered.map((attempt) => attempt.record));
+      const captureId = randomUUID();
+      const relativeDir = await this.publish(captureId, chosen, recovered.length, { adapter: first.adapter, kind: "scheduled", slot, camera: { firmware: null }, reading: null, everyMinutes: slot.every_minutes });
+      this.state.setSlot(slot.slot_id, chosen.status === "captured" ? "captured" : "captured_degraded", { captureId, everyMinutes: slot.every_minutes });
+      this.state.addEvent("capture_recovered", captureId);
+      this.options.log(`${slot.local_date} ${slot.local_time}: recovered the frame a crash interrupted (${relativeDir})`);
+      for (const attempt of recovered) await rm(join(this.options.dataDir, "work", attempt.record.attempt_id), { recursive: true, force: true });
+    }
   }
 
   /**
@@ -466,7 +497,7 @@ export class CaptureService {
       await this.syncFailureAlert();
       return;
     }
-    const workKey = slot.scheduled_at_utc.replace(/[^0-9A-Z]/g, "");
+    const workKey = workKeyFor(slot);
     const reservationId = `reservation-${workKey}`;
     // Charged in full if the process dies mid-capture, so a crash can't reset the day's budget.
     this.state.insertAttempt({
@@ -620,7 +651,7 @@ export class CaptureService {
     captureId: string,
     record: AttemptRecord,
     attemptCount: number,
-    origin: { adapter: CameraAdapter; kind: "scheduled" | "manual"; slot: SlotRow | null; camera: CameraInfo; reading: BatteryReading | null; everyMinutes: number | null },
+    origin: { adapter: Pick<CameraAdapter, "name" | "version">; kind: "scheduled" | "manual"; slot: SlotRow | null; camera: Pick<CameraInfo, "firmware">; reading: BatteryReading | null; everyMinutes: number | null },
   ): Promise<string> {
     if (record.frame === null) throw new Error("publish needs a frame");
     const receivedAt = record.timing.frame_saved_at ?? this.now().toISOString();

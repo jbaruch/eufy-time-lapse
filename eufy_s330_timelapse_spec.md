@@ -150,9 +150,11 @@ On a cold start, wait for keyframes at the required size. The observed policy: h
 2. Create a capture-attempt record with a unique identifier.
 3. If configured and experimentally supported, restore the selected camera framing/preset.
 4. Open a new live session, obtain a frame, and validate its image data and provenance.
-5. Atomically store the frame and provisional metadata with `cleanup_status=pending`.
+5. Atomically store a versioned record of the attempt beside the received stream, so those bytes survive a crash.
 6. In `finally`, stop the live stream, decoder, and camera connection.
-7. Atomically finalize the capture metadata with the cleanup outcome; complete the attempt record and enqueue archive upload.
+7. Decode the frame, then atomically publish it with its final metadata, including the cleanup outcome; complete the attempt record and enqueue archive upload.
+
+Decoding comes after teardown so that FFmpeg never keeps the camera awake, which matters on every frame of a solar-powered session. A crash between steps 5 and 7 therefore leaves bytes that aren't a frame yet. Reconciliation decodes them and publishes the frame with `cleanup_status=unknown_after_crash`. If they won't decode, the slot counts as missed.
 
 The frame-acquisition timeout is **30 seconds per attempt**, twice the slowest 4K session measured. Allow up to **10 additional seconds** for cleanup. The SDK may impose tighter internal timeouts; extending the service-level timeout does not automatically change them.
 
@@ -228,7 +230,7 @@ Persist counters, budget reservations, and attempt counts in SQLite; a restart m
 
 ## 7.1 Capture storage and offsite archive
 
-Keep SQLite and the local image spool on durable storage in a persistent Docker volume. Write JPEG and JSON metadata into a temporary directory, then atomically rename the complete directory. Enforce a unique database constraint on the scheduled slot. Following cleanup, atomically replace provisional metadata with the final JSON, then allow upload. After crashes, reconcile completed local directories against DB rows without recapturing an already saved slot. Mark unfinished cleanup as `unknown_after_crash`, not as successfully completed.
+Keep SQLite and the local image spool on durable storage in a persistent Docker volume. Write JPEG and JSON metadata into a temporary directory, then atomically rename the complete directory. Enforce a unique database constraint on the scheduled slot. After crashes, reconcile completed local directories against DB rows without recapturing an already saved slot. Mark unfinished cleanup as `unknown_after_crash`, not as successfully completed.
 
 Reconciling adopts a stored frame only if its metadata, its place in the spool and its bytes all agree, and it belongs to the configured project and camera. A scheduled frame must also hold its own slot: the writer only leaves one unrecorded by dying while that slot is `running`, so a slot row in any other state, or from another schedule revision, refuses it. A frame with no slot row at all is still adopted and its row rebuilt from its metadata, because that's what a lost database looks like, those frames are what a render needs, and the camera must never go after a slot that already has a frame. A refused frame is left in place and raises an alert.
 

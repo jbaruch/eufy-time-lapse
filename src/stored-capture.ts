@@ -111,7 +111,7 @@ const METADATA_SHAPE: Record<keyof CaptureMetadata, Check> = {
   attempt_count: positiveWhole,
   connect_ms: orNull(amount),
   session_ms: amount,
-  cleanup_status: oneOf("ok", "timeout", "error"),
+  cleanup_status: oneOf("ok", "timeout", "error", "unknown_after_crash"),
   cleanup_detail: orNull(anyText),
   battery_percent: orNull(percentage),
   battery_observed_at: orNull(time),

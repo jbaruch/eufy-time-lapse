@@ -79,7 +79,8 @@ export interface LiveSession {
 }
 
 export interface CleanupResult {
-  status: "ok" | "timeout" | "error";
+  /** `unknown_after_crash`: the process died before teardown finished, so whether the connection closed can't be known. */
+  status: "ok" | "timeout" | "error" | "unknown_after_crash";
   detail: string | null;
 }
 

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { syncBuiltinESMExports } from "node:module";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { after, before, describe, it } from "node:test";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
@@ -96,6 +96,33 @@ describe("acquireFrame", () => {
     const { adapter, result } = attempt({ open: async () => liveSession(h265) });
     await assert.rejects(result, flushFailure);
     assert.equal(adapter.teardowns, 1);
+  });
+
+  it("has the stream's record on disk before it starts tearing down", async () => {
+    let recordAtTeardown: string | undefined;
+    const { outputDir, result } = attempt({
+      open: async () => liveSession(h265),
+      teardown: async () => {
+        recordAtTeardown = await readFile(join(outputDir, "pending.json"), "utf8");
+        return { status: "ok", detail: null };
+      },
+    });
+    await result;
+    const record = JSON.parse(recordAtTeardown ?? "{}") as { schema_version: number; attempt_id: string; stream_stop: string; video_bytes: number };
+    assert.equal(record.schema_version, 1);
+    assert.equal(record.attempt_id, basename(outputDir));
+    assert.equal(record.stream_stop, "stream_ended", "this fixture ends once it has played");
+    assert.ok(record.video_bytes > 0);
+  });
+
+  it("leaves no record when no stream arrived", async () => {
+    const { outputDir, result } = attempt({
+      open: async () => {
+        throw new CaptureFailure("camera_unreachable", "connect", "no connection");
+      },
+    });
+    await result;
+    assert.equal(await exists(join(outputDir, "pending.json")), false);
   });
 
   it("saves a frame at the stream's real resolution and records its hash", async () => {

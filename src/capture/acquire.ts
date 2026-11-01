@@ -3,8 +3,9 @@ import { createWriteStream } from "node:fs";
 import { copyFile, mkdir, readFile, rename, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { CaptureFailure } from "../adapters/adapter.ts";
-import type { AbortCause, CameraAdapter, CleanupResult, ConnectionPath, FailurePhase, FailureReason, LiveSession } from "../adapters/adapter.ts";
+import type { AbortCause, CameraAdapter, CleanupResult, ConnectionPath, FailurePhase, FailureReason, LiveSession, VideoCodecName } from "../adapters/adapter.ts";
 import { extractKeyframes, identifyStream, probeImage } from "../media/ffmpeg.ts";
+import { readPendingCapture, writePendingCapture } from "./pending.ts";
 
 export const TRAFFIC_BASIS = "media_payload_only: excludes P2P framing, encryption overhead, retransmits and connection setup";
 /** Long enough for a keyframe already handed to the stream to reach the file. */
@@ -224,6 +225,26 @@ export async function acquireFrame(options: AcquireOptions): Promise<AttemptReco
     const collecting = collectStream(session, streamPath, { keyframes: options.targetKeyframes, minWidth: options.minWidth, minHeight: options.minHeight }, controller.signal, now);
     stats = collecting.stats;
     await collecting.done;
+    // Before anything can go wrong with the camera's teardown. Decoding comes after it, so the camera never stays awake for
+    // FFmpeg, and until then these bytes are all there is of this frame.
+    await writePendingCapture(options.outputDir, {
+      schema_version: 1,
+      attempt_id: basename(options.outputDir),
+      request_started_at: requestStartedAt.toISOString(),
+      stream_started_at: streamStartedAt.toISOString(),
+      first_media_at: (stats.firstMediaAt ?? now()).toISOString(),
+      stream_stopped_at: now().toISOString(),
+      stream_stop: stats.stop ?? "stream_ended",
+      connect_ms: session.connectMs,
+      connect_retries: session.connectRetries,
+      connection_path: session.connectionPath,
+      cold_connection: session.coldConnection,
+      codec: session.codec,
+      video_bytes: stats.videoBytes,
+      audio_bytes: stats.audioBytes,
+      adapter: options.adapter.name,
+      adapter_version: options.adapter.version,
+    });
   } catch (error) {
     if (!(error instanceof CaptureFailure)) throw error;
     failure = error;
@@ -270,7 +291,7 @@ export async function acquireFrame(options: AcquireOptions): Promise<AttemptReco
 
   if (failure === undefined && session !== undefined) {
     try {
-      await saveFrame(record, session, streamPath, options, now);
+      await saveFrame(record, session.codec, streamPath, options, now);
     } catch (error) {
       if (!(error instanceof CaptureFailure)) throw error;
       failure = error;
@@ -281,6 +302,53 @@ export async function acquireFrame(options: AcquireOptions): Promise<AttemptReco
     record.failure = { reason: failure.reason, phase: failure.phase, message: failure.message };
   }
   return record;
+}
+
+export interface RecoveredAttempt {
+  record: AttemptRecord;
+  adapter: { name: string; version: string };
+}
+
+/**
+ * Finishes an attempt whose process died after the stream stopped: decodes what was already received. Answers null if there's
+ * no record this build can vouch for, or the stream won't decode, which leaves the slot to count as missed like any other crash.
+ */
+export async function recoverAttempt(options: Pick<AcquireOptions, "outputDir" | "minWidth" | "minHeight">): Promise<RecoveredAttempt | null> {
+  const pending = await readPendingCapture(options.outputDir);
+  if (pending === null || pending.attempt_id !== basename(options.outputDir)) return null;
+  const record: AttemptRecord = {
+    attempt_id: pending.attempt_id,
+    capture_session_id: randomUUID(),
+    status: "failed",
+    failure: null,
+    timing: {
+      request_started_at: pending.request_started_at,
+      stream_started_at: pending.stream_started_at,
+      first_media_at: pending.first_media_at,
+      frame_saved_at: null,
+      connect_ms: pending.connect_ms,
+      session_ms: Date.parse(pending.stream_stopped_at) - Date.parse(pending.request_started_at),
+    },
+    video: { reported_codec: pending.codec, reported_width: null, reported_height: null, reported_fps: null, actual_codec: null, actual_width: null, actual_height: null },
+    freshness: { source: "live_p2p", retained: false, basis: FRESHNESS_BASIS, cold_connection: pending.cold_connection },
+    traffic: { video_bytes: pending.video_bytes, audio_bytes: pending.audio_bytes, basis: TRAFFIC_BASIS },
+    cleanup: { status: "unknown_after_crash", detail: "the process died before teardown finished" },
+    connect_retries: pending.connect_retries,
+    connection_path: pending.connection_path,
+    stream_stop: pending.stream_stop,
+    audio_error: null,
+    frame: null,
+    keyframes: [],
+    keyframe_errors: [],
+  };
+  try {
+    // The frame arrived when the stream stopped, not whenever this got to run.
+    await saveFrame(record, pending.codec, join(options.outputDir, "stream.bin"), options, () => new Date(pending.stream_stopped_at));
+  } catch (error) {
+    if (!(error instanceof CaptureFailure)) throw error;
+    return null;
+  }
+  return { record, adapter: { name: pending.adapter, version: pending.adapter_version } };
 }
 
 /**
@@ -297,12 +365,12 @@ export function chooseKeyframe(keyframes: KeyframeRecord[]): KeyframeRecord | un
 
 async function saveFrame(
   record: AttemptRecord,
-  session: LiveSession,
+  codec: VideoCodecName,
   streamPath: string,
-  options: AcquireOptions,
+  options: Pick<AcquireOptions, "outputDir" | "minWidth" | "minHeight">,
   now: () => Date,
 ): Promise<void> {
-  const { format, properties } = await identifyStream(streamPath, session.codec);
+  const { format, properties } = await identifyStream(streamPath, codec);
   record.video.actual_codec = properties.codec;
   // Only the stream's first configuration, and the camera steps up from there. Replaced below by the chosen frame's size.
   record.video.actual_width = properties.width;

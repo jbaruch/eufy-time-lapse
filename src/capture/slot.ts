@@ -24,6 +24,11 @@ export interface SlotResult {
   firstTryStatus: AttemptRecord["status"];
 }
 
+/** Where one try of a slot keeps its files. Crash recovery has to find them again. */
+export function tryDirectory(slotDir: string, index: number): string {
+  return index === 0 ? slotDir : `${slotDir}-retry-${index}`;
+}
+
 export async function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
   try {
     await delay(ms, undefined, { signal });
@@ -46,7 +51,7 @@ function rank(record: AttemptRecord): number {
 }
 
 /** On a tie the later try wins: a clean retry beats the failure it followed. */
-function chooseBest(tries: AttemptRecord[]): AttemptRecord {
+export function chooseBest(tries: AttemptRecord[]): AttemptRecord {
   return tries.reduce((best, record) => (rank(record) >= rank(best) ? record : best));
 }
 
@@ -62,7 +67,7 @@ export async function captureSlot(options: SlotOptions): Promise<SlotResult> {
   const tries: AttemptRecord[] = [];
 
   for (let index = 0; index < options.maxTries; index += 1) {
-    const outputDir = index === 0 ? options.slotDir : `${options.slotDir}-retry-${index}`;
+    const outputDir = tryDirectory(options.slotDir, index);
     const record = await acquireFrame({ ...options, outputDir, signal, now });
     tries.push(record);
 
