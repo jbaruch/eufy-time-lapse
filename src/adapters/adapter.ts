@@ -31,7 +31,6 @@ export type AbortCause = "deadline" | "terminated";
 
 export type AuthInput = { verifyCode: string } | { captcha: { id: string; code: string } };
 
-/** `trusted` is null when no code was asked for, so there was nothing to earn trust with. */
 export type LoginRenewal = { status: "renewed" } | { status: "needs_person" };
 
 export type AuthState =
