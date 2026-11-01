@@ -33,6 +33,11 @@ function optional(env: NodeJS.ProcessEnv, name: string): string | undefined {
 }
 
 /** Reads NAME_FILE (a Docker secret) when set, otherwise NAME. */
+/** What the filesystem said about a path. A bad argument is a bug, and has no system call behind it. */
+export function isFileSystemError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && typeof (error as NodeJS.ErrnoException).syscall === "string";
+}
+
 function secret(env: NodeJS.ProcessEnv, name: string): string {
   const path = optional(env, `${name}_FILE`);
   if (path !== undefined) {
@@ -41,7 +46,8 @@ function secret(env: NodeJS.ProcessEnv, name: string): string {
       // Only the file's line ending goes: a password can legitimately start or end with a space.
       content = readFileSync(path, "utf8").replace(/\r?\n$/, "");
     } catch (error) {
-      throw new ConfigError(`Can't read ${name}_FILE at ${path}: ${(error as Error).message}. Run scripts/set-credentials.sh on this host.`);
+      if (!isFileSystemError(error)) throw error;
+      throw new ConfigError(`Can't read ${name}_FILE at ${path}: ${error.message}. Run scripts/set-credentials.sh on this host.`);
     }
     if (content.length === 0) throw new ConfigError(`${name}_FILE at ${path} is empty. Run scripts/set-credentials.sh on this host.`);
     return content;

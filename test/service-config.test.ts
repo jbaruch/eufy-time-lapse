@@ -98,6 +98,14 @@ describe("loadServiceConfig", () => {
     });
   }
 
+  it("explains a config it can't read, rather than quietly using the defaults", () => {
+    assert.throws(() => loadServiceConfig(dir.path), (error: Error) => error instanceof ConfigError && /Can't read/.test(error.message) && error.message.includes("EISDIR"));
+  });
+
+  it("lets a bug through as itself, not as a bad config", () => {
+    assert.throws(() => loadServiceConfig("a\0b"), (error: Error) => error instanceof TypeError && !(error instanceof ConfigError));
+  });
+
   it("explains a file that isn't JSON", async () => {
     await assert.rejects(load("{ nope"), /not valid JSON/);
   });

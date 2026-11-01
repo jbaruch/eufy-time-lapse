@@ -53,6 +53,7 @@ describe("loadConfig", () => {
     assert.throws(() => loadConfig({ EUFY_PASSWORD: "pw" }), (error: ConfigError) => /EUFY_EMAIL/.test(error.message) && /set-credentials/.test(error.message));
     const missing = join(dir.path, "nope");
     assert.throws(() => loadConfig({ ...base, EUFY_EMAIL_FILE: missing }), (error: ConfigError) => error.message.includes(missing));
+    assert.throws(() => loadConfig({ ...base, EUFY_EMAIL_FILE: dir.path }), (error: ConfigError) => error instanceof ConfigError && error.message.includes("EISDIR"));
     const empty = join(dir.path, "empty");
     await writeFile(empty, "\n");
     assert.throws(() => loadConfig({ ...base, EUFY_EMAIL_FILE: empty }), /is empty/);
@@ -62,6 +63,10 @@ describe("loadConfig", () => {
     assert.throws(() => loadConfig({ ...base, TIMELAPSE_MIN_WIDTH: "4k" }), /TIMELAPSE_MIN_WIDTH/);
     assert.throws(() => loadConfig({ ...base, TIMELAPSE_MIN_HEIGHT: "-1" }), /TIMELAPSE_MIN_HEIGHT/);
     assert.throws(() => loadConfig({ ...base, TIMELAPSE_CAMERA_LINK: "ethernet" }), /cellular/);
+  });
+
+  it("lets a bug through as itself, not as a bad secret file", () => {
+    assert.throws(() => loadConfig({ ...base, EUFY_EMAIL_FILE: "a\0b" }), (error: Error) => error instanceof TypeError && !(error instanceof ConfigError));
   });
 
   it("treats blank optional values as unset", () => {

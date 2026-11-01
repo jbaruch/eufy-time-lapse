@@ -160,6 +160,16 @@ describe("createNotifier", () => {
     });
   }
 
+  for (const [name, path] of [["missing", join("no", "such", "webhook")], ["a directory", "."]] as const) {
+    it(`explains at startup a webhook file that's ${name}`, () => {
+      assert.throws(() => createNotifier(path, () => {}), (error: Error) => error instanceof ConfigError && /Can't read the alert webhook/.test(error.message));
+    });
+  }
+
+  it("lets a bug reading the webhook file through as itself", () => {
+    assert.throws(() => createNotifier("a\0b", () => {}), (error: Error) => error instanceof TypeError && !(error instanceof ConfigError));
+  });
+
   it("falls back to the log when no webhook is set", async () => {
     const logged: string[] = [];
     await createNotifier(null, (message) => logged.push(message))("hello");

@@ -1,12 +1,18 @@
 import { readFileSync } from "node:fs";
-import { ConfigError } from "./config.ts";
+import { ConfigError, isFileSystemError } from "./config.ts";
 import type { State } from "./state.ts";
 
 export type Notify = (text: string) => Promise<void>;
 
 /** Checked at startup, so a typo stops the service now instead of losing every alert later. Never quotes the URL, which holds a credential. */
 function readWebhookUrl(path: string): string {
-  const url = readFileSync(path, "utf8").trim();
+  let url: string;
+  try {
+    url = readFileSync(path, "utf8").trim();
+  } catch (error) {
+    if (!isFileSystemError(error)) throw error;
+    throw new ConfigError(`Can't read the alert webhook at ${path} (${error.code}). Fix that file, or set alerts.webhook_url_file to null.`);
+  }
   const protocol = URL.canParse(url) ? new URL(url).protocol : "";
   if (protocol !== "https:" && protocol !== "http:") {
     throw new ConfigError(`${path} doesn't hold an http or https URL. Fix that file, or set alerts.webhook_url_file to null.`);

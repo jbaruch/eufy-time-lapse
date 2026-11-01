@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { ConfigError } from "./config.ts";
+import { ConfigError, isFileSystemError } from "./config.ts";
 import { parseClock } from "./schedule.ts";
 import type { Weekday } from "./schedule.ts";
 
@@ -191,7 +191,8 @@ export function loadServiceConfig(path: string): ServiceConfig {
   try {
     text = readFileSync(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    if (!isFileSystemError(error)) throw error;
+    if (error.code !== "ENOENT") throw new ConfigError(`Can't read ${path} (${error.code}). Fix the file or its permissions, or remove it to use the defaults.`);
     validate(DEFAULT_SERVICE_CONFIG);
     return DEFAULT_SERVICE_CONFIG;
   }
