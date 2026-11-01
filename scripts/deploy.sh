@@ -7,11 +7,10 @@
 set -euo pipefail
 
 # Owned by this script, the only reader and writer: what the last deploy shipped, one "<sha256>  <path>" per line after the
-# header. Version 1 held paths alone, and is upgraded the next time it's read. A new shape means a new schema_version and
-# a migration here. Anything else on the host gets refused, not guessed at.
+# header. A new shape means a new schema_version and a migration here. Anything else on the host gets refused, not guessed
+# at, including version 1: it held paths alone, which can't show that a file is still what was shipped.
 readonly MANIFEST=".deployed-files"
 readonly MANIFEST_HEADER="# eufy-time-lapse deployed files, schema_version=2"
-readonly MANIFEST_HEADER_V1="# eufy-time-lapse deployed files, schema_version=1"
 
 on_host() {
   # shellcheck disable=SC2029 # The directory is meant to expand here, on this side of the connection.
@@ -65,7 +64,7 @@ main() {
   shipping="$(printf '%s\n' "$tracked" | while IFS= read -r file; do shasum -a 256 "$file"; done)"
 
   # From here to the first write_manifest, this only reads the host.
-  local manifest_state previous header=""
+  local manifest_state previous
   manifest_state="$(on_host "if [ -L '$MANIFEST' ] || { [ -e '$MANIFEST' ] && [ ! -f '$MANIFEST' ]; }; then echo refuse; fi")"
   if [[ -n "$manifest_state" ]]; then
     echo "$host's $MANIFEST isn't a regular file, so nothing was deployed. Look at it, then remove it." >&2
@@ -73,25 +72,21 @@ main() {
   fi
   previous="$(on_host "if [ -f '$MANIFEST' ]; then cat '$MANIFEST'; fi")"
   if [[ -n "$previous" ]]; then
-    header="${previous%%$'\n'*}"
-    if [[ "$header" != "$MANIFEST_HEADER" && "$header" != "$MANIFEST_HEADER_V1" ]]; then
+    if [[ "${previous%%$'\n'*}" != "$MANIFEST_HEADER" ]]; then
       echo "$host has a $MANIFEST this version doesn't understand, so nothing was deployed. Check it, and remove it if it's stale." >&2
       exit 1
     fi
-    previous="${previous#"$header"}"
+    previous="${previous#"$MANIFEST_HEADER"}"
     previous="${previous#$'\n'}"
   fi
   if [[ -n "$previous" ]]; then
     local entry path
     while IFS= read -r entry; do
-      path="$entry"
-      if [[ "$header" == "$MANIFEST_HEADER" ]]; then
-        if [[ ! "$entry" =~ ^[0-9a-f]{64}\ \ (.*)$ ]]; then
-          echo "$host has a $MANIFEST with a line this version doesn't understand, so nothing was deployed. Check it, and remove it if it's stale: $entry" >&2
-          exit 1
-        fi
-        path="${BASH_REMATCH[1]}"
+      if [[ ! "$entry" =~ ^[0-9a-f]{64}\ \ (.*)$ ]]; then
+        echo "$host has a $MANIFEST with a line this version doesn't understand, so nothing was deployed. Check it, and remove it if it's stale: $entry" >&2
+        exit 1
       fi
+      path="${BASH_REMATCH[1]}"
       case "$path" in
         .env.example) ;; # Tracked, and it holds no values.
         "" | /* | -* | *..* | data | data/* | .env | .env.* | "$MANIFEST" | "$MANIFEST.tmp")
@@ -110,13 +105,7 @@ main() {
     exit 1
   fi
   present="$(hashed_inventory)"
-  if [[ "$header" == "$MANIFEST_HEADER_V1" ]]; then
-    # Version 1 can only vouch for a path. What's there now is what gets recorded, and from here on content counts too.
-    extras="$(lines_only_in "$(paths_of "$present")" "$previous")"
-    previous="$present"
-  else
-    extras="$(paths_of "$(lines_only_in "$present" "$previous")")"
-  fi
+  extras="$(paths_of "$(lines_only_in "$present" "$previous")")"
   if [[ -n "$extras" ]]; then
     echo "$host has files the last deploy didn't ship, or that changed since, so nothing was deployed. Look at them, then remove them:" >&2
     printf '%s\n' "$extras" >&2

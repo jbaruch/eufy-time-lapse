@@ -149,7 +149,6 @@ describe("scripts/deploy.sh", () => {
   });
 
   const HEADER = "# eufy-time-lapse deployed files, schema_version=2";
-  const V1_HEADER = "# eufy-time-lapse deployed files, schema_version=1";
   const entry = (path: string, content: string): string => `${createHash("sha256").update(content).digest("hex")}  ${path}`;
 
   async function executable(path: string, body: string): Promise<void> {
@@ -361,28 +360,16 @@ describe("scripts/deploy.sh", () => {
     assert.equal(await readFile(join(host, "going-away.txt"), "utf8"), "edited\n");
   });
 
-  it("upgrades a version 1 manifest, recording what's there", async () => {
-    const { repo, host, env } = await world();
-    await mkdir(join(host, "src"));
-    await writeFile(join(host, "compose.yaml"), "older\n");
-    await writeFile(join(host, "src", "cli.ts"), "// older\n");
-    await writeFile(join(host, "dropped.txt"), "older\n");
-    await writeFile(join(host, ".deployed-files"), `${V1_HEADER}\ncompose.yaml\ndropped.txt\nsrc/cli.ts\n`);
-    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
-    assert.equal(result.code, 0, result.stderr);
-    assert.equal(await readFile(join(host, "compose.yaml"), "utf8"), "services: {}\n");
-    assert.equal((await readdir(host)).includes("dropped.txt"), false);
-    assert.equal(await readFile(join(host, ".deployed-files"), "utf8"), `${HEADER}\n${entry("compose.yaml", "services: {}\n")}\n${entry("src/cli.ts", "// code\n")}\n`);
-  });
-
-  it("refuses a file a version 1 manifest doesn't list, and changes nothing", async () => {
+  it("refuses a version 1 manifest, which can't show that a file is what was shipped, and changes nothing", async () => {
     const { repo, host, log, env } = await world();
-    await writeFile(join(host, "unlisted.txt"), "?");
-    await writeFile(join(host, ".deployed-files"), `${V1_HEADER}\ncompose.yaml\n`);
+    await writeFile(join(host, "compose.yaml"), "edited by hand\n");
+    const manifest = "# eufy-time-lapse deployed files, schema_version=1\ncompose.yaml\n";
+    await writeFile(join(host, ".deployed-files"), manifest);
     const result = await bash([script, "somehost", "app"], { cwd: repo, env });
     assert.equal(result.code, 1);
-    assert.match(result.stderr, /unlisted\.txt/);
-    assert.equal(await readFile(join(host, ".deployed-files"), "utf8"), `${V1_HEADER}\ncompose.yaml\n`);
+    assert.match(result.stderr, /doesn't understand/);
+    assert.equal(await readFile(join(host, "compose.yaml"), "utf8"), "edited by hand\n");
+    assert.equal(await readFile(join(host, ".deployed-files"), "utf8"), manifest);
     assert.equal(await readFile(log, "utf8"), "");
   });
 
@@ -393,18 +380,6 @@ describe("scripts/deploy.sh", () => {
     assert.equal(result.code, 1);
     assert.match(result.stderr, /doesn't understand/);
     assert.deepEqual(await readdir(host), [".deployed-files"]);
-    assert.equal(await readFile(log, "utf8"), "");
-  });
-
-  it("refuses an unsafe path in a current manifest too, and leaves what it names", async () => {
-    const { repo, host, log, env } = await world();
-    const outside = join(host, "..", "outside.txt");
-    await writeFile(outside, "keep me");
-    await writeFile(join(host, ".deployed-files"), `${HEADER}\n${entry("../outside.txt", "keep me")}\n`);
-    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
-    assert.equal(result.code, 1);
-    assert.match(result.stderr, /unsafe path/);
-    assert.equal(await readFile(outside, "utf8"), "keep me");
     assert.equal(await readFile(log, "utf8"), "");
   });
 
@@ -469,14 +444,14 @@ describe("scripts/deploy.sh", () => {
     assert.equal(await readFile(log, "utf8"), "");
   });
 
-  for (const [name, entries] of [["an entry that leads through it", "link/keep.txt\n"], ["the link itself and a path through it", "link\nlink/keep.txt\n"]] as const) {
+  for (const [name, entries] of [["an entry that leads through it", ["link/keep.txt"]], ["the link itself and a path through it", ["link", "link/keep.txt"]]] as const) {
     it(`refuses a symlink even when the manifest lists ${name}, and leaves what it points at`, async () => {
       const { repo, host, log, env } = await world();
       const outside = join(host, "..", "elsewhere");
       await mkdir(outside);
       await writeFile(join(outside, "keep.txt"), "keep me");
       await symlink(outside, join(host, "link"));
-      await writeFile(join(host, ".deployed-files"), `# eufy-time-lapse deployed files, schema_version=1\n${entries}`);
+      await writeFile(join(host, ".deployed-files"), `${HEADER}\n${entries.map((path) => entry(path, "keep me")).join("\n")}\n`);
       const result = await bash([script, "somehost", "app"], { cwd: repo, env });
       assert.equal(result.code, 1);
       assert.match(result.stderr, /symlinks or special files/);
@@ -517,12 +492,12 @@ describe("scripts/deploy.sh", () => {
     assert.equal(await readFile(log, "utf8"), "");
   });
 
-  for (const [name, entry] of [["climbs out of the project", "../outside.txt"], ["reads as an option", "-rf"], ["is absolute", "/etc/hostname"], ["is in the data directory", "data/state.sqlite"], ["is the environment file", ".env"], ["is the manifest itself", ".deployed-files"], ["is the manifest's replacement", ".deployed-files.tmp"]] as const) {
+  for (const [name, path] of [["climbs out of the project", "../outside.txt"], ["reads as an option", "-rf"], ["is absolute", "/etc/hostname"], ["is in the data directory", "data/state.sqlite"], ["is the environment file", ".env"], ["is the manifest itself", ".deployed-files"], ["is the manifest's replacement", ".deployed-files.tmp"]] as const) {
     it(`refuses a manifest entry that ${name}, and touches nothing`, async () => {
       const { repo, host, log, env } = await world();
       const outside = join(host, "..", "outside.txt");
       await writeFile(outside, "keep me");
-      await writeFile(join(host, ".deployed-files"), `# eufy-time-lapse deployed files, schema_version=1\n${entry}\n`);
+      await writeFile(join(host, ".deployed-files"), `${HEADER}\n${entry(path, "keep me")}\n`);
       const result = await bash([script, "somehost", "app"], { cwd: repo, env });
       assert.equal(result.code, 1);
       assert.match(result.stderr, /unsafe path/);
