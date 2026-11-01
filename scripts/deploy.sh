@@ -39,6 +39,7 @@ main() {
     local entry
     while IFS= read -r entry; do
       case "$entry" in
+        .env.example) ;; # Tracked, and it holds no values.
         "" | /* | -* | *..* | data | data/* | .env | .env.* | "$MANIFEST")
           echo "$host's $MANIFEST lists an unsafe path, so nothing was deployed. Check it, and remove it if it's stale: $entry" >&2
           exit 1

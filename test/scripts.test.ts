@@ -266,6 +266,17 @@ describe("scripts/deploy.sh", () => {
     });
   }
 
+  it("deploys a second time when the commit ships the example environment file", async () => {
+    const { repo, host, env } = await world();
+    await writeFile(join(repo, ".env.example"), "SETTING=\n");
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-q", "-m", "example");
+    assert.equal((await bash([script, "somehost", "app"], { cwd: repo, env })).code, 0);
+    const again = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(again.code, 0, again.stderr);
+    assert.equal(await readFile(join(host, ".env.example"), "utf8"), "SETTING=\n");
+  });
+
   it("does nothing when only sourced", async () => {
     const { repo, host, env } = await world();
     const result = await bash(["-c", `source '${script}'; echo sourced`], { cwd: repo, env });
