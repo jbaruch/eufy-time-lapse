@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { access, readFile, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
 import { ConfigError, loadConfig } from "../src/config.ts";
 import { CameraLockHeldError, withCameraLock } from "../src/lock.ts";
@@ -146,6 +149,20 @@ describe("Redactor", () => {
     assert.match(text, /connected/);
     assert.match(text, /<8 bytes>/);
     assert.match(text, /\[circular\]/);
+  });
+});
+
+describe("the command line", () => {
+  const run = promisify(execFile);
+  const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
+
+  it("prints its usage on --help, and exits cleanly", async () => {
+    const { stdout } = await run(process.execPath, [cli, "--help"]);
+    assert.match(stdout, /^Usage: timelapse/);
+  });
+
+  it("refuses an unknown command, with the usage and a failing exit code", async () => {
+    await assert.rejects(run(process.execPath, [cli, "nonsense"]), (error: { code: number; stderr: string }) => error.code === 2 && /Usage: timelapse/.test(error.stderr));
   });
 });
 

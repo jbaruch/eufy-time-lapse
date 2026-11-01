@@ -3,9 +3,9 @@
 Records a construction time-lapse from a solar-powered eufy 4G LTE Cam S330 (T86P2) on its built-in SIM.
 The design lives in [`eufy_s330_timelapse_spec.md`](eufy_s330_timelapse_spec.md).
 
-**Status: pre-production.** The probe and the capture service both run against the real camera. Not built
-yet: the offsite S3 archive and the monthly preview render. Frames stay on local storage until the archive
-exists, and nothing deletes them.
+**Status:** the service runs against the real camera on its SIM, at about 98% of first tries in 4K. Still open:
+battery behavior on solar, which sets the sustainable cadence. Not built yet: the offsite S3 archive and the
+monthly preview render. Frames stay on local storage until the archive exists, and nothing deletes them.
 
 ## Requirements
 
@@ -19,7 +19,8 @@ Eufy has no official API, so this speaks its reverse-engineered protocol and nee
 The client is [`@mega-yfue/eufy-sdk`](https://github.com/mega-yfue/eufy-sdk), which uses the same backend as
 the current eufy app. The spec's first choice, `eufy-security-client`, logged in but returned an empty device
 list, and its maintainers say the API it depends on is being shut down. The SDK sits behind an adapter contract,
-so a future client means one new adapter and a new probe run.
+so a future client means one new adapter and a new probe run. How it connects is this project's own, covered in
+[How it reaches the camera](#how-it-reaches-the-camera).
 
 Use a separate Eufy account and share the camera to it from the owner account, then accept the invitation
 in the eufy app while logged in as that account. Store its login on the capture host:
@@ -119,7 +120,33 @@ rate never changes silently. Below `pause_at_or_below_percent` capture stops unt
 **Rendering** leaves out frames below the required size and lists them in the manifest, because one 720p frame
 would otherwise pull a whole 4K video down to 720p. `--include-degraded` puts them back.
 
-**Alerts** post to the webhook in `alerts.webhook_url_file`. Without one they only reach the service log.
+**Alerts** post to the webhook in `alerts.webhook_url_file`. Without one they only reach the service log. Besides
+repeated misses, they cover first-try success falling below `first_try_warn_percent`, since retries get the frame
+but spend battery where no slot count would show it.
+
+### Deploy
+
+`scripts/deploy.sh [ssh-host] [remote-directory]` ships the committed tree, proves the copy by checksum, rebuilds,
+restarts, and waits for the host to report the new revision. `status` shows the running revision at any time.
+
+## How it reaches the camera
+
+The camera sits behind carrier NAT, so every 4K frame comes through a relay. The SDK's own connect was unreliable
+here: 3 of 13 back-to-back tries reached 4K, in sessions of about 33 seconds. `src/adapters/p2p-policy.ts` replaces
+that behavior by wrapping private methods of the SDK's session class:
+
+- It asks for the relay almost at once, and asks again after a 2-second stall. The SDK asks once, so one lost
+  message used to mean sitting dead until its 45-second timeout.
+- It sends no hole-punch bursts and uses one socket, because carrier NAT defeats the punch anyway.
+- It starts the stream once. The SDK starts a running stream again when the level-2 key arrives, and the camera
+  often closed the session right after.
+
+That got 98 of 100 tries to 4K, with a median session of 9.4 seconds, and about 13 seconds when the camera has
+to wake. [`lab/`](lab/README.md) holds the rig that measured it, and section 3.1 of the spec has the findings.
+
+The wrapping depends on SDK internals, so the SDK is pinned exactly and `test/p2p-policy.test.ts` runs against the
+real class. A Dependabot bump that moves those internals fails CI. One that doesn't still needs a run of the rig
+before it reaches the camera.
 
 ## Development
 
@@ -127,3 +154,6 @@ would otherwise pull a whole 4K video down to 720p. `--include-degraded` puts th
 npm ci
 npm run verify
 ```
+
+CI runs the same checks with the production FFmpeg, lints the scripts, scans the history for secrets, and builds
+the image.

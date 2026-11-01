@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The secret scan reads the whole history.
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26.12.1
+          cache: npm
+      - name: Scan for secrets
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Lint scripts
+        run: shellcheck scripts/*.sh
+      - name: Install the production FFmpeg
+        run: |
+          image="$(sed -n 's/^FROM \(mwader\/static-ffmpeg[^ ]*\) AS ffmpeg$/\1/p' Dockerfile)"
+          if [ -z "$image" ]; then
+            echo "Couldn't find the FFmpeg image in the Dockerfile." >&2
+            exit 1
+          fi
+          container="$(docker create "$image" /ffmpeg)"
+          sudo docker cp "$container:/ffmpeg" /usr/local/bin/ffmpeg
+          sudo docker cp "$container:/ffprobe" /usr/local/bin/ffprobe
+          docker rm "$container"
+          ffmpeg -hide_banner -version | head -1
+      - run: npm ci
+      - name: Type-check
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Build the image
+        run: docker build --build-arg "TIMELAPSE_REVISION=$GITHUB_SHA" -t eufy-time-lapse:ci .
+      - name: Start the built image
+        run: |
+          usage="$(docker run --rm eufy-time-lapse:ci --help)"
+          echo "$usage" | head -1
+          echo "$usage" | grep -q "Usage: timelapse"

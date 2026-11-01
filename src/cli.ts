@@ -375,6 +375,11 @@ async function main(argv: string[]): Promise<number> {
     return { settings: loaded, paths: preparePaths(loaded) };
   };
   switch (command) {
+    case "--help":
+    case "-h":
+    case "help":
+      process.stdout.write(USAGE);
+      return 0;
     case "login":
       return await commandLogin(settings().paths);
     case "probe":
