@@ -144,6 +144,10 @@ function readBattery(device: MegaDevice, lastSeenMs: number | undefined): Batter
   if (typeof value !== "number") {
     return { percent: null, observedAt: null, note: "cloud returned no battery value" };
   }
+  // Not a charge at all, so it can't choose a rate, and the record couldn't hold it.
+  if (!Number.isFinite(value) || value < 0 || value > 100) {
+    return { percent: null, observedAt: null, note: `cloud returned a battery value that isn't a percentage: ${value}` };
+  }
   if (lastSeenMs === undefined) return { percent: value, observedAt: null, note: "the cloud gave no report time for this camera" };
   // The newest time on any of the camera's values. The battery's own time isn't exposed, so it may be older than this.
   return { percent: value, observedAt: new Date(lastSeenMs).toISOString(), note: "newest report from the camera; the battery value is at least this old" };

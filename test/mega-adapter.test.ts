@@ -713,6 +713,28 @@ describe("MegaAdapter, when a try's deadline and a failure land together", () =>
   }
 });
 
+describe("MegaAdapter, reading a battery value that isn't a percentage", () => {
+  for (const value of [101, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    it(`calls ${value} unknown, and says what came back`, async () => {
+      const { client, adapter } = setup();
+      client.device = fakeDevice({ getProperty: (name) => (name === "battery" ? { value } : undefined) });
+      const { battery } = await adapter.discoverCamera(SERIAL);
+      assert.deepEqual([battery.percent, battery.observedAt], [null, null]);
+      assert.match(battery.note ?? "", /isn't a percentage/);
+      await adapter.shutdown();
+    });
+  }
+
+  for (const value of [0, 100]) {
+    it(`takes ${value} as it is`, async () => {
+      const { client, adapter } = setup();
+      client.device = fakeDevice({ getProperty: (name) => (name === "battery" ? { value } : undefined) });
+      assert.equal((await adapter.discoverCamera(SERIAL)).battery.percent, value);
+      await adapter.shutdown();
+    });
+  }
+});
+
 describe("MegaAdapter, when the live stream reports an error", () => {
   async function open(): Promise<{ stream: FakeStream; video: NodeJS.ReadableStream; fatal: Error[]; adapter: MegaAdapter }> {
     const client = new FakeClient();
