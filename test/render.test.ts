@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { promisify } from "node:util";
@@ -133,6 +133,74 @@ describe("render", () => {
 
   it("explains an empty selection", async () => {
     await assert.rejects(render({ ...base, state, dataDir: dir.path, from: "2020-01-01", to: "2020-01-02", outputPath: join(dir.path, "renders", "none.mp4") }), (error: RenderError) => error instanceof RenderError && /No frames/.test(error.message));
+  });
+
+  describe("an output path that lands on the service's own files", () => {
+    const frameOne = () => join(dir.path, "spool", "1", "frame.jpg");
+
+    async function assertRefused(outputPath: string): Promise<void> {
+      const before = await readFile(frameOne());
+      const database = await readFile(join(dir.path, "state.sqlite"));
+      await assert.rejects(render({ ...base, state, dataDir: dir.path, outputPath }), (error: RenderError) => error instanceof RenderError && /belongs to the service/.test(error.message));
+      assert.deepEqual(await readFile(frameOne()), before);
+      assert.deepEqual(await readFile(join(dir.path, "state.sqlite")), database);
+      assert.deepEqual(await readdir(join(dir.path, "spool", "1")), ["frame.jpg"]);
+    }
+
+    it("refuses a frame", async () => {
+      await assertRefused(frameOne());
+    });
+
+    it("refuses a new file in a frame's directory", async () => {
+      await assertRefused(join(dir.path, "spool", "1", "video.mp4"));
+    });
+
+    it("refuses the database", async () => {
+      await assertRefused(join(dir.path, "state.sqlite"));
+    });
+
+    it("refuses a file at the top of the data directory", async () => {
+      await assertRefused(join(dir.path, "video.mp4"));
+    });
+
+    it("refuses a path that climbs back out of renders", async () => {
+      await assertRefused(join(dir.path, "renders", "..", "spool", "1", "frame.jpg"));
+    });
+
+    it("refuses a symlink to a frame", async () => {
+      await mkdir(join(dir.path, "renders"), { recursive: true });
+      const link = join(dir.path, "renders", "link-to-frame.mp4");
+      await symlink(frameOne(), link);
+      await assertRefused(link);
+    });
+
+    it("refuses a symlink to nothing yet, which writing would create inside the spool", async () => {
+      await mkdir(join(dir.path, "renders"), { recursive: true });
+      const link = join(dir.path, "renders", "dangling.mp4");
+      await symlink(join(dir.path, "spool", "1", "not-yet.mp4"), link);
+      await assertRefused(link);
+    });
+
+    it("refuses a path through a symlinked directory", async () => {
+      await mkdir(join(dir.path, "renders"), { recursive: true });
+      const link = join(dir.path, "renders", "link-to-spool");
+      await symlink(join(dir.path, "spool"), link);
+      await assertRefused(join(link, "1", "frame.jpg"));
+    });
+
+    it("refuses when only the manifest beside the video would land there", async () => {
+      await mkdir(join(dir.path, "renders"), { recursive: true });
+      await symlink(frameOne(), join(dir.path, "renders", "sidecar.mp4.manifest.json"));
+      await assertRefused(join(dir.path, "renders", "sidecar.mp4"));
+    });
+
+    it("still writes outside the data directory", async () => {
+      const elsewhere = await tempDir();
+      const outputPath = join(elsewhere.path, "video.mp4");
+      const manifest = await render({ ...base, state, dataDir: dir.path, outputPath });
+      assert.equal(manifest.frame_count, 6);
+      await elsewhere.remove();
+    });
   });
 
   describe("a frame that no longer matches its record", () => {

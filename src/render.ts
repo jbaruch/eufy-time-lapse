@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, readFile, readlink, realpath, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import type { CaptureRow, State } from "./state.ts";
 
@@ -88,8 +88,43 @@ async function verifyFrames(chosen: ReturnType<typeof selectFrames>, dataDir: st
   return { selected, exclusions };
 }
 
+/** Where writing to a path would really land, following symlinks, including one that points at nothing yet. */
+async function whereItLeads(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const parent = dirname(path);
+  if (parent === path) return path;
+  let target: string;
+  try {
+    target = await readlink(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return join(await whereItLeads(parent), basename(path));
+  }
+  return whereItLeads(resolve(await whereItLeads(parent), target));
+}
+
+/** FFmpeg overwrites its output, so a path that lands on a frame or the database would destroy it. Inside the data directory, only renders/ is a render's. */
+async function refuseServiceFiles(paths: string[], dataDir: string): Promise<void> {
+  const root = await whereItLeads(resolve(dataDir));
+  const renders = join(root, "renders");
+  for (const path of paths) {
+    const target = await whereItLeads(resolve(path));
+    if ((target === root || target.startsWith(`${root}${sep}`)) && !target.startsWith(`${renders}${sep}`)) {
+      throw new RenderError(`Refusing to write ${path}: it lands on ${target}, which belongs to the service. Nothing was changed. Pick a file under ${renders}, or outside ${root}.`);
+    }
+  }
+}
+
 /** Builds a video purely from stored frames: no camera contact, and source frames stay untouched. Missing slots compress away. */
 export async function render(options: RenderOptions): Promise<RenderManifest> {
+  const listPath = `${options.outputPath}.frames.txt`;
+  const manifestPath = `${options.outputPath}.manifest.json`;
+  await refuseServiceFiles([options.outputPath, listPath, manifestPath], options.dataDir);
+
   const chosen = selectFrames(options.state.capturesBetween(options.from, options.to), options);
   const { selected, exclusions } = await verifyFrames(chosen, options.dataDir);
   if (selected.length === 0) {
@@ -99,7 +134,6 @@ export async function render(options: RenderOptions): Promise<RenderManifest> {
   const lines = selected.map((frame) => `file ${concatQuote(join(options.dataDir, frame.relative_dir, "frame.jpg"))}`);
 
   await mkdir(dirname(options.outputPath), { recursive: true });
-  const listPath = `${options.outputPath}.frames.txt`;
   await writeFile(listPath, `${lines.join("\n")}\n`);
 
   const needsScaling = selected.some((frame) => frame.width !== width || frame.height !== height);
@@ -142,6 +176,6 @@ export async function render(options: RenderOptions): Promise<RenderManifest> {
     inputs: selected.map((frame) => ({ capture_id: frame.capture_id, slot_id: frame.slot_id, frame_received_at: frame.frame_received_at, quality_status: frame.quality_status, width: frame.width, height: frame.height, sha256: frame.sha256 })),
     exclusions,
   };
-  await writeFile(`${options.outputPath}.manifest.json`, `${JSON.stringify(manifest, null, 2)}\n`);
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   return manifest;
 }
