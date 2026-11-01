@@ -22,11 +22,11 @@
     "reading_max_age_hours": 6
   },
   "capture": {
-    "acquisition_timeout_seconds": 60,
+    "acquisition_timeout_seconds": 30,
     "cleanup_timeout_seconds": 10,
     "target_keyframes": 2,
-    "max_attempts": 2,
-    "retry_delay_seconds": 30,
+    "max_attempts": 3,
+    "retry_delay_seconds": 5,
     "slot_deadline_seconds": 180,
     "max_session_seconds_per_day": 6000
   },

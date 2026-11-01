@@ -176,12 +176,12 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
-    it("keeps an undersized frame, marked degraded, and tries once more", async () => {
+    it("keeps an undersized frame, marked degraded, after trying up to its limit for a better one", async () => {
       const small = await rawVideo(root.path, "h264", 640, 360);
       const h = await harness({ open: async () => liveSession(small, { codec: "h264" }) });
       await runAt(h, [0]);
       assert.equal(h.state.getSlot(SLOT_0800)?.state, "captured_degraded");
-      assert.equal(h.adapter.opens, 2);
+      assert.equal(h.adapter.opens, DEFAULT_SERVICE_CONFIG.capture.max_attempts);
       assert.equal(h.state.allCaptures()[0]?.quality_status, "degraded");
       h.state.close();
     });
@@ -199,7 +199,7 @@ describe("CaptureService", () => {
     });
 
     it("records a miss with its reason, keeps the evidence, and carries on with the next slot", async () => {
-      const script = [hangUp, hangUp, fresh];
+      const script = [hangUp, hangUp, hangUp, fresh];
       const h = await harness({ open: async () => (script.shift() as () => Promise<LiveSession>)() });
       await runAt(h, [0]);
       const slot = h.state.getSlot(SLOT_0800);
@@ -413,7 +413,7 @@ describe("CaptureService", () => {
     });
 
     it("stops when the day's camera-contact budget is spent, and that survives a restart", async () => {
-      const config = serviceConfig({ capture: { ...DEFAULT_SERVICE_CONFIG.capture, max_session_seconds_per_day: 140 } });
+      const config = serviceConfig({ capture: { ...DEFAULT_SERVICE_CONFIG.capture, max_session_seconds_per_day: 120 } });
       const h = await harness({ config });
       await runAt(h, [0]);
       assert.equal(h.adapter.opens, 1);

@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { parseArgs } from "node:util";
 import { createMegaClient, MegaAdapter } from "../src/adapters/mega.ts";
-import { SDK_POLICY, setConnectPolicy, setPacketListener } from "../src/adapters/p2p-policy.ts";
+import { CELLULAR_POLICY, SDK_POLICY, setConnectPolicy, setPacketListener } from "../src/adapters/p2p-policy.ts";
 import type { ConnectPolicy, PacketEvent } from "../src/adapters/p2p-policy.ts";
 import { acquireFrame } from "../src/capture/acquire.ts";
 import { loadConfig } from "../src/config.ts";
@@ -17,10 +17,7 @@ import { createRedactingLogger, Redactor } from "../src/logging.ts";
 
 const VARIANTS: Record<string, ConnectPolicy> = {
   sdk: SDK_POLICY,
-  quiet: { relayAfterRounds: 6, probeSockets: false, holePunch: true, stopLookupsOnRelay: true, relayStallMs: null },
-  reroll: { relayAfterRounds: 6, probeSockets: false, holePunch: true, stopLookupsOnRelay: true, relayStallMs: 2000 },
-  nopunch: { relayAfterRounds: 6, probeSockets: false, holePunch: false, stopLookupsOnRelay: true, relayStallMs: null },
-  relist: { relayAfterRounds: 6, probeSockets: false, holePunch: false, stopLookupsOnRelay: true, relayStallMs: 2000 },
+  cellular: CELLULAR_POLICY,
 };
 
 // Only these keep their payload in the trace. Everything else, lookups above all, carries the account's lookup key.
@@ -53,7 +50,7 @@ interface Milestones {
 
 const { values } = parseArgs({
   options: {
-    variants: { type: "string", default: "sdk,quiet" },
+    variants: { type: "string", default: "sdk,cellular" },
     rounds: { type: "string", default: "20" },
     gap: { type: "string", default: "0" },
     name: { type: "string", default: "run" },

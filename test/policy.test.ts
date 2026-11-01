@@ -86,7 +86,7 @@ describe("decide", () => {
 
   it("reserves a full slot's worst case before spending the session budget", () => {
     const reserve = reservedSessionMs(config.capture);
-    assert.equal(reserve, 140_000);
+    assert.equal(reserve, 120_000);
     const limit = config.capture.max_session_seconds_per_day * 1000;
     assert.equal(decide(input({ sessionUsedMs: limit - reserve }), config, always).action, "capture");
     assert.equal(decide(input({ sessionUsedMs: limit - reserve + 1 }), config, always).action, "skip");

@@ -31,6 +31,9 @@ interface Internals {
   connected: boolean;
   startPunchProbes(): Promise<void>;
   beginCheckCam(address: { host: string; port: number }, socket: unknown): void;
+  level2Key: Buffer | undefined;
+  liveStartedChannels: Map<number, string>;
+  startLiveMedia(channel: number, accountId: string, homeBaseAttached: boolean, options: { force?: boolean } | undefined): void;
   sendLookups(): void;
   onMessage(message: Buffer, remote: { address: string; port: number }, socket?: unknown): void;
 }
@@ -52,7 +55,7 @@ function realSession(): { session: Internals; sent: SentPacket[]; relayStep: () 
   return { session, sent, relayStep: () => session.relay?.step };
 }
 
-const quiet: ConnectPolicy = { relayAfterRounds: 2, probeSockets: false, holePunch: false, stopLookupsOnRelay: true, relayStallMs: 2000 };
+const quiet: ConnectPolicy = { relayAfterRounds: 2, probeSockets: false, holePunch: false, stopLookupsOnRelay: true, relayStallMs: 2000, singleStart: true };
 
 function relayPacket(): Buffer {
   return Buffer.concat([Buffer.from([0xf1, 0x83, 0x00, 0x1c]), Buffer.from([0xaa, 0xcc, 0x19, 0x1b]), Buffer.alloc(20, 7), Buffer.alloc(4)]);
@@ -232,6 +235,47 @@ describe("connect policy, against the real SDK session", () => {
       t.mock.timers.tick(60_000);
       session.sendLookups();
       assert.equal(relayStep(), "request");
+    });
+  });
+
+  describe("when the level-2 key arrives after the stream started without it", () => {
+    function started(): { session: Internals; actions: () => Array<string | undefined> } {
+      const debug: unknown[][] = [];
+      const logger = { debug: (...args: unknown[]) => debug.push(args), info: () => {}, warn: () => {}, error: () => {} };
+      const session = new P2PSession({ stationSn: "T86P2FULLSERIAL1234", p2pDid: DID, noBroadcast: true, logger }) as unknown as Internals;
+      session.liveStartedChannels.set(0, "l1");
+      session.level2Key = Buffer.alloc(32, 1);
+      const actions = (): Array<string | undefined> => debug.map((args) => (args[1] as { phase?: string; action?: string } | undefined)).filter((trace) => trace?.phase === "media-command").map((trace) => trace?.action);
+      return { session, actions };
+    }
+
+    it("sends a keepalive instead of starting the stream again", () => {
+      setConnectPolicy(quiet);
+      const { session, actions } = started();
+      session.startLiveMedia(0, "account", false, undefined);
+      assert.deepEqual(actions(), ["keepalive"]);
+    });
+
+    it("starts again, as the SDK does, by default", () => {
+      setConnectPolicy(SDK_POLICY);
+      const { session, actions } = started();
+      session.startLiveMedia(0, "account", false, undefined);
+      assert.deepEqual(actions(), ["start"]);
+    });
+
+    it("still starts a stream that hasn't started", () => {
+      setConnectPolicy(quiet);
+      const { session, actions } = started();
+      session.liveStartedChannels.clear();
+      session.startLiveMedia(0, "account", false, undefined);
+      assert.deepEqual(actions(), ["start"]);
+    });
+
+    it("still obeys a forced start, the SDK's recovery for a stream that served nothing", () => {
+      setConnectPolicy(quiet);
+      const { session, actions } = started();
+      session.startLiveMedia(0, "account", false, { force: true });
+      assert.deepEqual(actions(), ["start"]);
     });
   });
 

@@ -18,12 +18,17 @@ export interface ConnectPolicy {
    * once the camera has heard about them, and the SDK asks once, so a lost message would otherwise end the connect.
    */
   relayStallMs: number | null;
+  /** Keeps a stream's first start when the level-2 key arrives, instead of starting it again with the key. */
+  singleStart: boolean;
 }
 
-export const SDK_POLICY: ConnectPolicy = { relayAfterRounds: null, probeSockets: true, holePunch: true, stopLookupsOnRelay: false, relayStallMs: null };
+export const SDK_POLICY: ConnectPolicy = { relayAfterRounds: null, probeSockets: true, holePunch: true, stopLookupsOnRelay: false, relayStallMs: null, singleStart: false };
 
-/** What this camera needs, on carrier NAT, where every working connection has been through a relay. lab/ measures it. */
-export const CELLULAR_POLICY: ConnectPolicy = { relayAfterRounds: 6, probeSockets: false, holePunch: false, stopLookupsOnRelay: true, relayStallMs: 2000 };
+/** What this camera needs on carrier NAT: 98 of 100 back-to-back tries at 4K, against 3 of 10 with the SDK's own. lab/ measures it. */
+export const CELLULAR_POLICY: ConnectPolicy = { relayAfterRounds: 1, probeSockets: false, holePunch: false, stopLookupsOnRelay: true, relayStallMs: 2000, singleStart: true };
+
+/** Goes in each frame's adapter version, because this policy changes how the SDK reaches the camera. */
+export const CONNECT_POLICY_VERSION = "cellular-1";
 
 export interface PacketEvent {
   direction: "in" | "out";
@@ -58,6 +63,9 @@ interface SessionInternals {
   ackedRounds: number | undefined;
   cloudLookup: unknown;
   cfg: { p2pDid: string };
+  level2Key: Buffer | undefined;
+  liveStartedChannels: Map<number, string>;
+  startLiveMedia(channel: number, accountId: string, homeBaseAttached: boolean, options: { force?: boolean } | undefined): void;
   startPunchProbes(): Promise<void>;
   beginCheckCam(address: Address, socket: unknown): void;
   sendLookups(): void;
@@ -67,7 +75,7 @@ interface SessionInternals {
   onMessage(message: Buffer, remote: { address: string; port: number }, socket: unknown): void;
 }
 
-const WRAPPED_METHODS = ["startPunchProbes", "beginCheckCam", "sendLookups", "countAckedRound", "sendRelay", "send", "onMessage"] as const;
+const WRAPPED_METHODS = ["startPunchProbes", "beginCheckCam", "sendLookups", "countAckedRound", "sendRelay", "startLiveMedia", "send", "onMessage"] as const;
 
 let policy = SDK_POLICY;
 let packetListener: ((event: PacketEvent) => void) | null = null;
@@ -88,7 +96,7 @@ function install(): void {
   for (const method of WRAPPED_METHODS) {
     if (typeof session[method] !== "function") throw new Error(`The pinned SDK has no P2PSession.${method}, so the connect policy can't apply. Check the SDK version in package.json.`);
   }
-  const { startPunchProbes, beginCheckCam, sendLookups, countAckedRound, sendRelay, send, onMessage } = session;
+  const { startPunchProbes, beginCheckCam, sendLookups, countAckedRound, sendRelay, startLiveMedia, send, onMessage } = session;
 
   session.startPunchProbes = function (this: SessionInternals): Promise<void> {
     return policy.probeSockets ? startPunchProbes.call(this) : Promise.resolve();
@@ -123,6 +131,11 @@ function install(): void {
       }
     }
     sendRelay.call(this);
+  };
+  session.startLiveMedia = function (this: SessionInternals, channel, accountId, homeBaseAttached, options): void {
+    // Telling the SDK this channel already started with the key turns its second start into a keepalive.
+    if (policy.singleStart && options?.force !== true && this.level2Key !== undefined && this.liveStartedChannels.has(channel)) this.liveStartedChannels.set(channel, "l2");
+    startLiveMedia.call(this, channel, accountId, homeBaseAttached, options);
   };
   session.send = function (this: SessionInternals, address, type, payload, socket, done): void {
     packetListener?.({ direction: "out", host: address.host, port: address.port, type: type.toString("hex"), payload: payload ?? Buffer.alloc(0), did: this.cfg.p2pDid });

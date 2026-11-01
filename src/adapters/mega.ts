@@ -14,7 +14,7 @@ import {
   StationUnreachableError,
 } from "@mega-yfue/eufy-sdk";
 import { CaptureFailure } from "./adapter.ts";
-import { CELLULAR_POLICY, setConnectPolicy } from "./p2p-policy.ts";
+import { CELLULAR_POLICY, CONNECT_POLICY_VERSION, setConnectPolicy } from "./p2p-policy.ts";
 import type {
   AbortCause,
   AuthInput,
@@ -155,7 +155,7 @@ function isCameraError(error: unknown): error is Error {
 
 export class MegaAdapter implements CameraAdapter {
   readonly name = "@mega-yfue/eufy-sdk";
-  readonly version = pinnedVersion();
+  readonly version = `${pinnedVersion()}+${CONNECT_POLICY_VERSION}`;
 
   private readonly client: MegaClient;
   private readonly warn: (message: string) => void;

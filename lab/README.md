@@ -8,7 +8,7 @@ A measurement rig, not part of the service: nothing in `src` imports it, and `.d
 docker compose stop timelapse
 docker compose run -d --name eufy-lab --no-deps \
   -v "$PWD/src:/app/src:ro" -v "$PWD/lab:/app/lab:ro" \
-  --entrypoint node timelapse lab/hammer.ts --variants sdk,quiet --rounds 20 --name compare
+  --entrypoint node timelapse lab/hammer.ts --variants sdk,cellular --rounds 20 --name compare
 docker logs -f eufy-lab
 ```
 
