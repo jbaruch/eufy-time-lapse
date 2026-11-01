@@ -8,7 +8,7 @@ import { CaptureFailure } from "../src/adapters/adapter.ts";
 import type { AuthState, CameraInfo, LiveSession } from "../src/adapters/adapter.ts";
 import { DEFAULT_SERVICE_CONFIG } from "../src/service-config.ts";
 import type { ServiceConfig } from "../src/service-config.ts";
-import { CameraLockHeldError } from "../src/lock.ts";
+import { CameraLockHeldError, withCameraLock } from "../src/lock.ts";
 import { CaptureService, parseCaptureMetadata, scheduleRevision } from "../src/service.ts";
 import type { CaptureMetadata } from "../src/service.ts";
 import { State } from "../src/state.ts";
@@ -239,8 +239,7 @@ describe("CaptureService", () => {
 
     it("skips rather than fights when another process holds the camera", async () => {
       const h = await harness();
-      await writeFile(join(h.dataDir, "camera.lock"), "");
-      await runAt(h, [0]);
+      await withCameraLock(join(h.dataDir, "camera-lock.sqlite"), async () => runAt(h, [0]), { now: () => h.clock.ms });
       assert.equal(h.adapter.opens, 0);
       assert.deepEqual([h.state.getSlot(SLOT_0800)?.state, h.state.getSlot(SLOT_0800)?.reason], ["skipped_policy", "camera_busy"]);
       assert.equal(h.state.sessionUsedMs("2026-07-01"), 0, "a capture that never ran costs nothing");
@@ -549,9 +548,7 @@ describe("CaptureService", () => {
 
     it("gives the reservation back when the lock proves no try began", async () => {
       const h = await harness();
-      await writeFile(join(h.dataDir, "camera.lock"), "another-holder");
-      await utimes(join(h.dataDir, "camera.lock"), new Date(h.clock.ms), new Date(h.clock.ms));
-      await h.service.tick(h.signal);
+      await withCameraLock(join(h.dataDir, "camera-lock.sqlite"), async () => h.service.tick(h.signal), { now: () => h.clock.ms });
       assert.equal(h.adapter.opens, 0);
       assert.equal(h.state.getSlot(SLOT_0800)?.reason, "camera_busy");
       assert.equal(h.state.sessionUsedMs("2026-07-01"), 0);
@@ -577,7 +574,7 @@ describe("CaptureService", () => {
       let dataDir = "";
       const h = await harness({
         open: async (signal) => {
-          await rm(join(dataDir, "camera.lock"));
+          await rm(join(dataDir, "camera-lock.sqlite"));
           t.mock.timers.tick(5_000);
           while (!signal.aborted) await new Promise((resolve) => setImmediate(resolve));
           throw new CaptureFailure("aborted", "connect", "stopped");
@@ -664,9 +661,7 @@ describe("CaptureService", () => {
 
     it("gives its reservation back when the lock proves no try began", async () => {
       const h = await harness();
-      await writeFile(join(h.dataDir, "camera.lock"), "another-holder");
-      await utimes(join(h.dataDir, "camera.lock"), new Date(h.clock.ms), new Date(h.clock.ms));
-      await assert.rejects(h.service.captureManual(h.signal), CameraLockHeldError);
+      await withCameraLock(join(h.dataDir, "camera-lock.sqlite"), async () => assert.rejects(h.service.captureManual(h.signal), CameraLockHeldError), { now: () => h.clock.ms });
       assert.equal(h.state.sessionUsedMs("2026-07-01"), 0);
       h.state.close();
     });

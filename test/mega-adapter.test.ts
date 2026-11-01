@@ -617,6 +617,13 @@ describe("MegaAdapter, when disconnecting fails", () => {
     await assert.rejects(adapter.shutdown(), RangeError);
   });
 
+  it("treats a programming error as a bug even when it has a code", async () => {
+    const { client, adapter } = refusing(Object.assign(new TypeError("bad argument"), { code: "ERR_INVALID_ARG_TYPE" }));
+    client.sessions.set(SERIAL, {});
+    await assert.rejects(adapter.sweepConnections(), TypeError);
+    await assert.rejects(adapter.shutdown(), TypeError);
+  });
+
   it("hands a sweep's unexpected failure to the fatal path, rather than logging and carrying on", async (t) => {
     t.mock.timers.enable({ apis: ["setInterval"] });
     const client = new FakeClient();

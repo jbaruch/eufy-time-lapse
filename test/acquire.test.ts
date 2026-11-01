@@ -311,6 +311,34 @@ describe("acquireFrame", () => {
     assert.equal(record.cleanup.status, "timeout");
   });
 
+  it("reports a teardown that fails after its timeout has passed, instead of absorbing it", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let fail = (_error: Error): void => {};
+    const late: Error[] = [];
+    const hanging = (): Promise<never> =>
+      new Promise((_resolve, reject) => {
+        fail = reject;
+      });
+    let tearingDown = false;
+    const { result } = attempt(
+      {
+        open: async () => liveSession(h265),
+        teardown: () => {
+          tearingDown = true;
+          return hanging();
+        },
+      },
+      { cleanupTimeoutMs: 30, onLateFailure: (error) => late.push(error) },
+    );
+    await until(() => tearingDown);
+    t.mock.timers.tick(30);
+    assert.equal((await result).cleanup.status, "timeout");
+    assert.equal(late.length, 0);
+    fail(new RangeError("a bug, late"));
+    await until(() => late.length > 0);
+    assert.ok(late[0] instanceof RangeError);
+  });
+
   it("stops on a termination signal and releases the camera", async () => {
     const controller = new AbortController();
     const silent = { ...liveSession(Buffer.alloc(0)), video: new PassThrough(), audio: new PassThrough() };

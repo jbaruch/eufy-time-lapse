@@ -35,6 +35,7 @@ const P2P_IDLE_MS = 5_000;
 const CLOSE_POLL_MS = 100;
 const SWEEP_INTERVAL_MS = 5_000;
 const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set(["ENETUNREACH", "ENETDOWN", "EHOSTUNREACH", "EHOSTDOWN", "ENOTFOUND", "EAI_AGAIN", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE"]);
+const SOCKET_GONE_CODES: ReadonlySet<string> = new Set(["ERR_SOCKET_DGRAM_NOT_RUNNING", "ERR_SOCKET_CLOSED", "ERR_STREAM_DESTROYED", "EBADF"]);
 /** What the pinned SDK says when it can't set up a session. test/mega-adapter.test.ts holds these wordings. */
 const SDK_CONNECT_FAILURE = /^P2P connect timeout for |^station .* is not in the device list$|^no P2P endpoint \(p2p_did\) for station /;
 const TELEMETRY_NAME = /signal|rssi|band|cellular|network|lte|charging|solar|power|quality/i;
@@ -138,9 +139,10 @@ function readTelemetry(device: MegaDevice): Record<string, string | number | boo
   return telemetry;
 }
 
-/** How closing a session fails: a socket-level error, which Node reports with a code. Anything else is a bug. */
+/** How closing a session fails: the network, or a socket already gone. Anything else, even with a code, is a bug. */
 function isDisconnectFailure(error: unknown): error is Error {
-  return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === "string";
+  const code = (error as NodeJS.ErrnoException).code ?? "";
+  return error instanceof Error && (NETWORK_ERROR_CODES.has(code) || SOCKET_GONE_CODES.has(code));
 }
 
 /** The network being down, however Node reports it. */

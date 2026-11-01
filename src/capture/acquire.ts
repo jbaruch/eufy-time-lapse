@@ -24,6 +24,8 @@ export interface AcquireOptions {
   minHeight: number;
   signal?: AbortSignal;
   now?: () => Date;
+  /** Gets a teardown's failure after its timeout has passed, when nothing is left to reject to. By default it ends the process, as any bug should. */
+  onLateFailure?: (error: Error) => void;
 }
 
 export type StreamStop = "target_reached" | "deadline" | "stream_ended";
@@ -162,15 +164,30 @@ function collectStream(
   return { stats, done };
 }
 
-async function boundedTeardown(adapter: CameraAdapter, cameraKey: string, timeoutMs: number): Promise<CleanupResult> {
+function crash(error: Error): void {
+  setImmediate(() => {
+    throw error;
+  });
+}
+
+async function boundedTeardown(adapter: CameraAdapter, cameraKey: string, timeoutMs: number, onLateFailure: (error: Error) => void): Promise<CleanupResult> {
   let timer: NodeJS.Timeout | undefined;
+  let decided = false;
   const timedOut = new Promise<CleanupResult>((resolve) => {
     timer = setTimeout(() => resolve({ status: "timeout", detail: `teardown did not finish within ${timeoutMs} ms` }), timeoutMs);
   });
   // An adapter reports a teardown it understands as a result, so that fault can't cost the frame. A rejection is a bug.
-  const result = await Promise.race([adapter.teardown(cameraKey, timeoutMs), timedOut]);
-  clearTimeout(timer);
-  return result;
+  const attempted = adapter.teardown(cameraKey, timeoutMs);
+  // The race below would quietly absorb a rejection that comes after the timeout has won.
+  attempted.catch((error: Error) => {
+    if (decided) onLateFailure(error);
+  });
+  try {
+    return await Promise.race([attempted, timedOut]);
+  } finally {
+    decided = true;
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -208,7 +225,7 @@ export async function acquireFrame(options: AcquireOptions): Promise<AttemptReco
   } finally {
     clearTimeout(deadline);
     options.signal?.removeEventListener("abort", onExternalAbort);
-    cleanup = await boundedTeardown(options.adapter, options.cameraKey, options.cleanupTimeoutMs);
+    cleanup = await boundedTeardown(options.adapter, options.cameraKey, options.cleanupTimeoutMs, options.onLateFailure ?? crash);
   }
   const releasedAt = now();
 

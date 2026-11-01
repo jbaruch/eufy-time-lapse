@@ -143,6 +143,11 @@ export class CaptureService {
   private lastPruneDate: string | undefined;
   /** A failure from background work, which the next tick raises so it takes the same path as any other crash. */
   private backgroundFailure: Error | undefined;
+  private readonly onBackgroundFailure = (error: Error): void => {
+    this.backgroundFailure ??= error;
+  };
+  /** How many stray camera connections have been alerted about, so an old one doesn't keep re-raising. */
+  private unexpectedSeen = 0;
 
   constructor(options: ServiceOptions) {
     this.options = options;
@@ -158,7 +163,7 @@ export class CaptureService {
   }
 
   private get lockPath(): string {
-    return join(this.options.dataDir, "camera.lock");
+    return join(this.options.dataDir, "camera-lock.sqlite");
   }
 
   private get lockOptions(): LockOptions {
@@ -328,9 +333,7 @@ export class CaptureService {
     let starting: CameraAdapter | undefined;
     try {
       if (this.adapter === undefined) {
-        starting = this.options.createAdapter((error) => {
-          this.backgroundFailure = error;
-        });
+        starting = this.options.createAdapter(this.onBackgroundFailure);
         const auth = await starting.authenticate();
         if (auth.status !== "authenticated") throw new CaptureFailure("auth_required", "auth", "Eufy wants a manual login step. Run the login command in a terminal.");
         this.adapter = starting;
@@ -476,6 +479,7 @@ export class CaptureService {
           log: this.options.log,
           sleep: this.sleep,
           now: this.now,
+          onLateFailure: this.onBackgroundFailure,
         }),
         this.lockOptions,
       );
@@ -500,15 +504,14 @@ export class CaptureService {
     if ([chosen, ...otherTries].some((record) => record.cleanup.status === "timeout")) {
       // Its teardown is still running, and could cut off a later capture on the same adapter. Not awaited: it may hang too.
       this.adapter = undefined;
-      adapter.shutdown().catch((error: Error) => {
-        this.backgroundFailure = error;
-      });
+      adapter.shutdown().catch(this.onBackgroundFailure);
     }
 
     const cleanupFault = [chosen, ...otherTries].find((record) => record.cleanup.status !== "ok");
     await this.alerts.set("cleanup_failed", cleanupFault !== undefined, `the camera connection may not have closed: ${cleanupFault?.cleanup.detail ?? ""}`);
     const unexpected = adapter.unexpectedConnectionCount();
-    await this.alerts.set("unexpected_wakes", unexpected > 0, `${unexpected} camera connection(s) opened outside a capture`);
+    await this.alerts.set("unexpected_wakes", unexpected > this.unexpectedSeen, `${unexpected - this.unexpectedSeen} camera connection(s) opened outside a capture`);
+    this.unexpectedSeen = unexpected;
 
     if (chosen.frame !== null) {
       const captureId = randomUUID();
@@ -737,6 +740,7 @@ export class CaptureService {
         log: this.options.log,
         sleep: this.sleep,
         now: this.now,
+        onLateFailure: this.onBackgroundFailure,
       }),
       this.lockOptions,
     ).catch(giveBackIfNoTryBegan);
