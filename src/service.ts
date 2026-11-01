@@ -389,6 +389,7 @@ export class CaptureService {
     if (due !== undefined) {
       await this.processSlot(due, signal);
       await this.alerts.clear("service_crashed");
+      await this.alerts.retryOwed();
       return 0;
     }
     await this.renewLoginIfDue();

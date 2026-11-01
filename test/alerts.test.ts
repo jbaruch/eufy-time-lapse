@@ -92,10 +92,11 @@ describe("AlertTracker, when a message doesn't arrive", () => {
     await dir.remove();
   });
 
-  function setup(): { tracker: AlertTracker; sent: string[]; delivering: { now: boolean }; clock: { ms: number }; state: State } {
+  function setup(): { tracker: AlertTracker; sent: string[]; delivering: { now: boolean }; clock: { ms: number }; state: State; path: string } {
     run += 1;
     const clock = { ms: Date.parse("2026-07-01T00:00:00Z") };
-    const state = new State(join(dir.path, `undelivered-${run}.sqlite`), () => new Date(clock.ms));
+    const path = join(dir.path, `undelivered-${run}.sqlite`);
+    const state = new State(path, () => new Date(clock.ms));
     const sent: string[] = [];
     const delivering = { now: false };
     const tracker = new AlertTracker(
@@ -107,7 +108,7 @@ describe("AlertTracker, when a message doesn't arrive", () => {
       24,
       () => new Date(clock.ms),
     );
-    return { tracker, sent, delivering, clock, state };
+    return { tracker, sent, delivering, clock, state, path };
   }
 
   it("tries again at the next check, not a day later, and says when the problem began", async () => {
@@ -153,6 +154,79 @@ describe("AlertTracker, when a message doesn't arrive", () => {
     assert.deepEqual(sent, []);
     assert.equal(state.getAlert("x"), undefined);
     state.close();
+  });
+
+  it("keeps owing a recovery that didn't arrive, and sends it once when delivery returns", async () => {
+    const { tracker, sent, delivering, state } = setup();
+    delivering.now = true;
+    await tracker.raise("x", "broken");
+    delivering.now = false;
+    await tracker.clear("x");
+    assert.deepEqual(state.listOwedRecoveries().map((owed) => owed.key), ["x"]);
+    await tracker.retryOwed();
+    assert.equal(sent.length, 1, "still only the problem");
+    delivering.now = true;
+    await tracker.retryOwed();
+    assert.match(sent[1] ?? "", /recovered: broken/);
+    assert.equal(state.getAlert("x"), undefined);
+    await tracker.retryOwed();
+    assert.equal(sent.length, 2, "and only once");
+    state.close();
+  });
+
+  it("doesn't count a problem that ended as still going on", async () => {
+    const { tracker, delivering, state } = setup();
+    delivering.now = true;
+    await tracker.raise("x", "broken");
+    delivering.now = false;
+    await tracker.clear("x");
+    assert.deepEqual(state.listAlerts(), []);
+    state.close();
+  });
+
+  it("leaves retries of an owed recovery to retryOwed", async () => {
+    const { tracker, sent, delivering, state } = setup();
+    delivering.now = true;
+    await tracker.raise("x", "broken");
+    delivering.now = false;
+    await tracker.clear("x");
+    delivering.now = true;
+    await tracker.clear("x");
+    assert.equal(sent.length, 1, "a second clear doesn't send");
+    assert.equal(state.listOwedRecoveries().length, 1);
+    state.close();
+  });
+
+  it("drops an owed recovery when the problem comes back", async () => {
+    const { tracker, sent, delivering, state } = setup();
+    delivering.now = true;
+    await tracker.raise("x", "broken");
+    delivering.now = false;
+    await tracker.clear("x");
+    delivering.now = true;
+    await tracker.raise("x", "broken again");
+    assert.deepEqual(state.listOwedRecoveries(), []);
+    assert.deepEqual(state.listAlerts().map((alert) => alert.key), ["x"]);
+    await tracker.retryOwed();
+    assert.equal(sent.length, 1, "neither a recovery nor a second start: for the reader it never stopped");
+    state.close();
+  });
+
+  it("survives a restart still owing a recovery", async () => {
+    const { tracker, sent, delivering, clock, state, path } = setup();
+    delivering.now = true;
+    await tracker.raise("x", "broken");
+    delivering.now = false;
+    await tracker.clear("x");
+    state.close();
+    const reopened = new State(path, () => new Date(clock.ms));
+    await new AlertTracker(reopened, async (text) => {
+      sent.push(text);
+      return true;
+    }, 24, () => new Date(clock.ms)).retryOwed();
+    assert.match(sent[1] ?? "", /recovered: broken/);
+    assert.equal(reopened.getAlert("x"), undefined);
+    reopened.close();
   });
 
   it("survives a restart still owing the message", async () => {

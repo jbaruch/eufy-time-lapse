@@ -77,6 +77,7 @@ const MIGRATIONS: readonly string[] = [
   CREATE TABLE alerts (key TEXT PRIMARY KEY, detail TEXT NOT NULL, active_since TEXT NOT NULL, last_sent_at TEXT NOT NULL);
   CREATE TABLE events (at TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL);
   `,
+  `ALTER TABLE alerts ADD COLUMN recovery_owed_since TEXT;`,
 ];
 
 export type SlotState = "pending" | "running" | "captured" | "captured_degraded" | "missed" | "skipped_policy";
@@ -135,6 +136,15 @@ export interface UnlinkedCapture extends CaptureRow {
   slot_id: string;
   slot_state: SlotState;
   slot_capture_id: string | null;
+}
+
+export interface AlertRow {
+  key: string;
+  detail: string;
+  active_since: string;
+  last_sent_at: string;
+  /** When the problem ended, while nobody has been told yet. */
+  recovery_owed_since: string | null;
 }
 
 export interface BatteryRow {
@@ -412,17 +422,26 @@ export class State {
     return this.all("SELECT state, reason, COUNT(*) AS count FROM slots WHERE scheduled_at_utc >= ? AND scheduled_at_utc <= ? GROUP BY state, reason", sinceUtc, untilUtc);
   }
 
-  getAlert(key: string): { key: string; detail: string; active_since: string; last_sent_at: string } | undefined {
+  getAlert(key: string): AlertRow | undefined {
     return this.one("SELECT * FROM alerts WHERE key = ?", key);
   }
 
-  listAlerts(): Array<{ key: string; detail: string; active_since: string; last_sent_at: string }> {
-    return this.all("SELECT * FROM alerts ORDER BY active_since");
+  /** Problems still going on. One that has ended, with its recovery message still owed, isn't among them. */
+  listAlerts(): AlertRow[] {
+    return this.all("SELECT * FROM alerts WHERE recovery_owed_since IS NULL ORDER BY active_since");
+  }
+
+  listOwedRecoveries(): AlertRow[] {
+    return this.all("SELECT * FROM alerts WHERE recovery_owed_since IS NOT NULL ORDER BY recovery_owed_since");
+  }
+
+  oweRecovery(key: string, at: string): void {
+    this.db.prepare("UPDATE alerts SET recovery_owed_since = ? WHERE key = ?").run(at, key);
   }
 
   upsertAlert(key: string, detail: string, activeSince: string, lastSentAt: string): void {
     this.db
-      .prepare("INSERT INTO alerts (key, detail, active_since, last_sent_at) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET detail = excluded.detail, last_sent_at = excluded.last_sent_at")
+      .prepare("INSERT INTO alerts (key, detail, active_since, last_sent_at) VALUES (?, ?, ?, ?) ON CONFLICT (key) DO UPDATE SET recovery_owed_since = NULL, detail = excluded.detail, last_sent_at = excluded.last_sent_at")
       .run(key, detail, activeSince, lastSentAt);
   }
 

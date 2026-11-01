@@ -61,6 +61,7 @@ describe("CaptureService", () => {
     adapter: MockAdapter;
     created: { count: number };
     notices: string[];
+    delivery: { ok: boolean };
     dataDir: string;
     clock: { ms: number };
     disk: { mb: number };
@@ -76,6 +77,7 @@ describe("CaptureService", () => {
     const now = (): Date => new Date(clock.ms);
     const disk = { mb: 50_000 };
     const notices: string[] = [];
+    const delivery = { ok: true };
     const adapter = new MockAdapter({ open: options.open ?? fresh, camera: options.camera ?? reading(80), ...(options.teardown ? { teardown: options.teardown } : {}), ...(options.authFailure ? { authFailure: options.authFailure } : {}), ...(options.shutdownFailure ? { shutdownFailure: options.shutdownFailure } : {}), ...(options.auth ? { auth: options.auth } : {}) });
     const created = { count: 0 };
     const build = (state: State): CaptureService =>
@@ -94,7 +96,7 @@ describe("CaptureService", () => {
         log: () => {},
         notify: async (text) => {
           notices.push(text);
-          return true;
+          return delivery.ok;
         },
         now,
         sleep: options.sleep ?? (async () => {}),
@@ -107,6 +109,7 @@ describe("CaptureService", () => {
       adapter,
       created,
       notices,
+      delivery,
       dataDir,
       clock,
       disk,
@@ -125,6 +128,26 @@ describe("CaptureService", () => {
       while ((await h.service.tick(h.signal)) === 0);
     }
   }
+
+  describe("alerts that owe a recovery", () => {
+    it("tries a recovery that didn't arrive again at each slot", async () => {
+      const h = await harness();
+      const at = new Date(AT_0800).toISOString();
+      h.state.upsertAlert("x", "broken", at, at);
+      h.state.oweRecovery("x", at);
+      h.delivery.ok = false;
+      await runAt(h, [0]);
+      assert.equal(h.notices.filter((notice) => notice.includes("recovered: broken")).length, 1);
+      assert.equal(h.state.listOwedRecoveries().length, 1);
+      h.delivery.ok = true;
+      await runAt(h, [5]);
+      assert.equal(h.notices.filter((notice) => notice.includes("recovered: broken")).length, 2);
+      assert.deepEqual(h.state.listOwedRecoveries(), []);
+      await runAt(h, [10]);
+      assert.equal(h.notices.filter((notice) => notice.includes("recovered: broken")).length, 2, "and then it's done");
+      h.state.close();
+    });
+  });
 
   describe("renewing the login", () => {
     const DAY = 24 * 60 * MINUTE;

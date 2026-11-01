@@ -50,7 +50,11 @@ export class AlertTracker {
     if (existing === undefined) {
       this.state.upsertAlert(key, detail, stamp.toISOString(), NEVER_SENT);
       if (await this.notify(`Time-lapse problem: ${detail}`)) this.state.upsertAlert(key, detail, stamp.toISOString(), stamp.toISOString());
-    } else if (stamp.getTime() - Date.parse(existing.last_sent_at) >= this.reminderMs) {
+      return;
+    }
+    // Whoever never heard the recovery still thinks this is the same problem, and now they're right.
+    if (existing.recovery_owed_since !== null) this.state.upsertAlert(key, detail, existing.active_since, existing.last_sent_at);
+    if (stamp.getTime() - Date.parse(existing.last_sent_at) >= this.reminderMs) {
       const text = existing.last_sent_at === NEVER_SENT ? `Time-lapse problem since ${existing.active_since}: ${detail}` : `Time-lapse problem continues since ${existing.active_since}: ${detail}`;
       if (await this.notify(text)) this.state.upsertAlert(key, detail, existing.active_since, stamp.toISOString());
     }
@@ -58,10 +62,25 @@ export class AlertTracker {
 
   async clear(key: string): Promise<void> {
     const existing = this.state.getAlert(key);
-    if (existing === undefined) return;
-    this.state.deleteAlert(key);
+    // An owed recovery has already been tried, and retryOwed() tries it again.
+    if (existing === undefined || existing.recovery_owed_since !== null) return;
     // Nobody heard about the problem, so there's nothing to call over.
-    if (existing.last_sent_at !== NEVER_SENT) await this.notify(`Time-lapse recovered: ${existing.detail}`);
+    if (existing.last_sent_at === NEVER_SENT) {
+      this.state.deleteAlert(key);
+      return;
+    }
+    // Recorded before the send, so a crash can only repeat the message, never lose it.
+    this.state.oweRecovery(key, this.now().toISOString());
+    await this.deliverRecovery(key, existing.detail);
+  }
+
+  /** Someone who heard about a problem and never hears it ended goes on believing in it. */
+  async retryOwed(): Promise<void> {
+    for (const owed of this.state.listOwedRecoveries()) await this.deliverRecovery(owed.key, owed.detail);
+  }
+
+  private async deliverRecovery(key: string, detail: string): Promise<void> {
+    if (await this.notify(`Time-lapse recovered: ${detail}`)) this.state.deleteAlert(key);
   }
 
   async set(key: string, active: boolean, detail: string): Promise<void> {
