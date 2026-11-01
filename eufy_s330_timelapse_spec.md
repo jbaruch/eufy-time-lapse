@@ -1,8 +1,17 @@
 # Eufy S330 Construction Time-Lapse Service — Technical Specification
 
-**Version:** 1.0  
-**Date:** October 21, 2026  
-**Status:** Proposed; native LTE feasibility must be validated before implementation proceeds beyond the probe.
+**Version:** 1.1  
+**Date:** October 31, 2026  
+**Status:** Native LTE feasibility shown on the actual camera; reliability is not yet at the pilot threshold (section 3.1). The capture service runs on the target host. The offsite archiver and monthly preview are not built.
+
+**Changes in 1.1**, from running the real camera and from the owner's decisions:
+
+- The adapter is `@mega-yfue/eufy-sdk`; the legacy library failed on this account (section 2).
+- The minimum frame size is **3840×2160**, and renders exclude smaller frames by default (sections 3, 8).
+- The target cadence is **every 5 minutes**, thinned by battery tiers, with more frames kept than any one render uses (section 6.1).
+- The session budget default rises to **6,000 seconds per day** to fit that cadence (section 6.3).
+- Eufy credentials are Docker secret files, because the credential gateway can't carry them (section 10).
+- Activity-based rendering and bonus frames are recorded as post-MVP ideas (section 14).
 
 The service will document approximately one year of construction using an already-purchased **eufy 4G LTE Cam S330 (T86P2)** connected through its **built-in SIM card** and powered by a battery and solar panel. It will capture fresh frames on a schedule, archive them off-camera, and render videos for selected date ranges.
 
@@ -31,10 +40,11 @@ Out of scope for the MVP: a web dashboard, multi-user or multi-camera support, c
 | `eufy-security-client` can handle this device family and remote P2P connections, but the repository is archived. [S2] | Use it as the first candidate for an experimental adapter; validate behavior on the actual camera. |
 | A report involving two T86P2 cameras describes successful remote video access with the legacy library. Those cameras were connected by Wi-Fi to an LTE router. [S3] | This does **not** prove access over the camera's built-in SIM. |
 | A report covering three T86P2 units on mobile networks describes frequent live-stream connection failures through the newer bridge, plus an isolated successful capture. [S4] | Native LTE must be demonstrated; it is not an assumed capability. |
-| A relay-fallback fix has been proposed for the new SDK. The PR was still open as of this specification. [S5] | Do not treat the existence of the PR as a validated fix. |
+| The relay-fallback fix for the new SDK has merged. [S5] | Validated on this camera over its built-in SIM: every 4K frame so far came through the relay (section 3.1). |
+| `eufy-security-client` returned an empty device list for this account, and its maintainer describes the API it uses as one Eufy is shutting down. | The legacy adapter is removed; it failed the probe's first step. |
 | The SDK and HTTP bridge may return retained imagery if a live request fails. [S6, S7] | Verify frame provenance explicitly; never silently substitute a cached frame. |
 
-**Adapter selection:** implement an adapter around `eufy-security-client` first. Consider a second adapter based on `@mega-yfue/eufy-sdk` only if the legacy option fails the probe or later breaks after an Eufy change. Supporting both adapters simultaneously is not an MVP requirement.
+**Adapter selection:** `@mega-yfue/eufy-sdk`, pinned at exactly `0.5.0`, after the legacy option failed. Supporting both adapters simultaneously is not an MVP requirement. If this SDK later breaks or proves unreliable, the fallback is taking the verified protocol into this project's own client, not going back to the legacy library.
 
 Before installation, inspect available releases, select an exact version, and pin it in the lockfile. Version `4.2.0` in [S3] is the version reported by that user, **not** a dependency already verified for this project. Pin a fork by commit SHA. Avoid floating `latest` tags and unpinned branches.
 
@@ -55,7 +65,7 @@ For each attempt, record:
 - Camera session duration, available traffic counters, and connection-cleanup result.
 - Battery percentage and age of the reading, if available.
 
-Minimum acceptable image size for the initial test: **1280×720**; **1920×1080 or higher** is preferred. This is a project acceptance threshold, not a manufacturer guarantee. Do not infer the accessible video resolution from the camera's 4K marketing designation.
+Minimum acceptable image size: **3840×2160**, by the owner's decision: the camera delivers it, and a smaller frame would pull a whole render down to its size. This is a project acceptance threshold, not a manufacturer guarantee. The accessible resolution was measured, not inferred from the camera's 4K marketing designation.
 
 ## Probe acceptance criteria
 
@@ -64,6 +74,30 @@ All three attempts must retrieve frames from **new live sessions**, meet the min
 Where practical, verify freshness with a controlled change in the scene between attempts. Equal or different file hashes alone do not prove that an image is fresh.
 
 If the probe fails, its deliverable is a diagnostic report identifying the failure and the next bounded experiment (for example, a connectivity setting or alternate adapter). Continuous operation remains **blocked**. Returning the latest thumbnail is not an acceptable workaround or a passing result.
+
+## 3.1 Findings on the actual camera
+
+Measured on a T86P2 (firmware 1.2.4.4) on cable power, on its built-in SIM, from the production host. Numbers are as of the first 21 attempts of the service's 5-minute run on October 31, 2026, and are a small sample.
+
+**What works:**
+
+- The SDK reaches the camera over the built-in SIM and receives real **3840×2160** H.265 keyframes.
+- The camera sits behind symmetric carrier NAT, so every 4K frame has come through the **relay**. A direct path won occasionally in early tests, stayed at 720p and carried little data.
+- Each stream starts at 1280×720 for the first keyframe and steps up to 3840×2160 from the next. The service holds the session until it has two keyframes at the required size, then stops. One FFmpeg run decodes each keyframe, because a single FFmpeg output locks to the first frame's size.
+- A capture takes about **36 seconds** of camera contact and about **0.4 MB** of media, which is about 1.5 GB per month at the target cadence. That counts media bytes only; compare it with the carrier's figure.
+- About **28 seconds** of that 36 is waiting: the SDK spends about 25 seconds on a hole punch before trying the relay, with the camera awake. `capture.relay_after_seconds` shortens the wait; whether that's safe is being measured.
+
+**What doesn't work yet:** 12 of 14 slots captured at 4K (86%), and only 7 of 14 on the first try. The pilot threshold in section 12 is 69 of 70 (98.6%). The failed tries fall into three groups:
+
+| Failure | Tries | What happens |
+| --- | --- | --- |
+| Camera never joins the relay | 6 of 21 | The relay handshake stalls, usually after the lookup servers accept the request, until the SDK's fixed 45-second connect timeout. In every success the relay answered within a second, so a longer timeout isn't expected to help. |
+| Hang-up | 4 of 21 | The relay closes the session 2 to 3.4 seconds after connecting. Two of these still got a 4K frame in time; two stopped at 720p. |
+| Connected, then silence | 1 of 21 | The camera never acknowledges the stream start, and the SDK's replacement session doesn't connect in time. |
+
+The second try rescues most of these, at the cost of another session's worth of battery. No root cause is established. So far the data does **not** support: too short a gap between sessions (failures and successes overlap from 3 to 6 minutes), one bad relay, the SDK re-sending its start command (two of the four hang-ups came before its first re-send), or the host's UDP buffer (no receive errors).
+
+Battery cost has not been measured, because the camera has only run on cable. It's the main open question for the 5-minute target.
 
 # 4. Architecture
 
@@ -93,11 +127,11 @@ An accepted frame must be decoded from the video data of a **new live session st
 
 This proves the acquisition path, not the exact physical exposure time if the camera provides no trustworthy frame timestamp. Record reception time and camera exposure time separately; set unknown exposure times to `null`.
 
-For the legacy adapter, start a new live stream and decoder per attempt. Register event handlers before sending the start command. The method name `startStationLivestream` does not require a separate HomeBase: a standalone camera may act as its own station.
+Start a new live stream and decoder per attempt, and register event handlers before sending the start command.
 
-If the newer SDK is used, disable its retained-image cache with `storedSnapshotCache: false`, reject any `retained: true` result, and prevent reuse of frames from an earlier shared stream. Calling `snapshotLive()` without those safeguards is insufficient. Likewise, do not treat bridge endpoint `/snapshot/<sn>?mode=live` as a guaranteed fresh source. [S6, S7]
+Disable the SDK's retained-image cache with `storedSnapshotCache: false`, reject any `retained: true` result, and prevent reuse of frames from an earlier shared stream. Calling `snapshotLive()` without those safeguards is insufficient. Likewise, do not treat bridge endpoint `/snapshot/<sn>?mode=live` as a guaranteed fresh source. [S6, S7]
 
-On a cold start, wait for a decodable keyframe. Dropping the first frame or allowing a brief warm-up may be necessary for a given adapter; record the observed policy after the probe. A fixed delay alone is not proof of freshness.
+On a cold start, wait for keyframes at the required size. The observed policy: hold the session until two keyframes at the minimum size have arrived or the attempt's deadline passes, then use the last keyframe at the highest resolution. A fixed delay alone is not proof of freshness, and a fixed window lost 4K on a slow path.
 
 ## 5.2 Capture attempt lifecycle
 
@@ -131,9 +165,17 @@ If the same camera is used for security, account for the documented T86P2 behavi
 
 ## 6.1 Initial schedule
 
-The proposed low-impact pilot schedule is **one capture per hour, every day from 08:00 through 17:00** (the `18:00` endpoint is exclusive), for **10 scheduled frames per day**. Configure 15- or 30-minute intervals only after measuring battery behavior and data usage.
+The target schedule is **one capture every 5 minutes, every day from 08:00 through 17:55** (the `18:00` endpoint is exclusive), for **120 scheduled frames per day**, thinned by battery so a weak day costs frames rather than the camera:
 
-At 365 days with no missing frames, this produces 3,650 images and approximately **2 minutes 2 seconds at 30 fps**. This is illustrative; both project duration and frequency are configurable.
+| Battery | Capture every |
+| --- | --- |
+| 60% or more | 5 minutes |
+| 40% or more | 15 minutes |
+| Below 40%, or unknown | 60 minutes |
+
+The tiers select from one fixed slot grid, so frames stay evenly placed when the cadence changes. They are starting values, to be set from measured battery behavior on solar. If the measurements don't support 5 minutes, the top tier moves rather than the design.
+
+At 365 days with no missing frames, this produces 43,800 images, or about **24 minutes at 30 fps** if all of them were used. That is deliberately more than a final video needs: more frames at capture, and the choice of which to use at render. Both project duration and frequency are configurable.
 
 Calculate schedules in the construction site's **IANA time zone**. The sample configuration uses `America/Chicago`; confirm the actual site's time zone at deployment. Store all timestamps in UTC and display local times with their UTC offset. The host's time zone must not alter scheduling.
 
@@ -157,13 +199,13 @@ Initial project thresholds:
 - Pause capture at **25% or lower**.
 - Resume at **40% or higher**.
 
-These are configurable service thresholds, not manufacturer limits. The MVP must not secretly alter its capture frequency: explicitly warn or pause based on configured rules.
+These are configurable service thresholds, not manufacturer limits. The MVP must not secretly alter its capture frequency: it warns, pauses, or changes tier only by configured rules, and reports the active interval in its status.
 
 Use battery readings available without waking the camera. Treat readings older than **six hours** as stale. Show an unknown battery value as unknown, never as zero. When capture remains permitted without recent telemetry, keep the time budgets active and issue a warning. Do not automatically clear a battery pause without a fresh sufficient reading.
 
 While paused for low battery, continue receiving passive updates. If battery status updates only when the camera is contacted, notify the owner to check the charge in the Eufy app and run `resume --battery-checked`. Log this explicit manual override; it does not turn an old reading into a fresh one. Periodically waking the camera just to check the battery is not required in the MVP.
 
-The proposed additional budget is **600 seconds of camera-contact time per day**. Count all attempts from the first camera-facing command through teardown, including failed attempts. This is a conservative software counter—not a measurement of actual awake time or energy consumption. Reserve time before starting an attempt; always allow cleanup commands even if the budget is exhausted.
+The additional budget defaults to **6,000 seconds of camera-contact time per day**, which covers 120 slots at about 50 seconds each. Set it from measured use. Count all attempts from the first camera-facing command through teardown, including failed attempts. This is a conservative software counter—not a measurement of actual awake time or energy consumption. Reserve time before starting an attempt; always allow cleanup commands even if the budget is exhausted.
 
 Configure the **monthly data budget** after selecting the SIM plan and measuring a pilot. **JPEG file size is not LTE traffic consumption.** Track media-stream bytes and available network-byte counters separately, along with each measurement's coverage. If the library cannot observe the entire transport, label totals as estimates and compare them with the SIM provider's statistics.
 
@@ -218,7 +260,7 @@ Output defaults: **MP4, H.264, 30 fps, no audio, original aspect ratio**. Resize
 
 By default, **compress gaps**: the next available frame follows the previous frame immediately. The source archive and manifest continue to identify missing slots. Do not insert synthetic imagery disguised as real captures.
 
-For every render, save an input-frame manifest, transformation parameters, FFmpeg version, and exclusion list. Include `degraded` frames with an explicit warning in the render report; do not silently discard them.
+For every render, save an input-frame manifest, transformation parameters, FFmpeg version, and exclusion list. **Exclude `degraded` frames by default and list each one in the exclusion list**: since the output is no larger than the smallest selected frame, one 720p frame would downscale a whole 4K video. `--include-degraded` opts them in, with an explicit warning in the render report.
 
 Acceptance: the MP4 plays, frames are in chronological order, and video duration is `number of included frames / fps` within container rounding tolerance. A render failure must never stop scheduled capture. The only scheduled render task in the MVP is a **monthly preview**; the full final video is generated on demand.
 
@@ -248,6 +290,8 @@ Persist the Eufy authentication session across process restarts. Do **not** init
 
 If authentication requires 2FA or CAPTCHA, pause new camera operations and expose the specific manual step needed. Do not retry logins indefinitely. Supply credentials via Docker secret files or protected environment variables; never write them to the repository, logs, manifests, or HTTP responses. Session files must be readable only by the service account.
 
+A credential gateway such as OneCLI can't hold the Eufy login: the password is ECDH-encrypted into the request body, v6 bodies are encrypted and signed, the camera traffic is UDP, and a gateway writes only headers, query, and path. Credentials sent in a plain header, such as a webhook's, can use the gateway.
+
 Deploy as one Docker Compose project with persistent volumes and a restart policy. FFmpeg must decode the camera's **actual** H.264/H.265 stream. Bind HTTP to loopback by default; use an existing secure tunnel or an authenticated reverse proxy for remote access.
 
 Do not require a public inbound IP address or port forwarding on the camera's cellular connection. Verify outbound P2P/relay connectivity from the **target server**. A successful test on a home computer is not sufficient evidence that a later VPS deployment will work.
@@ -269,24 +313,33 @@ camera:
   id: site-overview
   model: T86P2
   serial_file: /run/secrets/eufy_camera_serial
-  adapter: legacy
+  adapter: mega
   framing: fixed
-  min_width: 1280
-  min_height: 720
+  min_width: 3840
+  min_height: 2160
 
 schedule:
-  every_minutes: 60
+  grid_minutes: 5
   window_start: "08:00"
   window_end_exclusive: "18:00"
   days: [mon, tue, wed, thu, fri, sat, sun]
 
+cadence:
+  tiers:
+    - { battery_at_least: 60, every_minutes: 5 }
+    - { battery_at_least: 40, every_minutes: 15 }
+    - { battery_at_least: 0, every_minutes: 60 }
+  unknown_battery_every_minutes: 60
+
 capture:
   acquisition_timeout_seconds: 60
   cleanup_timeout_seconds: 10
+  target_keyframes: 2
   max_attempts: 2
   retry_delay_seconds: 30
   slot_deadline_seconds: 180
-  max_session_seconds_per_day: 600
+  max_session_seconds_per_day: 6000
+  relay_after_seconds: null
 
 battery:
   warn_below_percent: 35
@@ -311,6 +364,7 @@ render:
   fps: 30
   codec: h264
   include_manual: false
+  include_degraded: false
   upscale: false
   missing_frames: skip
 
@@ -337,7 +391,7 @@ http:
 
 ## Phase 3 — Seven-day pilot and rendering
 
-Run **seven complete days on the intended production host** with the proposed hourly daytime schedule: **70 scheduled slots**. The proposed acceptance threshold is **at least 69 slots with genuinely fresh frames**, received before their respective deadlines and at or above the configured minimum resolution. No retained thumbnails may be accepted, no duplicate slots may exist, and no camera connection may remain unintentionally open.
+Run **seven complete days on the intended production host** with the cadence chosen from calibration. The acceptance threshold is **at least 98.5% of scheduled slots with genuinely fresh frames** (69 of 70 at the original hourly schedule), received before their respective deadlines and at or above the configured minimum resolution. Slots the battery tiers leave out don't count against it, but are reported separately. No retained thumbnails may be accepted, no duplicate slots may exist, and no camera connection may remain unintentionally open.
 
 Preserve and separately count `degraded` frames; they **do not** satisfy the quality acceptance threshold. Each missed slot must have a recorded explanation. Measure battery behavior, actual cellular data usage, and notification delivery during the pilot.
 
@@ -368,7 +422,21 @@ Provide a service repository containing a README, Dockerfile, Docker Compose con
 
 Before enabling year-long operation, fill in project dates, site time zone, Eufy credentials, offsite storage, and notification destination. Validate built-in SIM connectivity, framing, image quality, and observed budgets. Capture frequency, minimum acceptable resolution, and budget values remain runtime configuration—not code changes.
 
-# 13. References
+# 13. Not Built Yet
+
+- The S3 offsite archiver. Frames are spooled on the host, whose storage is durable, but there is no offsite copy; the destination is not chosen.
+- The monthly preview render.
+- A notification destination. Alerts go to the service log until a webhook is configured.
+- Battery and solar calibration, which needs the camera on its panel.
+
+# 14. Post-MVP Ideas
+
+Recorded so they aren't lost; neither is in the MVP.
+
+- **Activity-based rendering:** use more frames when there is visible work and fewer when nothing happens, chosen at render time by comparing stored frames. It needs no camera contact and costs no battery, which is why capture keeps more frames than a render uses.
+- **Bonus frames:** capture extra frames when the camera's own motion events suggest activity, if the battery can afford it.
+
+# 15. References
 
 External capability and limitation information was reviewed on **October 21, 2026**. Architecture, thresholds, and acceptance criteria above are **proposed MVP design decisions**, not verified Eufy product guarantees.
 
