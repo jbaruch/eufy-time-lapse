@@ -142,7 +142,7 @@ export class CaptureService {
       this.state.addEvent("slot_interrupted", slot.slot_id);
       this.options.log(`slot ${slot.local_date} ${slot.local_time} was interrupted by a restart; marked missed`);
     }
-    await this.pruneFailedWork();
+    await this.pruneDiagnostics();
   }
 
   private async adoptPublishedFrames(): Promise<void> {
@@ -174,9 +174,14 @@ export class CaptureService {
     return join("spool", this.config.project.id, this.config.camera.id, year, month, day);
   }
 
-  private async pruneFailedWork(): Promise<void> {
-    const root = join(this.options.dataDir, "work");
-    const cutoff = this.now().getTime() - this.config.storage.keep_failed_work_days * 86_400_000;
+  /** A service that runs for a year needs its diagnostics to expire. Frames and the database never do. */
+  private async pruneDiagnostics(): Promise<void> {
+    await this.pruneOlderThan(join(this.options.dataDir, "work"), this.config.storage.keep_failed_work_days);
+    await this.pruneOlderThan(join(this.options.dataDir, "logs"), this.config.storage.keep_logs_days);
+  }
+
+  private async pruneOlderThan(root: string, days: number): Promise<void> {
+    const cutoff = this.now().getTime() - days * 86_400_000;
     let entries: string[];
     try {
       entries = await readdir(root);
@@ -204,7 +209,7 @@ export class CaptureService {
       this.state.materialize(planned, prefix, revision);
     }
     if (this.lastPruneDate !== today) {
-      await this.pruneFailedWork();
+      await this.pruneDiagnostics();
       this.lastPruneDate = today;
     }
 
@@ -549,7 +554,16 @@ export class CaptureService {
     const limit = this.config.alerts.consecutive_failed_slots;
     const recent = this.state.recentOutcomes(limit);
     const failing = recent.length >= limit && recent.every((slot) => slot.state === "missed");
+    await this.syncFirstTryAlert();
     await this.alerts.set("consecutive_failures", failing, `${limit} scheduled slots in a row got no frame (latest: ${recent[0]?.reason ?? "unknown"})`);
+  }
+
+  /** Retries hide a failing connect from slot counts while spending battery. A change on Eufy's side would look like this first. */
+  private async syncFirstTryAlert(): Promise<void> {
+    const { first_try_window: window, first_try_warn_percent: warnPercent } = this.config.alerts;
+    const tries = this.state.recentFirstTries(window);
+    const percent = tries.length > 0 ? Math.round((tries.filter((attempt) => attempt.status === "captured").length / tries.length) * 100) : 100;
+    await this.alerts.set("first_try_drift", tries.length >= window && percent < warnPercent, `only ${percent}% of the last ${window} slots got their frame on the first try, where about 98% is normal. Retries are spending battery, so check the service log and the attempts in status`);
   }
 
   /** A one-off frame. It holds the same lock, spends the same budgets, and never affects completeness. */

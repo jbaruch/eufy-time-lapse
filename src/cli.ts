@@ -45,6 +45,7 @@ Probe options:
 const EXIT_FAILURE = 1;
 const EXIT_USAGE = 2;
 const EXIT_INTERRUPTED = 130;
+const REVISION = process.env.TIMELAPSE_REVISION ?? "unknown";
 const ACQUISITION_TIMEOUT_MS = 30_000;
 const CLEANUP_TIMEOUT_MS = 10_000;
 /** Two, so exposure has settled after the step up, and one bad frame can't cost the shot. */
@@ -239,7 +240,7 @@ async function commandRun(paths: Paths): Promise<number> {
     if (request.url === "/status") {
       diskFreeMb(paths.dataDir).then(
         (free) => {
-          response.writeHead(200, { "content-type": "application/json" }).end(`${JSON.stringify(buildStatus(state, serviceConfig, new Date(), free), null, 2)}\n`);
+          response.writeHead(200, { "content-type": "application/json" }).end(`${JSON.stringify(buildStatus(state, serviceConfig, new Date(), free, REVISION), null, 2)}\n`);
         },
         (error: Error) => {
           response.writeHead(500, { "content-type": "text/plain" }).end(`${error.message}\n`);
@@ -250,7 +251,7 @@ async function commandRun(paths: Paths): Promise<number> {
     response.writeHead(404).end();
   });
   server.listen(serviceConfig.http.port, serviceConfig.http.bind);
-  log(`service running; status on http://${serviceConfig.http.bind}:${serviceConfig.http.port}/status`);
+  log(`service running at revision ${REVISION}; status on http://${serviceConfig.http.bind}:${serviceConfig.http.port}/status`);
 
   await service.run(signal);
   server.close();
@@ -273,7 +274,7 @@ async function commandCapture(paths: Paths): Promise<number> {
 async function commandStatus(settings: AppSettings, paths: Paths, args: string[]): Promise<number> {
   const { values } = parseArgs({ args, options: { json: { type: "boolean" } } });
   const state = new State(paths.databasePath);
-  const report = buildStatus(state, serviceConfigFor(settings, paths), new Date(), await diskFreeMb(paths.dataDir));
+  const report = buildStatus(state, serviceConfigFor(settings, paths), new Date(), await diskFreeMb(paths.dataDir), REVISION);
   state.close();
   if (values.json === true) {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);

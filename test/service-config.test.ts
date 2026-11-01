@@ -58,6 +58,9 @@ describe("loadServiceConfig", () => {
     ["no tiers", { cadence: { tiers: [] } }, /empty/],
     ["resume at or below pause", { battery: { resume_at_or_above_percent: 25 } }, /flap/],
     ["a slot deadline too short for its retries", { capture: { slot_deadline_seconds: 100 } }, /too short/],
+    ["a log retention of zero", { storage: { keep_logs_days: 0 } }, /keep_logs_days/],
+    ["a first-try threshold above 100", { alerts: { first_try_warn_percent: 101 } }, /first_try_warn_percent/],
+    ["a first-try window of zero", { alerts: { first_try_window: 0 } }, /first_try_window/],
   ];
   for (const [name, content, message] of invalid) {
     it(`rejects ${name}`, async () => {

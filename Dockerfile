@@ -8,6 +8,8 @@ COPY package.json package-lock.json .npmrc ./
 RUN npm ci --omit=dev
 COPY src ./src
 
+ARG TIMELAPSE_REVISION=unknown
+ENV TIMELAPSE_REVISION=$TIMELAPSE_REVISION
 ENV NODE_ENV=production
 ENV TIMELAPSE_DATA_DIR=/data
 USER node

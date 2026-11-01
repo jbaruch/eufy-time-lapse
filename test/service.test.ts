@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
@@ -388,6 +388,68 @@ describe("CaptureService", () => {
       await runAt(h, [0]);
       assert.equal(h.adapter.opens, 1);
       assert.equal(h.state.latestBattery()?.percent, 20);
+      h.state.close();
+    });
+  });
+
+  describe("what a long run leaves behind", () => {
+    async function aged(path: string, days: number, now: number): Promise<void> {
+      await writeFile(path, "old");
+      const when = new Date(now - days * 86_400_000);
+      await utimes(path, when, when);
+    }
+
+    it("expires old logs and failed work, keeps recent ones, and leaves frames alone", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      const logs = join(h.dataDir, "logs");
+      await mkdir(logs, { recursive: true });
+      await aged(join(logs, "service-old.log"), 31, AT_0800);
+      await aged(join(logs, "service-recent.log"), 29, AT_0800);
+      const work = join(h.dataDir, "work");
+      await mkdir(work, { recursive: true });
+      await aged(join(work, "old-try"), 4, AT_0800);
+      await aged(join(work, "recent-try"), 2, AT_0800);
+      const frames = h.state.allCaptures().length;
+      const { service, state } = h.restart();
+      await service.reconcile();
+      assert.deepEqual((await readdir(logs)).sort(), ["service-recent.log"]);
+      const left = await readdir(work);
+      assert.ok(left.includes("recent-try"));
+      assert.equal(left.includes("old-try"), false);
+      assert.equal(state.allCaptures().length, frames);
+      state.close();
+    });
+  });
+
+  describe("first-try drift", () => {
+    const small = { alerts: { ...DEFAULT_SERVICE_CONFIG.alerts, first_try_window: 4 } };
+
+    it("warns when too many slots needed a retry, even though every slot got its frame, then says when it recovers", async () => {
+      let healthy = false;
+      let fail = true;
+      const h = await harness({
+        config: serviceConfig(small),
+        open: async () => {
+          if (healthy) return await fresh();
+          fail = !fail;
+          return fail ? await fresh() : await hangUp();
+        },
+      });
+      await runAt(h, [0, 5, 10, 15]);
+      assert.equal(h.state.allCaptures().length, 4, "retries got every frame");
+      assert.ok(h.notices.some((notice) => notice.includes("first try")), h.notices.join("; "));
+      healthy = true;
+      await runAt(h, [20, 25, 30, 35]);
+      assert.ok(h.notices.some((notice) => notice.includes("recovered") && notice.includes("first try")), h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("says nothing before it has a full window to judge", async () => {
+      const script = [hangUp, fresh];
+      const h = await harness({ config: serviceConfig(small), open: async () => (script.shift() as () => Promise<LiveSession>)() });
+      await runAt(h, [0]);
+      assert.equal(h.notices.some((notice) => notice.includes("first try")), false);
       h.state.close();
     });
   });

@@ -31,8 +31,8 @@
     "max_session_seconds_per_day": 6000
   },
   "traffic": { "monthly_budget_mb": null, "warn_fraction": 0.8, "pause_fraction": 1 },
-  "storage": { "min_free_disk_mb": 1024, "keep_failed_work_days": 3 },
-  "alerts": { "webhook_url_file": null, "consecutive_failed_slots": 3, "reminder_hours": 24 },
+  "storage": { "min_free_disk_mb": 1024, "keep_failed_work_days": 3, "keep_logs_days": 30 },
+  "alerts": { "webhook_url_file": null, "consecutive_failed_slots": 3, "reminder_hours": 24, "first_try_warn_percent": 80, "first_try_window": 50 },
   "http": { "bind": "127.0.0.1", "port": 8787 },
   "logging": { "sdk_debug": false }
 }

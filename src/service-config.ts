@@ -25,8 +25,8 @@ export interface ServiceConfig {
     max_session_seconds_per_day: number;
   };
   traffic: { monthly_budget_mb: number | null; warn_fraction: number; pause_fraction: number };
-  storage: { min_free_disk_mb: number; keep_failed_work_days: number };
-  alerts: { webhook_url_file: string | null; consecutive_failed_slots: number; reminder_hours: number };
+  storage: { min_free_disk_mb: number; keep_failed_work_days: number; keep_logs_days: number };
+  alerts: { webhook_url_file: string | null; consecutive_failed_slots: number; reminder_hours: number; first_try_warn_percent: number; first_try_window: number };
   http: { bind: string; port: number };
   logging: { sdk_debug: boolean };
 }
@@ -55,8 +55,8 @@ export const DEFAULT_SERVICE_CONFIG: ServiceConfig = {
     max_session_seconds_per_day: 6000,
   },
   traffic: { monthly_budget_mb: null, warn_fraction: 0.8, pause_fraction: 1 },
-  storage: { min_free_disk_mb: 1024, keep_failed_work_days: 3 },
-  alerts: { webhook_url_file: null, consecutive_failed_slots: 3, reminder_hours: 24 },
+  storage: { min_free_disk_mb: 1024, keep_failed_work_days: 3, keep_logs_days: 30 },
+  alerts: { webhook_url_file: null, consecutive_failed_slots: 3, reminder_hours: 24, first_try_warn_percent: 80, first_try_window: 50 },
   http: { bind: "127.0.0.1", port: 8787 },
   logging: { sdk_debug: false },
 };
@@ -104,6 +104,10 @@ function validate(config: ServiceConfig): void {
     if (!Number.isInteger(every) || every <= 0 || every % grid !== 0) fail(`every interval must be a multiple of schedule.grid_minutes (${grid}), got ${every}.`);
   }
   const { pause_at_or_below_percent: pause, resume_at_or_above_percent: resume } = config.battery;
+  if (config.storage.keep_logs_days <= 0) fail("storage.keep_logs_days must be above 0.");
+  const { first_try_warn_percent: warnPercent, first_try_window: tryWindow } = config.alerts;
+  if (warnPercent < 0 || warnPercent > 100) fail("alerts.first_try_warn_percent must be between 0 and 100.");
+  if (!Number.isInteger(tryWindow) || tryWindow <= 0) fail("alerts.first_try_window must be a positive whole number.");
   if (pause >= resume) fail("battery.resume_at_or_above_percent must be above pause_at_or_below_percent, or the service would flap.");
   const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup, retry_delay_seconds: retry, slot_deadline_seconds: deadline, max_attempts: tries } = config.capture;
   if (tries < 1) fail("capture.max_attempts must be at least 1.");

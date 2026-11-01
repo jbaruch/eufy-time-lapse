@@ -4,6 +4,8 @@ import type { AttemptRow, State } from "./state.ts";
 
 export interface StatusReport {
   now: string;
+  /** The commit this build came from, so an operator can tell what's actually running. */
+  revision: string;
   last_success: { capture_id: string; at: string; age_seconds: number; width: number; height: number } | null;
   next_slot: { at: string; local_time: string } | null;
   completeness_24h: Completeness;
@@ -91,7 +93,7 @@ export function summarizeAttempts(attempts: AttemptRow[]): Reliability {
   };
 }
 
-export function buildStatus(state: State, config: ServiceConfig, now: Date, diskFreeMb: number): StatusReport {
+export function buildStatus(state: State, config: ServiceConfig, now: Date, diskFreeMb: number, revision = "unknown"): StatusReport {
   const zone = config.project.site_time_zone;
   const local = localParts(now, zone);
   const dayAgo = new Date(now.getTime() - 86_400_000).toISOString();
@@ -112,6 +114,7 @@ export function buildStatus(state: State, config: ServiceConfig, now: Date, disk
 
   return {
     now: now.toISOString(),
+    revision,
     last_success:
       latest === undefined
         ? null

@@ -1,10 +1,19 @@
 services:
   timelapse:
-    build: .
+    build:
+      context: .
+      args:
+        TIMELAPSE_REVISION: ${TIMELAPSE_REVISION:-unknown}
     image: eufy-time-lapse:local
     # `docker compose up -d` runs the service. `docker compose run --rm timelapse <command>` runs anything else.
     command: ["run"]
     restart: unless-stopped
+    # Docker keeps a container's output forever otherwise. The service's own log is in the data directory.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
     # The camera sits behind carrier NAT. Docker's bridge would put a second NAT in front of P2P setup.
     network_mode: host
     # Must own the secret files and the data directory.

@@ -303,6 +303,11 @@ export class State {
   }
 
   /** Scheduled slots whose time has come, newest first. Grid slots a battery tier passed over don't count as outcomes here. */
+  /** Newest first. A retry's attempt id carries a -retry- suffix. */
+  recentFirstTries(limit: number): AttemptRow[] {
+    return this.all<AttemptRow>("SELECT * FROM attempts WHERE attempt_id NOT LIKE '%-retry-%' AND status != 'running' ORDER BY started_at DESC LIMIT ?", limit);
+  }
+
   recentOutcomes(limit: number): SlotRow[] {
     return this.all<SlotRow>("SELECT * FROM slots WHERE state IN ('captured', 'captured_degraded', 'missed') ORDER BY scheduled_at_utc DESC LIMIT ?", limit);
   }
