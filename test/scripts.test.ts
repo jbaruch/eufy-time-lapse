@@ -123,6 +123,8 @@ describe("scripts/deploy.sh", () => {
     const revision = await git(repo, "rev-parse", "--short", "HEAD");
     await executable(join(stubs, "ssh"), `shift\ncd '${home}'\nexec bash -c "$1"`);
     await executable(join(stubs, "docker"), `echo "docker $*" >> '${log}'\nif [ "$2" = "exec" ]; then ${options.reports === false ? 'echo "{}"' : `echo "\\"revision\\": \\"$(git -C '${repo}' rev-parse --short HEAD)\\""`}; fi`);
+    // The retry wait, so a test of it takes no real time.
+    await executable(join(stubs, "sleep"), "exit 0");
     await executable(join(stubs, "sha256sum"), options.corrupt === true ? 'echo "0000  $1"' : 'exec shasum -a 256 "$@"');
     return { repo, host, log, env: { PATH: `${stubs}:${process.env.PATH ?? ""}`, DEPLOY_WAIT_SECONDS: "2" }, revision };
   }
@@ -212,6 +214,21 @@ describe("scripts/deploy.sh", () => {
     assert.deepEqual(await readdir(host), [".deployed-files"]);
     assert.equal(await readFile(log, "utf8"), "");
   });
+
+  for (const [name, entry] of [["climbs out of the project", "../outside.txt"], ["reads as an option", "-rf"], ["is absolute", "/etc/hostname"]] as const) {
+    it(`refuses a manifest entry that ${name}, and touches nothing`, async () => {
+      const { repo, host, log, env } = await world();
+      const outside = join(host, "..", "outside.txt");
+      await writeFile(outside, "keep me");
+      await writeFile(join(host, ".deployed-files"), `# eufy-time-lapse deployed files, schema_version=1\n${entry}\n`);
+      const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+      assert.equal(result.code, 1);
+      assert.match(result.stderr, /unsafe path/);
+      assert.equal(await readFile(outside, "utf8"), "keep me");
+      assert.deepEqual(await readdir(host), [".deployed-files"]);
+      assert.equal(await readFile(log, "utf8"), "");
+    });
+  }
 
   it("does nothing when only sourced", async () => {
     const { repo, host, env } = await world();

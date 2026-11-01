@@ -36,11 +36,20 @@ main() {
       exit 1
     fi
     previous="${previous#*$'\n'}"
+    local entry
+    while IFS= read -r entry; do
+      case "$entry" in
+        "" | /* | -* | *..*)
+          echo "$host's $MANIFEST lists an unsafe path, so nothing was deployed. Check it, and remove it if it's stale: $entry" >&2
+          exit 1
+          ;;
+      esac
+    done <<< "$previous"
   fi
   stale="$(comm -23 <(printf '%s\n' "$previous" | LC_ALL=C sort) <(printf '%s\n' "$tracked"))"
   if [[ -n "$stale" ]]; then
     # shellcheck disable=SC2016 # These expand on the host.
-    printf '%s\n' "$stale" | on_host 'while IFS= read -r file; do rm -f "$file"; done'
+    printf '%s\n' "$stale" | on_host 'while IFS= read -r file; do rm -f -- "$file"; done'
   fi
   on_host "rm -rf src lab test scripts .github"
   git archive HEAD | on_host "tar -xf -"
@@ -67,9 +76,11 @@ main() {
 
   on_host "TIMELAPSE_REVISION='$revision' docker compose build --quiet timelapse && docker compose up -d timelapse"
 
-  local waited
+  local waited status
   for ((waited = 0; waited < wait_seconds; waited += 2)); do
-    if on_host "docker compose exec -T timelapse node src/cli.ts status --json" | grep -q "\"revision\": \"$revision\""; then
+    # Read in full first: grep -q stops at its match, and under pipefail that closed pipe would read as a failed deploy.
+    # A failed read is expected while the container restarts, so it just means another try.
+    if status="$(on_host "docker compose exec -T timelapse node src/cli.ts status --json")" && [[ "$status" == *"\"revision\": \"$revision\""* ]]; then
       echo "$host is running $revision."
       return 0
     fi
