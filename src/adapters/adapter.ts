@@ -51,6 +51,11 @@ export interface CameraInfo {
 
 export type VideoCodecName = "h264" | "h265" | "unknown";
 
+export interface FrameSize {
+  width: number;
+  height: number;
+}
+
 export interface LiveSession {
   codec: VideoCodecName;
   reportedWidth: number | null;
@@ -62,6 +67,8 @@ export interface LiveSession {
   connectRetries: number;
   /** True when no P2P connection to the camera existed before this attempt. */
   coldConnection: boolean;
+  /** Reports each keyframe's coded size, after its bytes have gone to `video`. */
+  onKeyframe(listener: (size: FrameSize) => void): void;
 }
 
 export interface CleanupResult {

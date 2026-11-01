@@ -22,7 +22,6 @@ Commands:
 Probe options:
   --attempts <n>           Capture attempts (default 3)
   --interval-minutes <n>   Time between attempts (default 15)
-  --stream-seconds <n>     Stream kept open after first media (default 12)
 `;
 
 const EXIT_FAILURE = 1;
@@ -30,6 +29,8 @@ const EXIT_USAGE = 2;
 const EXIT_INTERRUPTED = 130;
 const ACQUISITION_TIMEOUT_MS = 60_000;
 const CLEANUP_TIMEOUT_MS = 10_000;
+/** Two, so exposure has settled after the step up, and one bad frame can't cost the shot. */
+const TARGET_KEYFRAMES = 2;
 const CAMERA_ID = "site-overview";
 
 function log(message: string): void {
@@ -86,12 +87,10 @@ async function commandProbe(config: AppConfig, dataDir: string, sessionDir: stri
     options: {
       attempts: { type: "string" },
       "interval-minutes": { type: "string" },
-      "stream-seconds": { type: "string" },
     },
   });
   const attempts = positiveNumber(values.attempts, "attempts", 3);
   const intervalMinutes = positiveNumber(values["interval-minutes"], "interval-minutes", 15);
-  const streamSeconds = positiveNumber(values["stream-seconds"], "stream-seconds", 12);
 
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const runDir = join(dataDir, "probe", runId);
@@ -116,7 +115,7 @@ async function commandProbe(config: AppConfig, dataDir: string, sessionDir: stri
         ...(config.cameraSerial ? { cameraSerial: config.cameraSerial } : {}),
         attempts,
         intervalMs: intervalMinutes * 60_000,
-        streamMs: streamSeconds * 1000,
+        targetKeyframes: TARGET_KEYFRAMES,
         acquisitionTimeoutMs: ACQUISITION_TIMEOUT_MS,
         cleanupTimeoutMs: CLEANUP_TIMEOUT_MS,
         minWidth: config.minWidth,

@@ -23,6 +23,7 @@ import type {
   CameraInfo,
   CleanupResult,
   FailurePhase,
+  FrameSize,
   LiveSession,
   VideoCodecName,
 } from "./adapter.ts";
@@ -38,7 +39,8 @@ const TELEMETRY_EXCLUDED = /imei|iccid|imsi|mac|ssid|serial|ip_?addr/i;
 export type MegaLoginResult = { status: "ok" } | { status: "captcha"; image: string } | { status: "2fa" };
 
 export interface MegaLiveStream {
-  on(event: "video", listener: (frame: { data: Buffer; codec: string; width: number; height: number }) => void): unknown;
+  on(event: "video-config", listener: (config: { width: number; height: number }) => void): unknown;
+  on(event: "video", listener: (frame: { data: Buffer; codec: string; width: number; height: number; keyframe: boolean }) => void): unknown;
   on(event: "audio", listener: (frame: { data: Buffer }) => void): unknown;
   on(event: "stop", listener: () => void): unknown;
   on(event: "error", listener: (error: Error) => void): unknown;
@@ -272,6 +274,9 @@ export class MegaAdapter implements CameraAdapter {
 
     const video = new PassThrough();
     const audio = new PassThrough();
+    const keyframeListeners: Array<(size: FrameSize) => void> = [];
+    // The SDK's stated authority on size. A frame's own width and height are only what its header reported.
+    let codedSize: FrameSize | undefined;
     const session: LiveSession = {
       codec: "unknown",
       reportedWidth: null,
@@ -282,12 +287,22 @@ export class MegaAdapter implements CameraAdapter {
       connectMs,
       connectRetries: 0,
       coldConnection,
+      onKeyframe: (listener) => {
+        keyframeListeners.push(listener);
+      },
     };
+    stream.on("video-config", (config) => {
+      codedSize = { width: config.width, height: config.height };
+    });
     stream.on("video", (frame) => {
       session.codec = codecName(frame.codec);
       session.reportedWidth = frame.width;
       session.reportedHeight = frame.height;
       video.write(frame.data);
+      if (frame.keyframe) {
+        const size = codedSize ?? { width: frame.width, height: frame.height };
+        for (const listener of keyframeListeners) listener(size);
+      }
     });
     stream.on("audio", (frame) => audio.write(frame.data));
     stream.on("stop", () => {

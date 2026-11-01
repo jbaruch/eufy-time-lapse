@@ -59,7 +59,8 @@ The probe has to run on the host that will run the service, because P2P behavior
    TIMELAPSE_CELLULAR_OPERATOR=<your carrier>
    ```
 
-4. Run three cold captures, 15 minutes apart. Keep the app's live view closed:
+4. Run three cold captures, 15 minutes apart. Each holds the stream until two keyframes at the required
+   size arrive (default 3840x2160), or 60 seconds pass. Keep the app's live view closed:
 
    ```bash
    docker compose run --rm timelapse probe

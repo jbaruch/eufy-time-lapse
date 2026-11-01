@@ -210,13 +210,35 @@ describe("MegaAdapter live sessions", () => {
 
     const received: Buffer[] = [];
     session.video.on("data", (chunk: Buffer) => received.push(chunk));
-    stream.emit("video", { data: Buffer.from([1, 2, 3]), codec: "h265", width: 1920, height: 1080 });
+    stream.emit("video", { data: Buffer.from([1, 2, 3]), codec: "h265", width: 1920, height: 1080, keyframe: false });
     stream.emit("audio", { data: Buffer.from([9]) });
     await new Promise((resolve) => setImmediate(resolve));
 
     assert.deepEqual(Buffer.concat(received), Buffer.from([1, 2, 3]));
     assert.equal(session.codec, "h265");
     assert.deepEqual([session.reportedWidth, session.reportedHeight], [1920, 1080]);
+    await adapter.shutdown();
+  });
+
+  it("reports keyframes at their coded size, and only keyframes", async () => {
+    const { client, adapter } = setup();
+    const stream = new FakeStream();
+    client.device = fakeDevice({}, stream);
+    const session = await adapter.openLiveSession(SERIAL, openSignal());
+    session.video.resume();
+    const seen: Array<{ width: number; height: number }> = [];
+    session.onKeyframe((size) => seen.push(size));
+
+    stream.emit("video", { data: Buffer.from([1]), codec: "h265", width: 1280, height: 720, keyframe: true });
+    stream.emit("video", { data: Buffer.from([2]), codec: "h265", width: 1280, height: 720, keyframe: false });
+    stream.emit("video-config", { codec: "h265", width: 3840, height: 2160 });
+    // The header disagrees with the parameter sets, and the parameter sets win.
+    stream.emit("video", { data: Buffer.from([3]), codec: "h265", width: 1280, height: 720, keyframe: true });
+
+    assert.deepEqual(seen, [
+      { width: 1280, height: 720 },
+      { width: 3840, height: 2160 },
+    ]);
     await adapter.shutdown();
   });
 

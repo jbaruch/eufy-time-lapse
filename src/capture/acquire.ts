@@ -7,6 +7,9 @@ import type { AbortCause, CameraAdapter, CleanupResult, FailurePhase, FailureRea
 import { extractKeyframes, identifyStream, probeImage } from "../media/ffmpeg.ts";
 
 export const TRAFFIC_BASIS = "media_payload_only: excludes P2P framing, encryption overhead, retransmits and connection setup";
+/** Long enough for a keyframe already handed to the stream to reach the file. */
+const KEYFRAME_FLUSH_MS = 200;
+
 export const FRESHNESS_BASIS = "bytes received on a live P2P session opened for this attempt, written to this attempt's own file";
 
 export interface AcquireOptions {
@@ -15,13 +18,15 @@ export interface AcquireOptions {
   outputDir: string;
   acquisitionTimeoutMs: number;
   cleanupTimeoutMs: number;
-  /** How long to keep the stream open after the first media arrives. */
-  streamMs: number;
+  /** Keyframes at the required size to collect before releasing the camera. */
+  targetKeyframes: number;
   minWidth: number;
   minHeight: number;
   signal?: AbortSignal;
   now?: () => Date;
 }
+
+export type StreamStop = "target_reached" | "deadline" | "stream_ended";
 
 export interface KeyframeRecord {
   file: string;
@@ -61,6 +66,8 @@ export interface AttemptRecord {
   traffic: { video_bytes: number; audio_bytes: number; basis: string };
   cleanup: CleanupResult;
   connect_retries: number | null;
+  /** Why the stream stopped: what was wanted arrived, time ran out, or the camera ended it. */
+  stream_stop: StreamStop | null;
   audio_error: string | null;
   frame: { file: string; width: number; height: number; bytes: number; sha256: string } | null;
   keyframes: KeyframeRecord[];
@@ -73,63 +80,71 @@ interface StreamStats {
   videoBytes: number;
   audioBytes: number;
   audioError: string | null;
+  stop: StreamStop | null;
 }
 
 /**
- * Writes the live video to `path` until `streamMs` after the first media, the stream ends, or the
- * signal fires. A deadline with media in hand keeps what arrived; it isn't a failure.
+ * Writes the live video to `path` until enough keyframes at the required size have arrived, the stream
+ * ends, or the signal fires. A session starts low and steps up, so a fixed window would cost the 4K
+ * frame on a slow path and waste battery on a fast one. A deadline with media in hand keeps what
+ * arrived; it isn't a failure.
  */
 function collectStream(
   session: LiveSession,
   path: string,
-  streamMs: number,
+  target: { keyframes: number; minWidth: number; minHeight: number },
   signal: AbortSignal,
   now: () => Date,
 ): { stats: StreamStats; done: Promise<void> } {
-  const stats: StreamStats = { firstMediaAt: null, videoBytes: 0, audioBytes: 0, audioError: null };
+  const stats: StreamStats = { firstMediaAt: null, videoBytes: 0, audioBytes: 0, audioError: null, stop: null };
   const done = new Promise<void>((resolve, reject) => {
     const sink = createWriteStream(path);
     let settled = false;
-    let stopTimer: NodeJS.Timeout | undefined;
+    let qualifyingKeyframes = 0;
+    let flushTimer: NodeJS.Timeout | undefined;
 
-    const finish = (failure?: Error): void => {
+    const finish = (stop: StreamStop | null, failure?: Error): void => {
       if (settled) return;
       settled = true;
-      clearTimeout(stopTimer);
+      stats.stop = stop;
+      clearTimeout(flushTimer);
       signal.removeEventListener("abort", onAbort);
       sink.end(() => (failure === undefined ? resolve() : reject(failure)));
     };
     const onAbort = (): void => {
       const cause = signal.reason as AbortCause;
       if (cause === "terminated") {
-        finish(new CaptureFailure("aborted", "first_media", "Stopped by a termination signal."));
+        finish(null, new CaptureFailure("aborted", "first_media", "Stopped by a termination signal."));
       } else if (stats.firstMediaAt === null) {
-        finish(new CaptureFailure("capture_timeout", "first_media", "The live stream started, but no video arrived before the attempt deadline."));
+        finish("deadline", new CaptureFailure("capture_timeout", "first_media", "The live stream started, but no video arrived before the attempt deadline."));
       } else {
-        finish();
+        finish("deadline");
       }
     };
     const onStreamGone = (): void => {
       if (stats.firstMediaAt === null) {
-        finish(new CaptureFailure("capture_timeout", "first_media", "The live stream ended before any video arrived."));
+        finish("stream_ended", new CaptureFailure("capture_timeout", "first_media", "The live stream ended before any video arrived."));
       } else {
-        finish();
+        finish("stream_ended");
       }
     };
 
+    session.onKeyframe((size) => {
+      if (settled || flushTimer !== undefined) return;
+      if (size.width < target.minWidth || size.height < target.minHeight) return;
+      qualifyingKeyframes += 1;
+      if (qualifyingKeyframes >= target.keyframes) flushTimer = setTimeout(() => finish("target_reached"), KEYFRAME_FLUSH_MS);
+    });
     session.video.on("data", (chunk: Buffer) => {
       if (settled) return;
-      if (stats.firstMediaAt === null) {
-        stats.firstMediaAt = now();
-        stopTimer = setTimeout(finish, streamMs);
-      }
+      stats.firstMediaAt ??= now();
       stats.videoBytes += chunk.length;
       sink.write(chunk);
     });
     session.video.once("end", onStreamGone);
     session.video.once("close", onStreamGone);
     session.video.once("error", (error: Error) => {
-      finish(new CaptureFailure("capture_timeout", "first_media", `The video stream failed: ${error.message}`, { cause: error }));
+      finish("stream_ended", new CaptureFailure("capture_timeout", "first_media", `The video stream failed: ${error.message}`, { cause: error }));
     });
     session.audio.on("data", (chunk: Buffer) => {
       if (!settled) stats.audioBytes += chunk.length;
@@ -138,7 +153,7 @@ function collectStream(
     session.audio.once("error", (error: Error) => {
       stats.audioError = error.message;
     });
-    sink.once("error", (error: Error) => finish(error));
+    sink.once("error", (error: Error) => finish(null, error));
 
     signal.addEventListener("abort", onAbort, { once: true });
     if (signal.aborted) onAbort();
@@ -184,7 +199,7 @@ export async function acquireFrame(options: AcquireOptions): Promise<AttemptReco
   try {
     session = await options.adapter.openLiveSession(options.cameraKey, controller.signal);
     streamStartedAt = now();
-    const collecting = collectStream(session, streamPath, options.streamMs, controller.signal, now);
+    const collecting = collectStream(session, streamPath, { keyframes: options.targetKeyframes, minWidth: options.minWidth, minHeight: options.minHeight }, controller.signal, now);
     stats = collecting.stats;
     await collecting.done;
   } catch (error) {
@@ -223,6 +238,7 @@ export async function acquireFrame(options: AcquireOptions): Promise<AttemptReco
     traffic: { video_bytes: stats?.videoBytes ?? 0, audio_bytes: stats?.audioBytes ?? 0, basis: TRAFFIC_BASIS },
     cleanup,
     connect_retries: session?.connectRetries ?? null,
+    stream_stop: stats?.stop ?? null,
     audio_error: stats?.audioError ?? null,
     frame: null,
     keyframes: [],

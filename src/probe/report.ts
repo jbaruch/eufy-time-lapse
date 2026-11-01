@@ -5,7 +5,7 @@ import type { AttemptRecord } from "../capture/acquire.ts";
  * Probe report schema. Owner and sole writer: src/probe/probe.ts. Readers are humans and the Phase 1
  * sign-off. Bump REPORT_SCHEMA_VERSION on any shape change.
  */
-export const REPORT_SCHEMA_VERSION = 2;
+export const REPORT_SCHEMA_VERSION = 3;
 
 export type CameraLink = "cellular" | "wifi";
 
@@ -43,7 +43,7 @@ export interface ProbeReport {
   settings: {
     attempts: number;
     interval_ms: number;
-    stream_ms: number;
+    target_keyframes: number;
     acquisition_timeout_ms: number;
     cleanup_timeout_ms: number;
     min_width: number;

@@ -32,7 +32,7 @@ describe("runProbe", () => {
       cameraId: "site-overview",
       attempts: 3,
       intervalMs: 900_000,
-      streamMs: 50,
+      targetKeyframes: 2,
       acquisitionTimeoutMs: 2_000,
       cleanupTimeoutMs: 100,
       minWidth: 1280,
@@ -74,7 +74,7 @@ describe("runProbe", () => {
     assert.deepEqual(JSON.parse(text), JSON.parse(JSON.stringify(report)));
     assert.equal(text.includes(CAMERA.key), false);
     assert.equal(report.camera.serial_masked.endsWith("1234"), true);
-    assert.equal(report.schema_version, 2);
+    assert.equal(report.schema_version, 3);
   });
 
   it("keeps going after a failed attempt and reports the next experiment", async () => {

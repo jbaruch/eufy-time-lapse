@@ -17,7 +17,7 @@ export interface ProbeOptions {
   cameraSerial?: string;
   attempts: number;
   intervalMs: number;
-  streamMs: number;
+  targetKeyframes: number;
   acquisitionTimeoutMs: number;
   cleanupTimeoutMs: number;
   minWidth: number;
@@ -93,7 +93,7 @@ export async function runProbe(options: ProbeOptions): Promise<ProbeReport> {
     settings: {
       attempts: options.attempts,
       interval_ms: options.intervalMs,
-      stream_ms: options.streamMs,
+      target_keyframes: options.targetKeyframes,
       acquisition_timeout_ms: options.acquisitionTimeoutMs,
       cleanup_timeout_ms: options.cleanupTimeoutMs,
       min_width: options.minWidth,
@@ -123,7 +123,7 @@ export async function runProbe(options: ProbeOptions): Promise<ProbeReport> {
       outputDir: join(options.runDir, `attempt-${index + 1}`),
       acquisitionTimeoutMs: options.acquisitionTimeoutMs,
       cleanupTimeoutMs: options.cleanupTimeoutMs,
-      streamMs: options.streamMs,
+      targetKeyframes: options.targetKeyframes,
       minWidth: options.minWidth,
       minHeight: options.minHeight,
       signal: options.signal,

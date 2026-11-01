@@ -65,7 +65,7 @@ describe("acquireFrame", () => {
       outputDir,
       acquisitionTimeoutMs: 2_000,
       cleanupTimeoutMs: 200,
-      streamMs: 100,
+      targetKeyframes: 2,
       minWidth: 1280,
       minHeight: 720,
       ...options,
@@ -147,6 +147,65 @@ describe("acquireFrame", () => {
     assert.deepEqual([record.frame?.width, record.frame?.height], [1280, 720], "kept at its real size, not scaled to fit");
   });
 
+  describe("when to release the camera", () => {
+    function liveFeed(video: Buffer) {
+      const stream = new PassThrough();
+      let notify: (size: { width: number; height: number }) => void = () => {};
+      const session = {
+        ...liveSession(Buffer.alloc(0), { codec: "h264" }),
+        video: stream,
+        audio: new PassThrough(),
+        onKeyframe: (listener: typeof notify) => {
+          notify = listener;
+        },
+      };
+      stream.write(video);
+      return { session, keyframe: (width: number, height: number) => notify({ width, height }) };
+    }
+
+    it("stops as soon as enough keyframes at the required size have arrived", async () => {
+      const feed = liveFeed(h264);
+      // A deadline the test would never survive: only the keyframes can end this stream.
+      const { adapter, result } = attempt({ open: async () => feed.session }, { acquisitionTimeoutMs: 60_000 });
+      setTimeout(() => {
+        feed.keyframe(1280, 720);
+        feed.keyframe(1280, 720);
+      }, 10);
+      const record = await result;
+      assert.equal(record.stream_stop, "target_reached");
+      assert.equal(record.status, "captured");
+      assert.equal(adapter.teardowns, 1);
+    });
+
+    it("keeps waiting through keyframes below the required size", async () => {
+      const feed = liveFeed(lowRes);
+      const { result } = attempt({ open: async () => feed.session }, { acquisitionTimeoutMs: 150 });
+      setTimeout(() => {
+        feed.keyframe(640, 360);
+        feed.keyframe(640, 360);
+        feed.keyframe(640, 360);
+      }, 10);
+      const record = await result;
+      assert.equal(record.stream_stop, "deadline");
+      assert.equal(record.status, "captured_degraded");
+      assert.ok(record.timing.session_ms >= 140, "it held the stream open for the 4K that never came");
+    });
+
+    it("needs the full count, not just one good keyframe", async () => {
+      const feed = liveFeed(h264);
+      const { result } = attempt({ open: async () => feed.session }, { acquisitionTimeoutMs: 150 });
+      setTimeout(() => feed.keyframe(1280, 720), 10);
+      const record = await result;
+      assert.equal(record.stream_stop, "deadline");
+      assert.equal(record.status, "captured", "the one good frame still counts when time runs out");
+    });
+
+    it("records when the camera ended the stream itself", async () => {
+      const { result } = attempt({ open: async () => liveSession(h264, { codec: "h264" }) });
+      assert.equal((await result).stream_stop, "stream_ended");
+    });
+  });
+
   it("fails and still releases the camera when no video arrives before the deadline", async () => {
     const silent = (): ReturnType<typeof liveSession> => {
       const session = liveSession(Buffer.alloc(0));
@@ -167,7 +226,7 @@ describe("acquireFrame", () => {
       video.write(h265);
       return { ...liveSession(Buffer.alloc(0)), video, audio: new PassThrough() };
     };
-    const { result } = attempt({ open: async () => trickle() }, { acquisitionTimeoutMs: 100, streamMs: 60_000 });
+    const { result } = attempt({ open: async () => trickle() }, { acquisitionTimeoutMs: 100 });
     const record = await result;
     assert.equal(record.status, "captured");
   });

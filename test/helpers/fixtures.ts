@@ -36,6 +36,7 @@ export function liveSession(video: Buffer, overrides: Partial<LiveSession> = {})
     connectMs: 1200,
     connectRetries: 0,
     coldConnection: true,
+    onKeyframe: () => {},
     ...overrides,
   };
 }
