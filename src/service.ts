@@ -132,14 +132,12 @@ export class CaptureService {
               unreadable.push(relativeDir);
               continue;
             }
-            this.insertCaptureRow(metadata, relativeDir);
-            if (metadata.slot_id !== null && metadata.schedule_revision !== null && metadata.scheduled_at_utc !== null) {
-              const scheduledAt = new Date(metadata.scheduled_at_utc);
-              const { date, minutes } = localParts(scheduledAt, this.zone);
-              this.state.restoreSlot(metadata.slot_id, { scheduledAt, localDate: date, localTime: formatClock(minutes), localMinutes: minutes, nonexistent: false }, metadata.schedule_revision);
-              this.state.setSlot(metadata.slot_id, metadata.quality_status === "ok" ? "captured" : "captured_degraded", { captureId });
-            }
-            this.state.addEvent("capture_adopted", captureId);
+            // All or nothing, so a crash here can't leave a frame's row with no slot to show for it.
+            this.state.inTransaction(() => {
+              this.insertCaptureRow(metadata, relativeDir);
+              this.finishRecoveredSlot(metadata);
+              this.state.addEvent("capture_adopted", captureId);
+            });
           }
         }
       }
@@ -147,6 +145,16 @@ export class CaptureService {
     // Left in place for a person: one bad file must not stop capture, and frames are never deleted.
     for (const relativeDir of unreadable) this.state.addEvent("capture_unreadable", relativeDir);
     await this.alerts.set("spool_unreadable", unreadable.length > 0, `${unreadable.length} frame(s) in the spool have unreadable metadata and aren't in the database, starting with ${unreadable[0] ?? ""}`);
+  }
+
+  /** Rebuilds a frame's slot if its row is gone, and marks the slot as having that frame. */
+  private finishRecoveredSlot(metadata: AdoptableCapture): void {
+    const { slot_id: slotId, schedule_revision: revision, scheduled_at_utc: scheduled } = metadata;
+    if (slotId === null || revision === null || scheduled === null) return;
+    const scheduledAt = new Date(scheduled);
+    const { date, minutes } = localParts(scheduledAt, this.zone);
+    this.state.restoreSlot(slotId, { scheduledAt, localDate: date, localTime: formatClock(minutes), localMinutes: minutes, nonexistent: false }, revision);
+    this.state.setSlot(slotId, metadata.quality_status === "ok" ? "captured" : "captured_degraded", { captureId: metadata.capture_id });
   }
 
   private async subdirectories(relativePath: string): Promise<string[]> {
@@ -159,19 +167,25 @@ export class CaptureService {
     }
   }
 
-  /**
-   * A claim on a slot counts only if the writer could have made it. A manual frame has no slot. A scheduled one holds the slot
-   * for its own time, taken after that time, and the writer only leaves one unrecorded by dying while that slot is running.
-   * A slot with no row at all has nothing to compare with: its row is rebuilt from the frame, so a lost row can't send the
-   * camera after a slot that already has one.
-   */
-  private slotClaimHolds(metadata: AdoptableCapture): boolean {
+  /** What a frame's own record can show about its claim on a slot: a manual frame has none, and a scheduled one claims its own time's, after that time. */
+  private claimIsWellFormed(metadata: AdoptableCapture): boolean {
     const { slot_id: slotId, schedule_revision: revision, scheduled_at_utc: scheduledAt } = metadata;
     if (metadata.kind === "manual") return slotId === null && revision === null && scheduledAt === null;
     if (slotId === null || revision === null || scheduledAt === null) return false;
     if (slotId !== `${this.config.project.id}/${this.config.camera.id}/${scheduledAt}`) return false;
     const receivedAt = Date.parse(metadata.frame_received_at);
-    if (receivedAt < Date.parse(scheduledAt) || receivedAt > this.now().getTime()) return false;
+    return receivedAt >= Date.parse(scheduledAt) && receivedAt <= this.now().getTime();
+  }
+
+  /**
+   * A claim counts only if the writer could have made it. Beyond being well formed, the slot has to be free, and the writer
+   * only leaves a frame unrecorded by dying while that slot is running. A slot with no row at all has nothing to compare
+   * with: its row is rebuilt from the frame, so a lost row can't send the camera after a slot that already has one.
+   */
+  private slotClaimHolds(metadata: AdoptableCapture): boolean {
+    if (!this.claimIsWellFormed(metadata)) return false;
+    const { slot_id: slotId, schedule_revision: revision, scheduled_at_utc: scheduledAt } = metadata;
+    if (slotId === null) return true;
     if (this.state.slotHasCapture(slotId)) return false;
     const slot = this.state.getSlot(slotId);
     if (slot === undefined) return true;
@@ -184,6 +198,18 @@ export class CaptureService {
    */
   private async repairSlotLinks(): Promise<void> {
     const disputed: string[] = [];
+    for (const row of this.state.capturesMissingSlots()) {
+      const stored = await readStoredCapture(this.options.dataDir, row.relative_dir, row.capture_id, row.local_date, this.owner);
+      if (stored !== null && this.claimIsWellFormed(stored) && (await storedCaptureProblem(this.options.dataDir, row, this.owner)) === null) {
+        this.state.inTransaction(() => {
+          this.finishRecoveredSlot(stored);
+          this.state.addEvent("slot_restored", row.capture_id);
+        });
+      } else {
+        disputed.push(row.capture_id);
+        this.state.addEvent("slot_link_disputed", row.capture_id);
+      }
+    }
     for (const row of this.state.unlinkedCaptures()) {
       if (row.slot_state === "running" && row.slot_capture_id === null && (await storedCaptureProblem(this.options.dataDir, row, this.owner)) === null) {
         this.state.setSlot(row.slot_id, row.quality_status === "ok" ? "captured" : "captured_degraded", { captureId: row.capture_id });

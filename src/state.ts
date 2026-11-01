@@ -187,7 +187,7 @@ export class State {
     return this.db.prepare(sql).get(...params) as T | undefined;
   }
 
-  private inTransaction(work: () => void): void {
+  inTransaction(work: () => void): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       work();
@@ -252,6 +252,11 @@ export class State {
   /** The latest day the plan has reached, which is where a long outage starts. */
   newestSlotDate(): string | undefined {
     return this.one<{ newest: string | null }>("SELECT MAX(local_date) AS newest FROM slots")?.newest ?? undefined;
+  }
+
+  /** Frames whose slot has no row at all. */
+  capturesMissingSlots(): CaptureRow[] {
+    return this.all<CaptureRow>("SELECT c.* FROM captures c LEFT JOIN slots s ON s.slot_id = c.slot_id WHERE c.slot_id IS NOT NULL AND s.slot_id IS NULL");
   }
 
   /** Frames whose slot doesn't name them back. */

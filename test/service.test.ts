@@ -872,16 +872,74 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
-    it("doesn't send the camera after a slot whose row was lost while its frame's row survived", async () => {
+    /** A saved frame, with the row of its slot then lost. */
+    async function slotRowLost(): Promise<{ h: Awaited<ReturnType<typeof harness>>; captureId: string }> {
       const h = await harness();
       await runAt(h, [0]);
+      const captureId = h.state.getSlot(SLOT_0800)?.capture_id;
+      assert.ok(typeof captureId === "string");
       const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"));
       raw.prepare("DELETE FROM slots WHERE slot_id = ?").run(SLOT_0800);
       raw.close();
+      return { h, captureId };
+    }
+
+    it("rebuilds a slot row lost while its frame's row survived, and doesn't send the camera", async () => {
+      const { h, captureId } = await slotRowLost();
       await h.service.reconcile();
+      const slot = h.state.getSlot(SLOT_0800);
+      assert.deepEqual([slot?.state, slot?.capture_id, slot?.local_time], ["captured", captureId, "08:00"]);
       const opens = h.adapter.opens;
       await h.service.tick(h.signal);
-      assert.equal(h.state.getSlot(SLOT_0800)?.state, "pending", "planned again, and not due");
+      assert.equal(h.adapter.opens, opens);
+      h.state.close();
+    });
+
+    it("rebuilds it after the deadline too, so a saved frame doesn't count as missed", async () => {
+      const { h, captureId } = await slotRowLost();
+      h.clock.ms = AT_0800 + 60 * MINUTE;
+      await h.service.reconcile();
+      await h.service.tick(h.signal);
+      assert.deepEqual([h.state.getSlot(SLOT_0800)?.state, h.state.getSlot(SLOT_0800)?.capture_id], ["captured", captureId]);
+      h.state.close();
+    });
+
+    it("doesn't rebuild it when the stored frame no longer matches, and alerts", async () => {
+      const { h } = await slotRowLost();
+      const [capture] = h.state.allCaptures();
+      assert.ok(capture !== undefined);
+      await writeFile(join(h.dataDir, capture.relative_dir, "frame.jpg"), "damaged");
+      await h.service.reconcile();
+      assert.equal(h.state.getSlot(SLOT_0800), undefined);
+      assert.ok(h.notices.some((notice) => notice.includes("disagree about each other")), h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("leaves nothing half done when adopting a frame fails partway, and adopts it next time", async () => {
+      const h = await harness();
+      await spooled(h, "interrupted", JSON.stringify(scheduledFor("interrupted")));
+      const setSlot = h.state.setSlot.bind(h.state);
+      h.state.setSlot = () => {
+        throw new RangeError("the crash");
+      };
+      await assert.rejects(h.service.reconcile(), RangeError);
+      h.state.setSlot = setSlot;
+      assert.equal(h.state.hasCapture("interrupted"), false);
+      assert.equal(h.state.getSlot(STORED_SLOT), undefined);
+      await h.service.reconcile();
+      assert.equal(h.state.hasCapture("interrupted"), true);
+      assert.equal(h.state.getSlot(STORED_SLOT)?.capture_id, "interrupted");
+      h.state.close();
+    });
+
+    it("never treats a pending slot as due once it has a frame", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"));
+      raw.prepare("UPDATE slots SET state = 'pending', capture_id = NULL WHERE slot_id = ?").run(SLOT_0800);
+      raw.close();
+      const opens = h.adapter.opens;
+      await h.service.tick(h.signal);
       assert.equal(h.adapter.opens, opens);
       h.state.close();
     });
