@@ -330,12 +330,34 @@ describe("CaptureService", () => {
       state.close();
     });
 
-    it("removes a half-written spool directory left by a crash", async () => {
+    it("removes a half-written spool directory left by a crash, once it's old enough to be proven one", async () => {
       const h = await harness();
       const leftover = join(h.dataDir, "spool-tmp", "half-done");
       await mkdir(leftover, { recursive: true });
+      const twoDaysAgo = new Date(AT_0800 - 2 * 1440 * MINUTE);
+      await utimes(leftover, twoDaysAgo, twoDaysAgo);
       await h.service.reconcile();
       assert.equal(await exists(leftover), false);
+      h.state.close();
+    });
+
+    it("leaves a spool directory another process may be publishing right now", async () => {
+      const h = await harness();
+      const publishing = join(h.dataDir, "spool-tmp", "being-published");
+      await mkdir(publishing, { recursive: true });
+      await writeFile(join(publishing, "frame.jpg"), "in progress");
+      const justNow = new Date(AT_0800 - MINUTE);
+      await utimes(publishing, justNow, justNow);
+      await h.service.reconcile();
+      assert.equal(await readFile(join(publishing, "frame.jpg"), "utf8"), "in progress");
+      h.state.close();
+    });
+
+    it("isn't stopped by an entry that's gone by the time it looks", async () => {
+      const h = await harness();
+      await mkdir(join(h.dataDir, "spool-tmp"), { recursive: true });
+      await symlink(join(h.dataDir, "not-there"), join(h.dataDir, "spool-tmp", "vanished"));
+      await h.service.reconcile();
       h.state.close();
     });
   });

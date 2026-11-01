@@ -21,6 +21,7 @@ import type { ServiceConfig } from "./service-config.ts";
 import type { AttemptRow, CaptureRow, SlotRow, State } from "./state.ts";
 
 const IDLE_WAKE_MS = 60_000;
+const SPOOL_TMP_KEEP_DAYS = 1;
 const ARCHIVE_DISABLED = "not_configured";
 
 export interface ServiceOptions {
@@ -106,7 +107,6 @@ export class CaptureService {
 
   /** Recovers from whatever a crash left: a slot marked running, or a published frame the database never heard about. */
   async reconcile(): Promise<void> {
-    await rm(join(this.options.dataDir, "spool-tmp"), { recursive: true, force: true });
     await this.adoptPublishedFrames();
     await this.repairSlotLinks();
     for (const slot of this.state.markInterruptedSlots()) {
@@ -240,6 +240,9 @@ export class CaptureService {
 
   /** A service that runs for a year needs its diagnostics to expire. Frames and the database never do. */
   private async pruneDiagnostics(): Promise<void> {
+    // Another process may be publishing right now: a manual capture does it after giving back the camera lock.
+    // A publish takes seconds, so only something this old is proven to be what a crash left behind.
+    await this.pruneOlderThan(join(this.options.dataDir, "spool-tmp"), SPOOL_TMP_KEEP_DAYS);
     await this.pruneOlderThan(join(this.options.dataDir, "work"), this.config.storage.keep_failed_work_days);
     await this.pruneOlderThan(join(this.options.dataDir, "logs"), this.config.storage.keep_logs_days);
   }
@@ -255,7 +258,15 @@ export class CaptureService {
     }
     for (const entry of entries) {
       const path = join(root, entry);
-      if ((await stat(path)).mtimeMs < cutoff) await rm(path, { recursive: true, force: true });
+      let modifiedMs: number;
+      try {
+        modifiedMs = (await stat(path)).mtimeMs;
+      } catch (error) {
+        // Gone since the listing, which is what a publisher finishing looks like.
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw error;
+      }
+      if (modifiedMs < cutoff) await rm(path, { recursive: true, force: true });
     }
   }
 
