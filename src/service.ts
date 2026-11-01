@@ -94,7 +94,7 @@ export class CaptureService {
   private lastPruneDate: string | undefined;
   /** A failure from background work, which the next tick raises so it takes the same path as any other crash. */
   private backgroundFailure: Error | undefined;
-  /** Unset until reconcile is done: rebuilding a lost database from a full spool is slow on purpose. */
+  /** Unset until the service runs. */
   private loopBeatAt: number | undefined;
   private loopDeclaredStuck = false;
   private readonly onBackgroundFailure = (error: Error): void => {
@@ -156,6 +156,8 @@ export class CaptureService {
         for (const day of await this.subdirectories(join(root, year, month))) {
           const relativeDay = join(root, year, month, day);
           for (const captureId of await this.subdirectories(relativeDay)) {
+            // Rebuilding a lost database from a full spool is slow on purpose, and each frame is progress.
+            this.beat();
             const relativeDir = join(relativeDay, captureId);
             const known = this.state.getCapture(captureId);
             if (known !== undefined) {
@@ -415,6 +417,10 @@ export class CaptureService {
     return next === undefined ? IDLE_WAKE_MS : Math.min(IDLE_WAKE_MS, Math.max(0, Date.parse(next.scheduled_at_utc) - now.getTime()));
   }
 
+  private beat(): void {
+    this.loopBeatAt = this.now().getTime();
+  }
+
   /**
    * A hung await would leave the process alive and /healthz answering, with no slot and no alert ever again, since
    * alerts come from the same loop. A restart recovers, and reconcile records what was interrupted.
@@ -446,10 +452,11 @@ export class CaptureService {
     const watchdog = setInterval(() => this.checkLoop(), this.options.watchdogCheckMs ?? WATCHDOG_CHECK_MS);
     watchdog.unref();
     try {
+      this.beat();
       await this.reconcile();
       audit = this.auditStoredFrames(signal).catch(this.onBackgroundFailure);
       while (!signal.aborted) {
-        this.loopBeatAt = this.now().getTime();
+        this.beat();
         // No swallowing here: an unexpected error should crash this process. The restart policy brings it back,
         // and reconcile records the interrupted slot, which beats limping on in an unknown state.
         const waitMs = await this.tick(signal);

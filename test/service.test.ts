@@ -208,7 +208,35 @@ describe("CaptureService", () => {
       await finish();
     });
 
-    it("isn't armed until the loop starts, since rebuilding a lost database is slow on purpose", async () => {
+    it("catches a hang during reconcile too, before the loop has ever come round", async (t) => {
+      const stuck: Error[] = [];
+      const h = await harness({ onStuck: (error) => stuck.push(error) });
+      // An empty spool, so no adopted frame has beaten yet. Clearing this old alert is where reconcile hangs.
+      const at = new Date(AT_0800).toISOString();
+      h.state.upsertAlert("spool_unreadable", "old", at, at);
+      let release = (): void => {};
+      h.delivery.hang = new Promise((resolve) => {
+        release = resolve;
+      });
+      const controller = new AbortController();
+      const running = h.service.run(controller.signal);
+      while (!h.notices.some((notice) => notice.includes("recovered: old"))) await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(h.created.count, 0, "still in reconcile");
+      t.mock.timers.enable({ apis: ["setTimeout"] });
+      h.clock.ms += 15 * MINUTE;
+      h.service.checkLoop();
+      await settle();
+      t.mock.timers.tick(40_000);
+      assert.equal(stuck.length, 1);
+      t.mock.timers.reset();
+      delete h.delivery.hang;
+      controller.abort();
+      release();
+      await running;
+      h.state.close();
+    });
+
+    it("isn't armed before the service runs", async () => {
       const stuck: Error[] = [];
       const h = await harness({ onStuck: (error) => stuck.push(error) });
       h.clock.ms += 24 * 60 * MINUTE;
@@ -267,9 +295,13 @@ describe("CaptureService", () => {
           adapter.setDiscoverHang(new Promise(() => {}));
           const state = new State(join(dataDir, "state.sqlite"), now);
           setInterval(() => {}, 1000);
-          setTimeout(() => { ms += ${16 * MINUTE}; }, 50);
+          // The adapter is created inside a tick, so the loop has already started when the clock jumps.
+          const createAdapter = () => {
+            ms += ${16 * MINUTE};
+            return adapter;
+          };
           await new CaptureService({
-            config: ${JSON.stringify(serviceConfig())}, state, createAdapter: () => adapter, dataDir, minWidth: 1280, minHeight: 720, link: "cellular", operator: null,
+            config: ${JSON.stringify(serviceConfig())}, state, createAdapter, dataDir, minWidth: 1280, minHeight: 720, link: "cellular", operator: null,
             log: () => {}, notify: async () => true, now, sleep: async () => {}, diskFreeMb: async () => 50000, watchdogCheckMs: 5,
           }).run(new AbortController().signal);
         `], { timeout: 30_000 }),
@@ -1431,6 +1463,25 @@ describe("CaptureService", () => {
         h.state.close();
       });
     }
+
+    it("counts each adopted frame as progress, however slow a rebuild is", async () => {
+      const stuck: Error[] = [];
+      const h = await harness({ onStuck: (error) => stuck.push(error) });
+      for (const id of ["one", "two", "three"]) await spooled(h, id, JSON.stringify(metadataFor(id)));
+      const addEvent = h.state.addEvent.bind(h.state);
+      h.state.addEvent = (kind, detail) => {
+        addEvent(kind, detail);
+        if (kind !== "capture_adopted") return;
+        h.clock.ms += 14 * MINUTE;
+        h.service.checkLoop();
+      };
+      const stopped = new AbortController();
+      stopped.abort();
+      await h.service.run(stopped.signal);
+      assert.deepEqual(["one", "two", "three"].map((id) => h.state.hasCapture(id)), [true, true, true]);
+      assert.deepEqual(stuck, [], "42 minutes of rebuilding, 14 per frame");
+      h.state.close();
+    });
 
     it("adopts a scheduled frame when the database lost its slot, and keeps the claim", async () => {
       const h = await harness();
