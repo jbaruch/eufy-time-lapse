@@ -904,6 +904,28 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    for (const [name, location] of [
+      ["outside the data directory", (id: string) => join("..", `copies-${id}`)],
+      ["elsewhere in the data directory", (id: string) => join("copies", id)],
+      ["under another camera", (id: string) => join("spool", "construction", "other-camera", "2026", "07", "01", id)],
+    ] as const) {
+      it(`doesn't rebuild it from a row recording a perfect copy ${name}, and alerts`, async () => {
+        const { h, captureId } = await slotRowLost();
+        const [capture] = h.state.allCaptures();
+        assert.ok(capture !== undefined);
+        const relative = location(captureId);
+        await cp(join(h.dataDir, capture.relative_dir), join(h.dataDir, relative), { recursive: true });
+        await rm(join(h.dataDir, capture.relative_dir), { recursive: true });
+        const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"));
+        raw.prepare("UPDATE captures SET relative_dir = ? WHERE capture_id = ?").run(relative, captureId);
+        raw.close();
+        await h.service.reconcile();
+        assert.equal(h.state.getSlot(SLOT_0800), undefined);
+        assert.ok(h.notices.some((notice) => notice.includes("disagree about each other")), h.notices.join("; "));
+        h.state.close();
+      });
+    }
+
     it("doesn't rebuild it when the stored frame no longer matches, and alerts", async () => {
       const { h } = await slotRowLost();
       const [capture] = h.state.allCaptures();

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { isFileSystemError } from "./config.ts";
 import type { CameraLink } from "./probe/report.ts";
 import type { CaptureRow } from "./state.ts";
@@ -107,13 +107,19 @@ export function spoolDirectory(owner: CaptureOwner, localDate: string, captureId
   return join(spoolDay(owner, localDate), captureId);
 }
 
+/** Whether a recorded path is the one a capture's identity gives it. Everything read from the spool goes through this first. */
+function isItsOwnLocation(relativeDir: string, captureId: string, localDate: string, owner: CaptureOwner): boolean {
+  return SAFE_NAME.test(captureId) && LOCAL_DATE.test(localDate) && relativeDir === spoolDirectory(owner, localDate, captureId);
+}
+
 type StoredFile = { bytes: Buffer } | { problem: string };
 
 /** A stored file, if it's really at its place in the spool. A link leading elsewhere could be anything. */
 async function readStoredFile(dataDir: string, relativePath: string, label: string): Promise<StoredFile> {
   try {
     const location = await realpath(join(dataDir, relativePath));
-    if (location !== join(await realpath(dataDir), relativePath)) return { problem: `the ${label} file leads outside the spool` };
+    const root = await realpath(dataDir);
+    if (location !== join(root, relativePath) || !location.startsWith(`${root}${sep}`)) return { problem: `the ${label} file leads outside the spool` };
     return { bytes: await readFile(location) };
   } catch (error) {
     // A bug isn't a bad file. One unreadable file, on the other hand, must not stop capture or a render.
@@ -128,6 +134,7 @@ function frameMatches(frame: Buffer, facts: { jpeg_bytes: number; sha256: string
 
 /** What's stored at a place in the spool, if its record, that place and its frame all agree, and it's this camera's. */
 export async function readStoredCapture(dataDir: string, relativeDir: string, captureId: string, localDate: string, owner: CaptureOwner): Promise<AdoptableCapture | null> {
+  if (!isItsOwnLocation(relativeDir, captureId, localDate, owner)) return null;
   const metadataFile = await readStoredFile(dataDir, join(relativeDir, "metadata.json"), "metadata");
   if ("problem" in metadataFile) return null;
   const metadata = parseCaptureMetadata(metadataFile.bytes.toString("utf8"));
@@ -139,9 +146,7 @@ export async function readStoredCapture(dataDir: string, relativeDir: string, ca
 
 /** What's wrong with what's stored for a database row, in words, or null if it's all still what the row says. */
 export async function storedCaptureProblem(dataDir: string, row: CaptureRow, owner: CaptureOwner): Promise<string | null> {
-  if (!SAFE_NAME.test(row.capture_id) || !LOCAL_DATE.test(row.local_date) || row.relative_dir !== spoolDirectory(owner, row.local_date, row.capture_id)) {
-    return "its recorded location isn't where this camera's frames belong";
-  }
+  if (!isItsOwnLocation(row.relative_dir, row.capture_id, row.local_date, owner)) return "its recorded location isn't where this camera's frames belong";
   const frameFile = await readStoredFile(dataDir, join(row.relative_dir, "frame.jpg"), "frame");
   if ("problem" in frameFile) return frameFile.problem;
   if (!frameMatches(frameFile.bytes, row)) return "the frame file doesn't match its record";
