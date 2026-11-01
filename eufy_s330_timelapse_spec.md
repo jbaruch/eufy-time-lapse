@@ -112,6 +112,8 @@ Answering the camera's relay packets, and switching to another relay on a stall 
 
 **The run slowed down with no change to the connect.** Until about 03:30 local, connects took 7.3 seconds at the median and 10.4 at most. After that they took 13.0 and 22.8, and median sessions went from 12.7 to 19.3 seconds. Most of that is the wait for the lookup servers to learn the camera's address, which moved from a steady 4 seconds to steps of about 4, 10 and 16 to 19. Some sessions also go silent for about 6 seconds mid-stream. Our lookups were acknowledged within 20 ms throughout, so the steps are on the camera's or the carrier's side. A lost wake being retried would fit, but that's inferred. A retry seconds later found the camera in 3.8 seconds. The attempt deadline is 30 seconds, and 4 sessions reached it with a frame already in hand, so calibration has to allow for this when it sets the session cap.
 
+**The quick check, on the bench:** 10 captures back to back took 3 minutes 45 seconds. All 10 came out at 4K, 9 on the first try. Connects took 3.4 seconds at the median and 7.4 at most, and sessions took 12.3 and 27.2. Back to back is kinder than real slots, whose connects took 7 to 13 seconds, so compare a mount-day check with this run and not with the overnight numbers.
+
 **Broken on purpose, on the real camera:**
 
 | What happened | What the service did |
@@ -469,7 +471,7 @@ Before enabling year-long operation, fill in project dates, site time zone, Eufy
 
 - The S3 offsite archiver. Frames are spooled on the host, whose storage is durable, but there is no offsite copy; the destination is not chosen.
 - The monthly preview render.
-- Calibration of battery, solar and reception, which needs the camera mounted at the site on its panel. Signal there sets connect times and how hard the radio works, so a number measured on the bench, session cap included, doesn't carry over. Taking it off cable earlier only calls for a gentler config, with a real daylight window and no debug logs.
+- Calibration of battery, solar and reception, which needs the camera mounted at the site on its panel. Signal there sets connect times and how hard the radio works, so a number measured on the bench, session cap included, doesn't carry over. The steps to get there are in the README's "Going live".
 
 # 14. Post-MVP Ideas
 

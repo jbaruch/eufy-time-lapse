@@ -107,6 +107,24 @@ Run anything else alongside it with `docker compose run --rm timelapse <command>
 | `notify-test` | Sends one test message to the alert destination |
 | `login` | Log in again when the service reports `auth_required` or `login_renewal`, or to make this device trusted. A running service picks it up |
 
+## Going live
+
+In this order, and nothing waits for a slot:
+
+1. **Off cable: stop.** `docker compose run --rm timelapse pause`. The service stays up and no slot wakes the camera.
+   Telegram reminds you once a day that it's paused.
+2. **Mounted: a quick, intensive check.** About 4 minutes, using the service's own capture settings:
+
+   ```bash
+   docker compose run --rm timelapse probe --attempts 10 --interval-minutes 0.05
+   ```
+
+   Each try's `frame.jpg` shows the framing. Turn motion tracking off in the app while someone is still up there.
+   Compare the timings with the quick check in the spec's section 3.1.
+3. **All set: production pace.** Take the test overrides out of `data/config.json`, restart, then
+   `docker compose run --rm timelapse resume`. The defaults are 08:00 to 18:00 daily, every 5 minutes at 60% battery or
+   more, every 15 at 40%, hourly below that, and a pause at 25%.
+
 The service also answers on `127.0.0.1:8787`. `/status` has the full report. `/healthz` means only that the
 process is alive, so check `/status` to know frames are arriving. If the capture loop makes no progress for 15 minutes,
 the service alerts and restarts itself.
