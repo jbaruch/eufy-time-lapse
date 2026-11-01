@@ -131,7 +131,7 @@ describe("render", () => {
   });
 
   it("explains an empty selection", async () => {
-    await assert.rejects(render({ ...base, state, dataDir: dir.path, from: "2030-01-01", to: "2030-01-02", outputPath: join(dir.path, "renders", "none.mp4") }), (error: RenderError) => error instanceof RenderError && /No frames/.test(error.message));
+    await assert.rejects(render({ ...base, state, dataDir: dir.path, from: "2020-01-01", to: "2020-01-02", outputPath: join(dir.path, "renders", "none.mp4") }), (error: RenderError) => error instanceof RenderError && /No frames/.test(error.message));
   });
 
   it("fails loudly on a missing source frame, and leaves the others alone", async () => {

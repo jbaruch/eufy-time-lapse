@@ -10,6 +10,11 @@ import type { AcquireOptions } from "../src/capture/acquire.ts";
 import { liveSession, MockAdapter, rawVideo, tempDir } from "./helpers/fixtures.ts";
 import type { MockBehavior } from "./helpers/fixtures.ts";
 
+/** Lets real I/O run until something has happened. Counts event-loop turns rather than time, so it can't race a clock. */
+async function until(condition: () => boolean): Promise<void> {
+  while (!condition()) await new Promise((resolve) => setImmediate(resolve));
+}
+
 async function exists(path: string): Promise<boolean> {
   try {
     await access(path);
@@ -150,51 +155,62 @@ describe("acquireFrame", () => {
   describe("when to release the camera", () => {
     function liveFeed(video: Buffer) {
       const stream = new PassThrough();
-      let notify: (size: { width: number; height: number }) => void = () => {};
+      let notify: ((size: { width: number; height: number }) => void) | undefined;
       const session = {
         ...liveSession(Buffer.alloc(0), { codec: "h264" }),
         video: stream,
         audio: new PassThrough(),
-        onKeyframe: (listener: typeof notify) => {
+        onKeyframe: (listener: (size: { width: number; height: number }) => void) => {
           notify = listener;
         },
       };
       stream.write(video);
-      return { session, keyframe: (width: number, height: number) => notify({ width, height }) };
+      return {
+        session,
+        collecting: async () => until(() => notify !== undefined),
+        keyframe: (width: number, height: number) => notify?.({ width, height }),
+      };
     }
 
-    it("stops as soon as enough keyframes at the required size have arrived", async () => {
+    it("stops as soon as enough keyframes at the required size have arrived", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout"] });
       const feed = liveFeed(h264);
-      // A deadline the test would never survive: only the keyframes can end this stream.
       const { adapter, result } = attempt({ open: async () => feed.session }, { acquisitionTimeoutMs: 60_000 });
-      setTimeout(() => {
-        feed.keyframe(1280, 720);
-        feed.keyframe(1280, 720);
-      }, 10);
+      await feed.collecting();
+      feed.keyframe(1280, 720);
+      feed.keyframe(1280, 720);
+      // The short flush after the last keyframe, far from the attempt's deadline.
+      t.mock.timers.tick(200);
       const record = await result;
       assert.equal(record.stream_stop, "target_reached");
       assert.equal(record.status, "captured");
       assert.equal(adapter.teardowns, 1);
     });
 
-    it("keeps waiting through keyframes below the required size", async () => {
+    it("keeps waiting through keyframes below the required size", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.parse("2026-07-01T13:00:00Z") });
       const feed = liveFeed(lowRes);
       const { result } = attempt({ open: async () => feed.session }, { acquisitionTimeoutMs: 150 });
-      setTimeout(() => {
-        feed.keyframe(640, 360);
-        feed.keyframe(640, 360);
-        feed.keyframe(640, 360);
-      }, 10);
+      await feed.collecting();
+      feed.keyframe(640, 360);
+      feed.keyframe(640, 360);
+      feed.keyframe(640, 360);
+      t.mock.timers.tick(149);
+      await new Promise((resolve) => setImmediate(resolve));
+      t.mock.timers.tick(1);
       const record = await result;
       assert.equal(record.stream_stop, "deadline");
       assert.equal(record.status, "captured_degraded");
-      assert.ok(record.timing.session_ms >= 140, "it held the stream open for the 4K that never came");
+      assert.equal(record.timing.session_ms, 150, "it held the stream open for the 4K that never came");
     });
 
-    it("needs the full count, not just one good keyframe", async () => {
+    it("needs the full count, not just one good keyframe", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout"] });
       const feed = liveFeed(h264);
       const { result } = attempt({ open: async () => feed.session }, { acquisitionTimeoutMs: 150 });
-      setTimeout(() => feed.keyframe(1280, 720), 10);
+      await feed.collecting();
+      feed.keyframe(1280, 720);
+      t.mock.timers.tick(150);
       const record = await result;
       assert.equal(record.stream_stop, "deadline");
       assert.equal(record.status, "captured", "the one good frame still counts when time runs out");
@@ -206,12 +222,15 @@ describe("acquireFrame", () => {
     });
   });
 
-  it("fails and still releases the camera when no video arrives before the deadline", async () => {
+  it("fails and still releases the camera when no video arrives before the deadline", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const silent = (): ReturnType<typeof liveSession> => {
       const session = liveSession(Buffer.alloc(0));
       return { ...session, video: new PassThrough(), audio: new PassThrough() };
     };
     const { adapter, outputDir, result } = attempt({ open: async () => silent() }, { acquisitionTimeoutMs: 50 });
+    await until(() => adapter.opens === 1);
+    t.mock.timers.tick(50);
     const record = await result;
     assert.equal(record.status, "failed");
     assert.equal(record.failure?.reason, "capture_timeout");
@@ -220,13 +239,16 @@ describe("acquireFrame", () => {
     assert.equal(await exists(join(outputDir, "frame.jpg")), false);
   });
 
-  it("uses what arrived when the deadline hits mid-stream", async () => {
+  it("uses what arrived when the deadline hits mid-stream", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const video = new PassThrough();
     const trickle = (): ReturnType<typeof liveSession> => {
-      const video = new PassThrough();
       video.write(h265);
       return { ...liveSession(Buffer.alloc(0)), video, audio: new PassThrough() };
     };
     const { result } = attempt({ open: async () => trickle() }, { acquisitionTimeoutMs: 100 });
+    await until(() => video.readableLength === 0 && video.listenerCount("data") > 0);
+    t.mock.timers.tick(100);
     const record = await result;
     assert.equal(record.status, "captured");
   });
@@ -266,8 +288,16 @@ describe("acquireFrame", () => {
     assert.equal(await exists(join(outputDir, "frame.jpg")), true);
   });
 
-  it("bounds a teardown that hangs", async () => {
-    const { result } = attempt({ open: async () => liveSession(h265), teardown: () => new Promise(() => {}) }, { cleanupTimeoutMs: 30 });
+  it("bounds a teardown that hangs", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let tearingDown = false;
+    const hang = (): Promise<never> => {
+      tearingDown = true;
+      return new Promise(() => {});
+    };
+    const { result } = attempt({ open: async () => liveSession(h265), teardown: hang }, { cleanupTimeoutMs: 30 });
+    await until(() => tearingDown);
+    t.mock.timers.tick(30);
     const record = await result;
     assert.equal(record.status, "captured");
     assert.equal(record.cleanup.status, "timeout");
@@ -277,7 +307,8 @@ describe("acquireFrame", () => {
     const controller = new AbortController();
     const silent = { ...liveSession(Buffer.alloc(0)), video: new PassThrough(), audio: new PassThrough() };
     const { adapter, result } = attempt({ open: async () => silent }, { signal: controller.signal });
-    setTimeout(() => controller.abort(), 20);
+    await until(() => silent.video.listenerCount("data") > 0);
+    controller.abort();
     const record = await result;
     assert.equal(record.failure?.reason, "aborted");
     assert.equal(adapter.teardowns, 1);
