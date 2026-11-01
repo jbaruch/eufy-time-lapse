@@ -76,6 +76,48 @@ describe("loadConfig", () => {
   });
 });
 
+describe("opening the state database", () => {
+  let dir: { path: string; remove: () => Promise<void> };
+
+  before(async () => {
+    dir = await tempDir();
+  });
+  after(async () => {
+    await dir.remove();
+  });
+
+  it("lets several processes open a new one at once, and migrates it once", async () => {
+    const database = join(dir.path, "fresh.sqlite");
+    const module = new URL("../src/state.ts", import.meta.url).href;
+    const run = promisify(execFile);
+    const openers = Array.from({ length: 6 }, () =>
+      run(process.execPath, ["--input-type=module", "-e", `
+        import { State } from ${JSON.stringify(module)};
+        new State(${JSON.stringify(database)}).close();
+      `]),
+    );
+    await Promise.all(openers);
+    const db = new DatabaseSync(database);
+    const { count } = db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'slots'").get() as { count: number };
+    const { user_version: version } = db.prepare("PRAGMA user_version").get() as { user_version: number };
+    db.close();
+    assert.equal(count, 1);
+    assert.ok(version > 0);
+  });
+
+  it("refuses a database from a newer build, and leaves it alone", () => {
+    const database = join(dir.path, "newer.sqlite");
+    const db = new DatabaseSync(database);
+    db.exec("CREATE TABLE marker (id INTEGER); PRAGMA user_version = 99");
+    db.close();
+    assert.throws(() => new State(database), /version 99/);
+    const after = new DatabaseSync(database);
+    const { user_version: version } = after.prepare("PRAGMA user_version").get() as { user_version: number };
+    after.close();
+    assert.equal(version, 99);
+  });
+});
+
 describe("withCameraLock", () => {
   let dir: { path: string; remove: () => Promise<void> };
   let run = 0;

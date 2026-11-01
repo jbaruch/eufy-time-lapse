@@ -154,21 +154,28 @@ export class State {
   constructor(path: string, now: () => Date = () => new Date()) {
     this.db = new DatabaseSync(path);
     this.now = now;
-    this.db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
+    // In this order: switching to WAL needs the file to itself, so it's the first thing that can find it busy.
+    this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL;");
     this.migrate();
   }
 
+  private schemaVersion(): number {
+    return (this.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+  }
+
+  /** The service and a command can both open a new database at once, so the version is only worth reading under the write lock. */
   private migrate(): void {
-    const version = (this.db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
-    if (version > MIGRATIONS.length) {
-      throw new Error(`The state database is version ${version}, and this build knows ${MIGRATIONS.length}. Run the newer build, or restore a backup.`);
-    }
-    for (let index = version; index < MIGRATIONS.length; index += 1) {
-      this.db.exec("BEGIN");
-      this.db.exec(MIGRATIONS[index] as string);
-      this.db.exec(`PRAGMA user_version = ${index + 1}`);
-      this.db.exec("COMMIT");
-    }
+    if (this.schemaVersion() === MIGRATIONS.length) return;
+    this.inTransaction(() => {
+      const version = this.schemaVersion();
+      if (version > MIGRATIONS.length) {
+        throw new Error(`The state database is version ${version}, and this build knows ${MIGRATIONS.length}. Run the newer build, or restore a backup.`);
+      }
+      for (let index = version; index < MIGRATIONS.length; index += 1) {
+        this.db.exec(MIGRATIONS[index] as string);
+        this.db.exec(`PRAGMA user_version = ${index + 1}`);
+      }
+    });
   }
 
   close(): void {
