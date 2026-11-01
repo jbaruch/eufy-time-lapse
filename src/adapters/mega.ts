@@ -145,7 +145,9 @@ function isCameraError(error: unknown): error is Error {
     error instanceof CameraDisabledError ||
     error instanceof MegaApiError ||
     // How fetch reports the network being down. The cause varies, the message doesn't.
-    (error instanceof TypeError && error.message === "fetch failed")
+    (error instanceof TypeError && error.message === "fetch failed") ||
+    // The SDK rejects a timed-out connect with a plain Error. Bugs arrive as TypeError and the like.
+    (error instanceof Error && error.name === "Error")
   );
 }
 

@@ -329,6 +329,29 @@ describe("MegaAdapter live sessions", () => {
     await terminated.adapter.shutdown();
   });
 
+  it("treats the SDK's plain connect-timeout error as an unreachable camera, not a crash", async () => {
+    const { client, adapter } = setup();
+    client.connect = async () => {
+      throw new Error("P2P connect timeout for SN (relay: request)");
+    };
+    await assert.rejects(adapter.openLiveSession(SERIAL, openSignal()), (error: CaptureFailure) => {
+      assert.ok(error instanceof CaptureFailure);
+      assert.equal(error.reason, "camera_unreachable");
+      assert.match(error.message, /relay: request/);
+      return true;
+    });
+    await adapter.shutdown();
+  });
+
+  it("treats the network being down as an unreachable camera", async () => {
+    const { client, adapter } = setup();
+    client.connect = async () => {
+      throw new TypeError("fetch failed");
+    };
+    await assert.rejects(adapter.openLiveSession(SERIAL, openSignal()), (error: CaptureFailure) => error.reason === "camera_unreachable");
+    await adapter.shutdown();
+  });
+
   it("lets a bug propagate instead of calling it a camera problem", async () => {
     const { client, adapter } = setup();
     client.connect = async () => {

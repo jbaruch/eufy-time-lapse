@@ -196,8 +196,12 @@ export class CaptureService {
     const today = localParts(now, this.zone).date;
     const revision = scheduleRevision(this.config);
     const prefix = `${this.config.project.id}/${this.config.camera.id}`;
+    // Time before the first start was never the service's to capture. Downtime after it does count as missed.
+    if (this.state.getFlag("first_started_at") === undefined) this.state.setFlag("first_started_at", now.toISOString());
+    const firstStartedAt = Date.parse(this.state.getFlag("first_started_at") as string);
     for (const date of [today, addDays(today, 1)]) {
-      this.state.materialize(planDay(date, scheduleConfigOf(this.config)), prefix, revision);
+      const planned = planDay(date, scheduleConfigOf(this.config)).filter((slot) => slot.scheduledAt.getTime() >= firstStartedAt);
+      this.state.materialize(planned, prefix, revision);
     }
     if (this.lastPruneDate !== today) {
       await this.pruneFailedWork();

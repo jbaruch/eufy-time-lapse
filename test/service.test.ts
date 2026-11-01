@@ -248,6 +248,26 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("doesn't count slots from before the service first started as missed", async () => {
+      const h = await harness({ startMs: AT_0800 + 120 * MINUTE });
+      await h.service.tick(h.signal);
+      const counts = h.state.slotCountsSince("2026-07-01T00:00:00Z", "2026-07-01T23:59:59Z");
+      assert.equal(counts.find((row) => row.state === "missed"), undefined);
+      assert.equal(h.state.getSlot(SLOT_0800), undefined);
+      h.state.close();
+    });
+
+    it("does count downtime after that as missed, across a restart", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.state.close();
+      h.clock.ms = AT_0800 + 60 * MINUTE;
+      const { service, state } = h.restart();
+      while ((await service.tick(h.signal)) === 0);
+      assert.equal(state.slotCountsSince("2026-07-01T00:00:00Z", "2026-07-01T23:59:59Z").find((row) => row.state === "missed")?.count, 11);
+      state.close();
+    });
+
     it("marks a slot interrupted mid-capture as unknown, and doesn't retake it", async () => {
       const h = await harness();
       await h.service.tick(h.signal).catch(() => {});

@@ -139,7 +139,7 @@ export interface BatteryRow {
   telemetry_json: string;
 }
 
-export type FlagName = "operator_paused" | "battery_paused" | "battery_override" | "auth_required";
+export type FlagName = "operator_paused" | "battery_paused" | "battery_override" | "auth_required" | "first_started_at";
 
 export class State {
   private readonly db: DatabaseSync;
