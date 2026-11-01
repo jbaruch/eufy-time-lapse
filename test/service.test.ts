@@ -374,7 +374,7 @@ describe("CaptureService", () => {
       const h = await harness({ camera: reading(100, null) });
       await runAt(h, [5]);
       assert.equal(h.adapter.opens, 0, "the fastest tier would have run this slot");
-      assert.equal(h.state.getSlot("construction/site-overview/2026-07-01T13:05:00.000Z")?.reason, "battery_tier");
+      assert.equal(h.state.getSlot("construction/site-overview/2026-07-01T13:05:00.000Z")?.reason, "battery_unknown");
       h.state.close();
     });
 
@@ -1152,6 +1152,138 @@ describe("CaptureService", () => {
       h.clock.ms = AFTER_THE_OUTAGE + 720 * MINUTE;
       await h.service.tick(h.signal);
       assert.equal(h.adapter.opens, opens);
+      h.state.close();
+    });
+  });
+
+  describe("when the camera's state can't be read", () => {
+    const AT = (minutes: number): string => `construction/site-overview/${new Date(AT_0800 + minutes * MINUTE).toISOString()}`;
+    const cloudDown = (): Error => new CaptureFailure("camera_unreachable", "discovery", "Eufy's cloud can't be reached");
+    const SEVEN_HOURS = 420;
+
+    it("keeps the rate, on the last good reading, through a short outage", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(cloudDown);
+      await runAt(h, [5, 10]);
+      assert.equal(h.state.getSlot(AT(5))?.state, "captured");
+      assert.equal(h.state.getSlot(AT(10))?.state, "captured");
+      assert.equal(h.notices.some((notice) => notice.includes("no battery reading")), false, h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("doesn't present the last reading as one taken for this frame", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(cloudDown);
+      await runAt(h, [5]);
+      const capture = h.state.allCaptures().find((row) => row.slot_id === AT(5));
+      assert.ok(capture !== undefined);
+      const metadata = JSON.parse(await readFile(join(h.dataDir, capture.relative_dir, "metadata.json"), "utf8")) as CaptureMetadata;
+      assert.equal(metadata.battery_percent, null);
+      assert.equal(metadata.battery_observed_at, null);
+      h.state.close();
+    });
+
+    it("drops to the unknown-battery rate once the reading is too old, names why, warns, and says when it's over", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(cloudDown);
+      await runAt(h, [SEVEN_HOURS + 5]);
+      const slot = h.state.getSlot(AT(SEVEN_HOURS + 5));
+      assert.deepEqual([slot?.state, slot?.reason], ["skipped_policy", "battery_unknown"]);
+      assert.ok(h.notices.some((notice) => notice.includes("no battery reading") && notice.includes("every 60 minutes")), h.notices.join("; "));
+      h.adapter.setDiscoverFailure(undefined);
+      h.adapter.setCamera({ ...reading(80), battery: { percent: 80, observedAt: new Date(AT_0800 + (SEVEN_HOURS + 10) * MINUTE).toISOString(), note: null } });
+      await runAt(h, [SEVEN_HOURS + 10]);
+      assert.ok(h.notices.some((notice) => notice.includes("recovered") && notice.includes("no battery reading")), h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("warns about a reading that's too old even when the read itself works", async () => {
+      const h = await harness();
+      await runAt(h, [SEVEN_HOURS + 5]);
+      assert.ok(h.notices.some((notice) => notice.includes("no battery reading")), h.notices.join("; "));
+      assert.equal(h.notices.some((notice) => notice.includes("couldn't be read")), false, h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("alerts once reads have failed for a few slots, and says when they're back", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(cloudDown);
+      await runAt(h, [5, 10]);
+      assert.equal(h.notices.some((notice) => notice.includes("couldn't be read")), false, "two isn't enough");
+      await runAt(h, [15]);
+      assert.ok(h.notices.some((notice) => notice.includes("couldn't be read") && notice.includes("3 slots in a row")), h.notices.join("; "));
+      h.adapter.setDiscoverFailure(undefined);
+      await runAt(h, [20]);
+      assert.ok(h.notices.some((notice) => notice.includes("recovered") && notice.includes("couldn't be read")), h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("keeps counting failed reads across a restart", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(cloudDown);
+      await runAt(h, [5, 10]);
+      h.state.close();
+      const { service, state } = h.restart();
+      h.clock.ms = AT_0800 + 15 * MINUTE;
+      while ((await service.tick(h.signal)) === 0);
+      assert.ok(h.notices.some((notice) => notice.includes("couldn't be read")), h.notices.join("; "));
+      state.close();
+    });
+
+    it("doesn't quote the failure in a notification, which could say anything", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(cloudDown);
+      await runAt(h, [5, 10, 15]);
+      assert.equal(h.notices.join().includes("can't be reached"), false, h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("never clears a battery pause on an old reading", async () => {
+      const h = await harness({ camera: reading(20) });
+      await runAt(h, [0]);
+      assert.notEqual(h.state.getFlag("battery_paused"), undefined);
+      h.state.recordBattery({ read_at: new Date(AT_0800 + MINUTE).toISOString(), percent: 95, observed_at: new Date(AT_0800 + MINUTE).toISOString(), every_minutes: 5, telemetry_json: "{}" });
+      h.adapter.setDiscoverFailure(cloudDown);
+      await runAt(h, [5]);
+      assert.notEqual(h.state.getFlag("battery_paused"), undefined);
+      assert.equal(h.state.getSlot(AT(5))?.reason, "battery_low");
+      h.state.close();
+    });
+
+    it("never starts a pause on one either", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.state.recordBattery({ read_at: new Date(AT_0800 + MINUTE).toISOString(), percent: 10, observed_at: new Date(AT_0800 + MINUTE).toISOString(), every_minutes: 5, telemetry_json: "{}" });
+      h.adapter.setDiscoverFailure(cloudDown);
+      await runAt(h, [5]);
+      assert.equal(h.state.getFlag("battery_paused"), undefined);
+      h.state.close();
+    });
+
+    it("shows the last good reading in status, with its age, rather than a blank", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(cloudDown);
+      await runAt(h, [5]);
+      const { battery } = buildStatus(h.state, DEFAULT_SERVICE_CONFIG, new Date(AT_0800 + 5 * MINUTE), 50_000, "test");
+      assert.equal(battery.percent, 80);
+      assert.equal(battery.observed_at, new Date(AT_0800).toISOString());
+      assert.equal(battery.observed_age_seconds, 300);
+      assert.equal(battery.read_at, new Date(AT_0800 + 5 * MINUTE).toISOString(), "and when a read last happened, which is what failed");
+      h.state.close();
+    });
+
+    it("skips with the unknown-battery reason when there has never been a reading", async () => {
+      const h = await harness();
+      h.adapter.setDiscoverFailure(cloudDown);
+      await runAt(h, [5]);
+      assert.equal(h.state.getSlot(AT(5))?.reason, "battery_unknown");
       h.state.close();
     });
   });

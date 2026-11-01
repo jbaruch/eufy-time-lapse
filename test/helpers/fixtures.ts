@@ -59,6 +59,7 @@ export interface MockBehavior {
   shutdownFailure?: () => Error;
   camera?: CameraInfo;
   unexpected?: number;
+  discoverFailure?: () => Error;
 }
 
 export class MockAdapter implements CameraAdapter {
@@ -73,6 +74,12 @@ export class MockAdapter implements CameraAdapter {
     this.behavior = behavior;
   }
 
+  /** Whether later discoveries fail, for tests of a cloud that's gone away. */
+  setDiscoverFailure(failure: (() => Error) | undefined): void {
+    if (failure === undefined) delete this.behavior.discoverFailure;
+    else this.behavior.discoverFailure = failure;
+  }
+
   /** The camera a later discovery should report, for tests of a reading that changes. */
   setCamera(camera: CameraInfo): void {
     this.behavior.camera = camera;
@@ -84,6 +91,7 @@ export class MockAdapter implements CameraAdapter {
   }
 
   async discoverCamera(): Promise<CameraInfo> {
+    if (this.behavior.discoverFailure !== undefined) throw this.behavior.discoverFailure();
     return this.behavior.camera ?? CAMERA;
   }
 

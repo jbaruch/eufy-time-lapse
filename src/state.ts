@@ -145,7 +145,7 @@ export interface BatteryRow {
   telemetry_json: string;
 }
 
-export type FlagName = "operator_paused" | "battery_paused" | "battery_override" | "auth_required" | "first_started_at";
+export type FlagName = "operator_paused" | "battery_paused" | "battery_override" | "auth_required" | "first_started_at" | "camera_read_failures";
 
 export class State {
   private readonly db: DatabaseSync;
@@ -336,6 +336,11 @@ export class State {
 
   recordBattery(row: BatteryRow): void {
     this.db.prepare("INSERT INTO battery_readings (read_at, percent, observed_at, every_minutes, telemetry_json) VALUES (?, ?, ?, ?, ?)").run(row.read_at, row.percent, row.observed_at, row.every_minutes, row.telemetry_json);
+  }
+
+  /** The newest reading that has both a value and a time, as opposed to a read that failed or came back empty. */
+  lastKnownBattery(): BatteryRow | undefined {
+    return this.one<BatteryRow>("SELECT * FROM battery_readings WHERE percent IS NOT NULL AND observed_at IS NOT NULL ORDER BY read_at DESC LIMIT 1");
   }
 
   latestBattery(): BatteryRow | undefined {

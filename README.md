@@ -115,7 +115,9 @@ error. [`config.example.json`](config.example.json) lists them all. Restart the 
 **Cadence** comes from battery tiers. A slot exists every `grid_minutes`, and the battery decides which ones
 run. Skipped slots are recorded with the reason `battery_tier` and stay visible in `status`, so the capture
 rate never changes silently. Below `pause_at_or_below_percent` capture stops until the battery reaches
-`resume_at_or_above_percent`.
+`resume_at_or_above_percent`. If a read from Eufy's cloud fails, the last reading stays in force until it's older
+than `reading_max_age_hours`. After that the rate drops to `unknown_battery_every_minutes`, skips are recorded as
+`battery_unknown`, and an alert says so.
 
 **Rendering** leaves out frames below the required size and lists them in the manifest, because one 720p frame
 would otherwise pull a whole 4K video down to 720p. `--include-degraded` puts them back.

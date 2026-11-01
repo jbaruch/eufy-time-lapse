@@ -338,6 +338,7 @@ export class CaptureService {
         starting = undefined;
       }
       this.camera = await this.adapter.discoverCamera(this.camera?.key ?? this.options.cameraSerial);
+      await this.noteCameraRead(true);
       return this.camera.battery;
     } catch (error) {
       // Anything but a failure the adapter recognised is a bug, and should crash rather than limp on.
@@ -350,10 +351,24 @@ export class CaptureService {
       // The cloud being unreachable is a reason to skip a reading. The capture attempt reports its own failure.
       this.state.addEvent("camera_read_failed", error.message);
       this.options.log(`could not read camera state: ${error.message}`);
+      await this.noteCameraRead(false);
       return null;
     } finally {
       await starting?.shutdown();
     }
+  }
+
+  /** A cloud outage that outlasts a few slots is worth saying out loud, even while capture carries on without it. */
+  private async noteCameraRead(succeeded: boolean): Promise<void> {
+    const failures = succeeded ? 0 : Number(this.state.getFlag("camera_read_failures") ?? "0") + 1;
+    this.state.setFlag("camera_read_failures", failures === 0 ? null : String(failures));
+    await this.alerts.set("camera_read_failing", failures >= this.config.alerts.consecutive_failed_slots, `the camera's state couldn't be read from Eufy's cloud at ${failures} slots in a row. Capture uses the last battery reading until it's too old. The log has the reason`);
+  }
+
+  /** What the last good read said, for a read that failed. A failed read says nothing about the battery either way. */
+  private lastKnownReading(): BatteryReading | null {
+    const row = this.state.lastKnownBattery();
+    return row === undefined ? null : { percent: row.percent, observedAt: row.observed_at, note: "the last good reading" };
   }
 
   private async retireAdapter(): Promise<void> {
@@ -371,17 +386,19 @@ export class CaptureService {
 
   private async processSlot(slot: SlotRow, signal: AbortSignal): Promise<void> {
     const reading = await this.readCamera();
-    const percent = this.effectivePercent(reading);
+    // Only a real reading can clear a battery pause. For choosing a rate, the last one counts for as long as any reading does.
+    const freshPercent = this.effectivePercent(reading);
+    const percent = this.effectivePercent(reading ?? this.lastKnownReading());
     const now = this.now();
     const local = localParts(now, this.zone);
 
     const wasPaused = this.state.getFlag("battery_paused") !== undefined;
-    const batteryPaused = nextBatteryPaused(wasPaused, percent, this.config.battery);
+    const batteryPaused = nextBatteryPaused(wasPaused, freshPercent, this.config.battery);
     if (batteryPaused !== wasPaused) {
-      this.state.setFlag("battery_paused", batteryPaused ? String(percent) : null);
+      this.state.setFlag("battery_paused", batteryPaused ? String(freshPercent) : null);
       // An override covers the pause it was given for. A later pause has to be enforced.
       this.state.setFlag("battery_override", null);
-      this.state.addEvent(batteryPaused ? "battery_pause" : "battery_resume", String(percent));
+      this.state.addEvent(batteryPaused ? "battery_pause" : "battery_resume", String(freshPercent));
     }
 
     const input: PolicyInput = {
@@ -647,7 +664,8 @@ export class CaptureService {
 
   /** Each condition stands on its own. Reading them from the one skip reason that won would call one condition's end whenever another outranked it. */
   private async syncPolicyAlerts(input: PolicyInput, percent: number | null, localDate: string): Promise<void> {
-    const { battery, traffic, storage } = this.config;
+    const { battery, cadence, traffic, storage } = this.config;
+    await this.alerts.set("battery_unknown", percent === null, `there's no battery reading from the last ${battery.reading_max_age_hours} hours, so capture is running at its unknown-battery rate of every ${cadence.unknown_battery_every_minutes} minutes. The time budgets still apply`);
     await this.alerts.set("auth_required", input.authRequired, `Eufy needs a manual login: ${this.state.getFlag("auth_required") ?? ""}`);
     await this.alerts.set("operator_paused", input.operatorPaused, "capture is paused by the operator");
     await this.alerts.set("battery_paused", input.batteryPaused && !input.batteryOverride, `capture paused on low battery (${percent ?? "unknown"}%). If the reading is old, check the app and run resume --battery-checked`);

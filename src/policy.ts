@@ -1,6 +1,6 @@
 import type { ServiceConfig } from "./service-config.ts";
 
-export type SkipReason = "auth_required" | "operator_paused" | "battery_low" | "storage_full" | "session_budget" | "data_budget" | "battery_tier";
+export type SkipReason = "auth_required" | "operator_paused" | "battery_low" | "storage_full" | "session_budget" | "data_budget" | "battery_tier" | "battery_unknown";
 
 export interface PolicyInput {
   batteryPercent: number | null;
@@ -51,7 +51,8 @@ export function decide(input: PolicyInput, config: ServiceConfig, isActive: (eve
   if (input.operatorPaused) return skip("operator_paused");
   if (input.batteryPaused && !input.batteryOverride) return skip("battery_low");
   if (input.diskFreeMb <= config.storage.min_free_disk_mb) return skip("storage_full");
-  if (!isActive(everyMinutes)) return skip("battery_tier");
+  // Not the same thing: one is the battery's level choosing the rate, the other is having no idea what that level is.
+  if (!isActive(everyMinutes)) return skip(input.batteryPercent === null ? "battery_unknown" : "battery_tier");
   if (sessionBudgetSpent(input, config)) return skip("session_budget");
   if (dataBudgetSpent(input, config)) return skip("data_budget");
   return { action: "capture", everyMinutes };

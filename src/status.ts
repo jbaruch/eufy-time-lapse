@@ -100,6 +100,8 @@ export function buildStatus(state: State, config: ServiceConfig, now: Date, disk
   const latest = state.latestCapture();
   const next = state.nextPending(now);
   const battery = state.latestBattery();
+  // A failed read leaves this row empty, but the last real reading is still what the rate is running on.
+  const reading = battery?.percent === null || battery?.observed_at === null ? (state.lastKnownBattery() ?? battery) : battery;
 
   let consecutive = 0;
   for (const slot of state.recentOutcomes(500)) {
@@ -124,10 +126,10 @@ export function buildStatus(state: State, config: ServiceConfig, now: Date, disk
     consecutive_failures: consecutive,
     pause_reasons: pauses,
     battery: {
-      percent: battery?.percent ?? null,
+      percent: reading?.percent ?? null,
       read_at: battery?.read_at ?? null,
-      observed_at: battery?.observed_at ?? null,
-      observed_age_seconds: battery?.observed_at ? Math.round((now.getTime() - Date.parse(battery.observed_at)) / 1000) : null,
+      observed_at: reading?.observed_at ?? null,
+      observed_age_seconds: reading?.observed_at ? Math.round((now.getTime() - Date.parse(reading.observed_at)) / 1000) : null,
       every_minutes: battery?.every_minutes ?? null,
     },
     budgets: {

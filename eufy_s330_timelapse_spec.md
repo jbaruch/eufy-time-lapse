@@ -212,7 +212,7 @@ Initial project thresholds:
 
 These are configurable service thresholds, not manufacturer limits. The MVP must not secretly alter its capture frequency: it warns, pauses, or changes tier only by configured rules, and reports the active interval in its status.
 
-Use battery readings available without waking the camera. Treat readings older than **six hours** as stale. Show an unknown battery value as unknown, never as zero. When capture remains permitted without recent telemetry, keep the time budgets active and issue a warning. Do not automatically clear a battery pause without a fresh sufficient reading.
+Use battery readings available without waking the camera. Treat readings older than **six hours** as stale. Show an unknown battery value as unknown, never as zero. When capture remains permitted without recent telemetry, keep the time budgets active and issue a warning. Do not automatically clear a battery pause without a fresh sufficient reading. A failed read says nothing about the battery, so it leaves the last reading in force for choosing a rate until that reading goes stale, and reads that keep failing raise their own alert. A slot skipped because the battery is unknown records `battery_unknown`, not `battery_tier`, so the status never blames the battery for an outage.
 
 While paused for low battery, continue receiving passive updates. If battery status updates only when the camera is contacted, notify the owner to check the charge in the Eufy app and run `resume --battery-checked`. Log this explicit manual override; it does not turn an old reading into a fresh one. Periodically waking the camera just to check the battery is not required in the MVP.
 

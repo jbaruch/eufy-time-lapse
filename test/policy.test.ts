@@ -84,6 +84,11 @@ describe("decide", () => {
     assert.deepEqual(seen, [15]);
   });
 
+  it("names an unknown battery as the reason, rather than blaming the tier", () => {
+    const decision = decide(input({ batteryPercent: null }), config, () => false);
+    assert.equal(decision.action === "skip" ? decision.reason : "captured", "battery_unknown");
+  });
+
   it("reserves a full slot's worst case before spending the session budget", () => {
     const reserve = reservedSessionMs(config.capture);
     assert.equal(reserve, 120_000);
