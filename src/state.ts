@@ -249,6 +249,11 @@ export class State {
       .run(slotId, slot.scheduledAt.toISOString(), slot.localDate, slot.localTime, slot.localMinutes, scheduleRevision, this.stamp());
   }
 
+  /** The latest day the plan has reached, which is where a long outage starts. */
+  newestSlotDate(): string | undefined {
+    return this.one<{ newest: string | null }>("SELECT MAX(local_date) AS newest FROM slots")?.newest ?? undefined;
+  }
+
   /** Frames whose slot doesn't name them back. */
   unlinkedCaptures(): UnlinkedCapture[] {
     return this.all<UnlinkedCapture>(`

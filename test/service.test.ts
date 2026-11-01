@@ -1038,6 +1038,43 @@ describe("CaptureService", () => {
     });
   });
 
+  describe("an outage longer than the plan reaches", () => {
+    const AFTER_THE_OUTAGE = AT_0800 + 4 * 1440 * MINUTE;
+
+    it("records every slot it slept through as missed", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.state.close();
+      const { service, state } = h.restart();
+      h.clock.ms = AFTER_THE_OUTAGE;
+      await service.reconcile();
+      await service.tick(h.signal);
+      for (const day of ["2026-07-02", "2026-07-03"]) {
+        const slot = state.getSlot(`construction/site-overview/${day}T13:00:00.000Z`);
+        assert.deepEqual([slot?.state, slot?.reason], ["missed", "deadline_passed"], day);
+      }
+      state.close();
+    });
+
+    it("doesn't plan days before the first start", async () => {
+      const h = await harness({ startMs: AFTER_THE_OUTAGE });
+      await h.service.reconcile();
+      await h.service.tick(h.signal);
+      assert.equal(h.state.getSlot(SLOT_0800), undefined);
+      h.state.close();
+    });
+
+    it("doesn't touch the camera for the days it missed", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      const opens = h.adapter.opens;
+      h.clock.ms = AFTER_THE_OUTAGE + 720 * MINUTE;
+      await h.service.tick(h.signal);
+      assert.equal(h.adapter.opens, opens);
+      h.state.close();
+    });
+  });
+
   describe("configuration changes across a restart", () => {
     it("clears a data warning once there's no budget to warn about", async () => {
       const budgeted = serviceConfig({ traffic: { ...DEFAULT_SERVICE_CONFIG.traffic, monthly_budget_mb: 1 } });

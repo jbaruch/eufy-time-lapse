@@ -354,7 +354,10 @@ export class CaptureService {
     // Time before the first start was never the service's to capture. Downtime after it does count as missed.
     if (this.state.getFlag("first_started_at") === undefined) this.state.setFlag("first_started_at", now.toISOString());
     const firstStartedAt = Date.parse(this.state.getFlag("first_started_at") as string);
-    for (const date of [today, addDays(today, 1)]) {
+    // Downtime counts as missed, so every day since the plan last reached needs its slots, however long ago that was.
+    const newest = this.state.newestSlotDate();
+    const firstDate = newest !== undefined && newest < today ? newest : today;
+    for (let date = firstDate; date <= addDays(today, 1); date = addDays(date, 1)) {
       const planned = planDay(date, scheduleConfigOf(this.config)).filter((slot) => slot.scheduledAt.getTime() >= firstStartedAt);
       this.state.materialize(planned, prefix, revision);
     }
