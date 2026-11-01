@@ -1,9 +1,11 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { mkdir, readFile, readlink, realpath, writeFile } from "node:fs/promises";
+import { mkdir, readlink, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
+import { isToolFailure } from "./media/ffmpeg.ts";
 import type { CaptureRow, State } from "./state.ts";
+import { storedCaptureProblem } from "./stored-capture.ts";
+import type { CaptureOwner } from "./stored-capture.ts";
 
 const run = promisify(execFile);
 
@@ -20,6 +22,7 @@ export class RenderError extends Error {
 export interface RenderOptions {
   state: State;
   dataDir: string;
+  owner: CaptureOwner;
   from: string;
   to: string;
   outputPath: string;
@@ -69,21 +72,14 @@ function concatQuote(path: string): string {
   return `'${path.replace(/'/g, "'\\''")}'`;
 }
 
-/** The database's word about a frame is only a record of it. A replaced or damaged file must not go into a video under the original's hash. */
-async function verifyFrames(chosen: ReturnType<typeof selectFrames>, dataDir: string): Promise<ReturnType<typeof selectFrames>> {
+/** The database's word about a frame is only a record of it. A replaced or damaged capture must not go into a video under the original's name. */
+async function verifyFrames(chosen: ReturnType<typeof selectFrames>, options: RenderOptions): Promise<ReturnType<typeof selectFrames>> {
   const selected: CaptureRow[] = [];
   const exclusions = [...chosen.exclusions];
   for (const frame of chosen.selected) {
-    let content: Buffer;
-    try {
-      content = await readFile(join(dataDir, frame.relative_dir, "frame.jpg"));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      exclusions.push({ capture_id: frame.capture_id, reason: "the frame file is missing" });
-      continue;
-    }
-    if (content.length === frame.jpeg_bytes && createHash("sha256").update(content).digest("hex") === frame.sha256) selected.push(frame);
-    else exclusions.push({ capture_id: frame.capture_id, reason: "the frame file doesn't match its record" });
+    const problem = await storedCaptureProblem(options.dataDir, frame, options.owner);
+    if (problem === null) selected.push(frame);
+    else exclusions.push({ capture_id: frame.capture_id, reason: problem });
   }
   return { selected, exclusions };
 }
@@ -126,7 +122,7 @@ export async function render(options: RenderOptions): Promise<RenderManifest> {
   await refuseServiceFiles([options.outputPath, listPath, manifestPath], options.dataDir);
 
   const chosen = selectFrames(options.state.capturesBetween(options.from, options.to), options);
-  const { selected, exclusions } = await verifyFrames(chosen, options.dataDir);
+  const { selected, exclusions } = await verifyFrames(chosen, options);
   if (selected.length === 0) {
     throw new RenderError(`No frames to render between ${options.from} and ${options.to} (${exclusions.length} excluded). Check the dates, or use --include-degraded.`);
   }
@@ -148,8 +144,8 @@ export async function render(options: RenderOptions): Promise<RenderManifest> {
       { timeout, killSignal: "SIGKILL", maxBuffer: 4 * 1024 * 1024 },
     );
   } catch (error) {
-    const stderr = (error as { stderr?: string }).stderr?.trim();
-    throw new RenderError(`FFmpeg failed to render ${options.outputPath}: ${stderr || (error as Error).message}. The source frames are untouched.`, { cause: error });
+    if (!isToolFailure(error)) throw error;
+    throw new RenderError(`FFmpeg failed to render ${options.outputPath}: ${error.stderr?.trim() || error.message}. The source frames are untouched.`, { cause: error });
   }
 
   const { stdout } = await run("ffmpeg", ["-hide_banner", "-version"]);

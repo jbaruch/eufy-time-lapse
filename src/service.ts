@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { copyFile, mkdir, readdir, readFile, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { CaptureFailure } from "./adapters/adapter.ts";
 import type { BatteryReading, CameraAdapter, CameraInfo } from "./adapters/adapter.ts";
@@ -14,6 +14,8 @@ import { dataBudgetSpent, decide, nextBatteryPaused, reservedSessionMs, sessionB
 import type { PolicyInput } from "./policy.ts";
 import type { CameraLink } from "./probe/report.ts";
 import { addDays, formatClock, isActiveForInterval, localParts, planDay } from "./schedule.ts";
+import { readStoredCapture, storedCaptureProblem } from "./stored-capture.ts";
+import type { AdoptableCapture, CaptureMetadata, CaptureOwner } from "./stored-capture.ts";
 import type { ScheduleConfig } from "./schedule.ts";
 import type { ServiceConfig } from "./service-config.ts";
 import type { AttemptRow, CaptureRow, SlotRow, State } from "./state.ts";
@@ -37,88 +39,6 @@ export interface ServiceOptions {
   now?: () => Date;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   diskFreeMb?: () => Promise<number>;
-}
-
-/** The immutable record stored beside each frame. Archive state is mutable, so it lives in SQLite instead. */
-export interface CaptureMetadata {
-  schema_version: 1;
-  capture_id: string;
-  project_id: string;
-  camera_id: string;
-  kind: "scheduled" | "manual";
-  slot_id: string | null;
-  attempt_id: string;
-  schedule_revision: string | null;
-  scheduled_at_utc: string | null;
-  request_started_at: string;
-  stream_started_at: string | null;
-  frame_received_at: string;
-  camera_captured_at: null;
-  camera_captured_at_note: string;
-  site_time_zone: string;
-  local_date: string;
-  source: "live_p2p";
-  capture_session_id: string;
-  freshness_basis: string;
-  cold_connection: boolean | null;
-  retained: false;
-  adapter: string;
-  adapter_version: string;
-  camera_firmware: string | null;
-  connection_type: CameraLink | null;
-  connection_path: string | null;
-  cellular_operator: string | null;
-  width: number;
-  height: number;
-  source_codec: string | null;
-  jpeg_bytes: number;
-  sha256: string;
-  quality_status: "ok" | "degraded";
-  attempt_count: number;
-  connect_ms: number | null;
-  session_ms: number;
-  cleanup_status: string;
-  cleanup_detail: string | null;
-  battery_percent: number | null;
-  battery_observed_at: string | null;
-  battery_note: string | null;
-  every_minutes: number | null;
-  media_video_bytes: number;
-  media_audio_bytes: number;
-  traffic_measurement_basis: string;
-}
-
-/** The part of a capture's stored metadata that recovery reads, which is all this code vouches for. */
-export type AdoptableCapture = Pick<CaptureMetadata, "capture_id" | "project_id" | "camera_id" | "slot_id" | "schedule_revision" | "scheduled_at_utc" | "kind" | "local_date" | "frame_received_at" | "width" | "height" | "jpeg_bytes" | "sha256" | "quality_status">;
-
-/** Reads what recovery needs from stored metadata, or null if it isn't a version and shape this build understands. */
-export function parseCaptureMetadata(text: string): AdoptableCapture | null {
-  let value: unknown;
-  try {
-    value = JSON.parse(text);
-  } catch (error) {
-    if (error instanceof SyntaxError) return null;
-    throw error;
-  }
-  if (typeof value !== "object" || value === null) return null;
-  const record = value as Record<string, unknown>;
-  const field = (key: string): string => (typeof record[key] === "string" ? record[key] : "");
-  const counts = ["width", "height", "jpeg_bytes"].every((key) => Number.isInteger(record[key]) && (record[key] as number) > 0);
-  const valid =
-    record.schema_version === 1 &&
-    field("capture_id").length > 0 &&
-    field("project_id").length > 0 &&
-    field("camera_id").length > 0 &&
-    /^\d{4}-\d{2}-\d{2}$/.test(field("local_date")) &&
-    !Number.isNaN(Date.parse(field("frame_received_at"))) &&
-    /^[0-9a-f]{64}$/.test(field("sha256")) &&
-    counts &&
-    (record.slot_id === null || typeof record.slot_id === "string") &&
-    (record.schedule_revision === null || typeof record.schedule_revision === "string") &&
-    (record.scheduled_at_utc === null || !Number.isNaN(Date.parse(field("scheduled_at_utc")))) &&
-    (record.kind === "scheduled" || record.kind === "manual") &&
-    (record.quality_status === "ok" || record.quality_status === "degraded");
-  return valid ? (record as unknown as AdoptableCapture) : null;
 }
 
 export function scheduleConfigOf(config: ServiceConfig): ScheduleConfig {
@@ -166,6 +86,10 @@ export class CaptureService {
     return this.config.project.site_time_zone;
   }
 
+  private get owner(): CaptureOwner {
+    return { projectId: this.config.project.id, cameraId: this.config.camera.id };
+  }
+
   private get lockPath(): string {
     return join(this.options.dataDir, "camera-lock.sqlite");
   }
@@ -203,7 +127,7 @@ export class CaptureService {
           for (const captureId of await this.subdirectories(relativeDay)) {
             if (this.state.hasCapture(captureId)) continue;
             const relativeDir = join(relativeDay, captureId);
-            const metadata = await this.storedCapture(relativeDir, captureId, `${year}-${month}-${day}`);
+            const metadata = await readStoredCapture(this.options.dataDir, relativeDir, captureId, `${year}-${month}-${day}`, this.owner);
             if (metadata === null || !this.slotClaimHolds(metadata)) {
               unreadable.push(relativeDir);
               continue;
@@ -235,22 +159,6 @@ export class CaptureService {
     }
   }
 
-  /** What's stored at a place in the spool, if its record, that place and its frame all agree, and it's this camera's. */
-  private async storedCapture(relativeDir: string, captureId: string, localDate: string): Promise<AdoptableCapture | null> {
-    const directory = join(this.options.dataDir, relativeDir);
-    try {
-      const metadata = parseCaptureMetadata(await readFile(join(directory, "metadata.json"), "utf8"));
-      if (metadata === null || metadata.capture_id !== captureId || metadata.local_date !== localDate) return null;
-      if (metadata.project_id !== this.config.project.id || metadata.camera_id !== this.config.camera.id) return null;
-      const frame = await readFile(join(directory, "frame.jpg"));
-      const matches = frame.length === metadata.jpeg_bytes && createHash("sha256").update(frame).digest("hex") === metadata.sha256;
-      return matches ? metadata : null;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-      throw error;
-    }
-  }
-
   /**
    * A claim on a slot counts only if the writer could have made it. A manual frame has no slot. A scheduled one holds the slot
    * for its own time, taken after that time, and the writer only leaves one unrecorded by dying while that slot is running.
@@ -270,22 +178,6 @@ export class CaptureService {
     return slot.state === "running" && slot.schedule_revision === revision && slot.scheduled_at_utc === scheduledAt && (slot.capture_id === null || slot.capture_id === metadata.capture_id);
   }
 
-  /** Whether what's stored for a row is still what the row says. */
-  private async matchesItsRow(row: CaptureRow): Promise<boolean> {
-    const stored = await this.storedCapture(row.relative_dir, row.capture_id, row.local_date);
-    return (
-      stored !== null &&
-      stored.slot_id === row.slot_id &&
-      stored.kind === row.kind &&
-      stored.frame_received_at === row.frame_received_at &&
-      stored.width === row.width &&
-      stored.height === row.height &&
-      stored.jpeg_bytes === row.jpeg_bytes &&
-      stored.sha256 === row.sha256 &&
-      stored.quality_status === row.quality_status
-    );
-  }
-
   /**
    * The writer saves a frame's row, then finishes its slot, so a crash between them leaves a stored frame on a running slot
    * that names no capture. That's the only shape to finish here. Any other disagreement isn't this code's to settle.
@@ -293,7 +185,7 @@ export class CaptureService {
   private async repairSlotLinks(): Promise<void> {
     const disputed: string[] = [];
     for (const row of this.state.unlinkedCaptures()) {
-      if (row.slot_state === "running" && row.slot_capture_id === null && (await this.matchesItsRow(row))) {
+      if (row.slot_state === "running" && row.slot_capture_id === null && (await storedCaptureProblem(this.options.dataDir, row, this.owner)) === null) {
         this.state.setSlot(row.slot_id, row.quality_status === "ok" ? "captured" : "captured_degraded", { captureId: row.capture_id });
         this.state.addEvent("slot_link_repaired", row.capture_id);
       } else {
@@ -312,9 +204,11 @@ export class CaptureService {
     const damaged: string[] = [];
     for (const row of this.state.allCaptures()) {
       if (signal.aborted) return;
-      if (!(await this.matchesItsRow(row))) damaged.push(row.relative_dir);
+      const problem = await storedCaptureProblem(this.options.dataDir, row, this.owner);
+      if (problem === null) continue;
+      damaged.push(row.relative_dir);
+      this.state.addEvent("capture_damaged", `${row.relative_dir}: ${problem}`);
     }
-    for (const relativeDir of damaged) this.state.addEvent("capture_damaged", relativeDir);
     await this.alerts.set("spool_damaged", damaged.length > 0, `${damaged.length} stored frame(s) no longer match their records, starting with ${damaged[0] ?? ""}. They're left as they are for a person to look at, and renders leave them out`);
   }
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { promisify } from "node:util";
 import { outputSize, render, RenderError, selectFrames } from "../src/render.ts";
@@ -54,6 +54,8 @@ describe("outputSize", () => {
   });
 });
 
+const OWNER = { projectId: "construction", cameraId: "site-overview" };
+
 describe("render", () => {
   let dir: { path: string; remove: () => Promise<void> };
   let state: State;
@@ -68,6 +70,13 @@ describe("render", () => {
     return { jpeg_bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") };
   }
 
+  /** Stores a capture's record beside its frame and in the database, as the service does. */
+  async function keep(target: State, row: CaptureRow): Promise<void> {
+    const metadata = { schema_version: 1, project_id: OWNER.projectId, camera_id: OWNER.cameraId, schedule_revision: null, scheduled_at_utc: null, capture_id: row.capture_id, slot_id: row.slot_id, kind: row.kind, local_date: row.local_date, frame_received_at: row.frame_received_at, width: row.width, height: row.height, jpeg_bytes: row.jpeg_bytes, sha256: row.sha256, quality_status: row.quality_status };
+    await writeFile(join(dir.path, row.relative_dir, "metadata.json"), JSON.stringify(metadata));
+    target.insertCapture(row);
+  }
+
   async function probe(path: string): Promise<{ width: number; height: number; frames: number; duration: number; streams: number; codec: string }> {
     const { stdout } = await run("ffprobe", ["-v", "error", "-count_frames", "-show_entries", "stream=codec_name,width,height,nb_read_frames:format=duration", "-of", "json", path]);
     const parsed = JSON.parse(stdout) as { streams: Array<{ codec_name: string; width: number; height: number; nb_read_frames: string }>; format: { duration: string } };
@@ -80,18 +89,18 @@ describe("render", () => {
     dir = await tempDir();
     state = new State(join(dir.path, "state.sqlite"));
     for (const id of ["1", "2", "3", "4", "5", "6"]) {
-      state.insertCapture(capture(id, await frame(id, 640, 360)));
+      await keep(state, capture(id, await frame(id, 640, 360)));
     }
-    state.insertCapture(capture("7", { ...(await frame("7", 320, 180)), quality_status: "degraded", width: 320, height: 180 }));
-    state.insertCapture(capture("8", { ...(await frame("8", 640, 360)), kind: "manual", slot_id: null }));
-    state.insertCapture(capture("9", { ...(await frame("9", 640, 360)), local_date: "2026-07-02", frame_received_at: "2026-07-02T13:00:00.000Z" }));
+    await keep(state, capture("7", { ...(await frame("7", 320, 180)), quality_status: "degraded", width: 320, height: 180 }));
+    await keep(state, capture("8", { ...(await frame("8", 640, 360)), kind: "manual", slot_id: null }));
+    await keep(state, capture("9", { ...(await frame("9", 640, 360)), local_date: "2026-07-02", frame_received_at: "2026-07-02T13:00:00.000Z" }));
   });
   after(async () => {
     state.close();
     await dir.remove();
   });
 
-  const base = { dataDir: "", from: "2026-07-01", to: "2026-07-01", fps: 30, includeManual: false, includeDegraded: false, now: () => new Date("2026-07-03T00:00:00Z") };
+  const base = { dataDir: "", owner: OWNER, from: "2026-07-01", to: "2026-07-01", fps: 30, includeManual: false, includeDegraded: false, now: () => new Date("2026-07-03T00:00:00Z") };
 
   it("builds a silent H.264 video at the frames' own size, and the duration the spec defines", async () => {
     const outputPath = join(dir.path, "renders", "plain.mp4");
@@ -135,6 +144,15 @@ describe("render", () => {
     await assert.rejects(render({ ...base, state, dataDir: dir.path, from: "2020-01-01", to: "2020-01-02", outputPath: join(dir.path, "renders", "none.mp4") }), (error: RenderError) => error instanceof RenderError && /No frames/.test(error.message));
   });
 
+  it("reports FFmpeg failing as a render failure", async () => {
+    await assert.rejects(render({ ...base, state, dataDir: dir.path, fps: Number.NaN, outputPath: join(dir.path, "renders", "bad-rate.mp4") }), RenderError);
+  });
+
+  it("lets a bug on the way to FFmpeg through as itself", async () => {
+    const fps = "\0" as unknown as number;
+    await assert.rejects(render({ ...base, state, dataDir: dir.path, fps, outputPath: join(dir.path, "renders", "bug.mp4") }), (error: Error) => error instanceof TypeError && !(error instanceof RenderError));
+  });
+
   describe("an output path that lands on the service's own files", () => {
     const frameOne = () => join(dir.path, "spool", "1", "frame.jpg");
 
@@ -144,7 +162,7 @@ describe("render", () => {
       await assert.rejects(render({ ...base, state, dataDir: dir.path, outputPath }), (error: RenderError) => error instanceof RenderError && /belongs to the service/.test(error.message));
       assert.deepEqual(await readFile(frameOne()), before);
       assert.deepEqual(await readFile(join(dir.path, "state.sqlite")), database);
-      assert.deepEqual(await readdir(join(dir.path, "spool", "1")), ["frame.jpg"]);
+      assert.deepEqual((await readdir(join(dir.path, "spool", "1"))).sort(), ["frame.jpg", "metadata.json"]);
     }
 
     it("refuses a frame", async () => {
@@ -204,21 +222,35 @@ describe("render", () => {
   });
 
   describe("a frame that no longer matches its record", () => {
-    async function withBadFrame(arrange: (path: string, good: Partial<CaptureRow>) => Promise<Partial<CaptureRow>>): Promise<{ other: State; good: string }> {
-      const other = new State(join(dir.path, `verify-${verified++}.sqlite`));
-      const goodId = `good-${verified}`;
-      other.insertCapture(capture(goodId, { ...(await frame(goodId, 640, 360)), frame_received_at: "2026-07-01T13:00:01.000Z" }));
-      const badId = `bad-${verified}`;
-      const facts = await frame(badId, 640, 360);
-      other.insertCapture(capture(badId, { ...(await arrange(join(dir.path, "spool", badId, "frame.jpg"), facts)), relative_dir: `spool/${badId}`, frame_received_at: "2026-07-01T13:00:02.000Z" }));
-      return { other, good: goodId };
-    }
     let verified = 0;
 
-    const cases: Array<[string, (path: string, good: Partial<CaptureRow>) => Promise<Partial<CaptureRow>>, RegExp]> = [
-      ["was deleted", async (path, good) => { await rm(path); return good; }, /missing/],
-      ["was replaced", async (path, good) => { const size = good.jpeg_bytes ?? 0; await writeFile(path, Buffer.alloc(size, 7)); return good; }, /doesn't match/],
-      ["was cut short", async (path, good) => { await writeFile(path, Buffer.alloc(10)); return good; }, /doesn't match/],
+    async function withBadFrame(arrange: (path: string, good: Partial<CaptureRow>) => Promise<void>): Promise<{ other: State; good: string }> {
+      const other = new State(join(dir.path, `verify-${verified++}.sqlite`));
+      const goodId = `good-${verified}`;
+      await keep(other, capture(goodId, { ...(await frame(goodId, 640, 360)), frame_received_at: "2026-07-01T13:00:01.000Z" }));
+      const badId = `bad-${verified}`;
+      const facts = await frame(badId, 640, 360);
+      await keep(other, capture(badId, { ...facts, relative_dir: `spool/${badId}`, frame_received_at: "2026-07-01T13:00:02.000Z" }));
+      await arrange(join(dir.path, "spool", badId, "frame.jpg"), facts);
+      return { other, good: goodId };
+    }
+
+    async function editMetadata(framePath: string, change: Record<string, unknown>): Promise<void> {
+      const path = join(dirname(framePath), "metadata.json");
+      await writeFile(path, JSON.stringify({ ...(JSON.parse(await readFile(path, "utf8")) as object), ...change }));
+    }
+
+    const cases: Array<[string, (path: string, good: Partial<CaptureRow>) => Promise<void>, RegExp]> = [
+      ["was deleted", async (path) => rm(path), /frame file is missing/],
+      ["was replaced", async (path, good) => writeFile(path, Buffer.alloc(good.jpeg_bytes ?? 0, 7)), /frame file doesn't match/],
+      ["was cut short", async (path) => writeFile(path, Buffer.alloc(10)), /frame file doesn't match/],
+      ["has a directory in place of its frame", async (path) => { await rm(path); await mkdir(path); }, /frame file can't be read \(EISDIR\)/],
+      ["lost its metadata", async (path) => rm(join(dirname(path), "metadata.json")), /metadata file is missing/],
+      ["has metadata that isn't JSON", async (path) => writeFile(join(dirname(path), "metadata.json"), "{ nope"), /metadata file doesn't match/],
+      ["has metadata from another project", async (path) => editMetadata(path, { project_id: "other-site" }), /metadata file doesn't match/],
+      ["has metadata from another camera", async (path) => editMetadata(path, { camera_id: "other-camera" }), /metadata file doesn't match/],
+      ["has metadata naming another slot", async (path) => editMetadata(path, { slot_id: "another-slot" }), /metadata file doesn't match/],
+      ["has metadata with another receive time", async (path) => editMetadata(path, { frame_received_at: "2026-07-01T13:00:09.000Z" }), /metadata file doesn't match/],
     ];
     for (const [name, arrange, reason] of cases) {
       it(`leaves one that ${name} out, lists why, and renders the rest`, async () => {

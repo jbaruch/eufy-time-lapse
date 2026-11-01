@@ -314,7 +314,7 @@ function commandResume(paths: Paths, args: string[]): number {
   return 0;
 }
 
-async function commandRender(paths: Paths, args: string[]): Promise<number> {
+async function commandRender(settings: AppSettings, paths: Paths, args: string[]): Promise<number> {
   const { values } = parseArgs({
     args,
     options: {
@@ -328,9 +328,11 @@ async function commandRender(paths: Paths, args: string[]): Promise<number> {
   });
   if (values.from === undefined || values.to === undefined) throw new ConfigError("render needs --from YYYY-MM-DD and --to YYYY-MM-DD.");
   const state = new State(paths.databasePath);
+  const { project, camera } = serviceConfigFor(settings, paths);
   const manifest = await render({
     state,
     dataDir: paths.dataDir,
+    owner: { projectId: project.id, cameraId: camera.id },
     from: values.from,
     to: values.to,
     outputPath: values.output ?? join(paths.dataDir, "renders", `timelapse-${values.from}-to-${values.to}.mp4`),
@@ -386,8 +388,10 @@ async function main(argv: string[]): Promise<number> {
       return commandPause(settings().paths);
     case "resume":
       return commandResume(settings().paths, rest);
-    case "render":
-      return await commandRender(settings().paths, rest);
+    case "render": {
+      const loaded = settings();
+      return await commandRender(loaded.settings, loaded.paths, rest);
+    }
     case "export-manifest":
       return commandExportManifest(settings().paths);
     default:

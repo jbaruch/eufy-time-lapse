@@ -9,8 +9,9 @@ import type { AuthState, CameraInfo, LiveSession } from "../src/adapters/adapter
 import { DEFAULT_SERVICE_CONFIG } from "../src/service-config.ts";
 import type { ServiceConfig } from "../src/service-config.ts";
 import { CameraLockHeldError, withCameraLock } from "../src/lock.ts";
-import { CaptureService, parseCaptureMetadata, scheduleRevision } from "../src/service.ts";
-import type { CaptureMetadata } from "../src/service.ts";
+import { CaptureService, scheduleRevision } from "../src/service.ts";
+import { parseCaptureMetadata } from "../src/stored-capture.ts";
+import type { CaptureMetadata } from "../src/stored-capture.ts";
 import { State } from "../src/state.ts";
 import type { AttemptRow, SlotState } from "../src/state.ts";
 import { buildCalibration, buildStatus } from "../src/status.ts";
@@ -747,6 +748,7 @@ describe("CaptureService", () => {
       ["a frame received before its slot's time", async (h) => spooled(h, "bad", JSON.stringify(scheduledFor("bad", { frame_received_at: "2026-05-01T12:59:00.000Z" })))],
       ["a frame received after the present", async (h) => spooled(h, "bad", JSON.stringify(scheduledFor("bad", { frame_received_at: "2026-08-01T00:00:00.000Z" })))],
       ["no frame", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad")), null)],
+      ["a directory in place of its metadata", async (h) => { await mkdir(join(h.dataDir, "spool", "construction", "site-overview", "2026", "05", "01", "bad", "metadata.json"), { recursive: true }); }],
       ["a frame of the wrong size", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad")), Buffer.from("short"))],
       ["a frame with the wrong hash", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad")), Buffer.alloc(FRAME.length, 1))],
     ];
@@ -977,6 +979,7 @@ describe("CaptureService", () => {
       ["metadata naming another slot", async (directory) => editMetadata(directory, { slot_id: "construction/site-overview/2026-07-01T14:00:00.000Z" })],
       ["metadata with another receive time", async (directory) => editMetadata(directory, { frame_received_at: "2026-07-01T13:00:09.000Z" })],
       ["metadata that isn't JSON", async (directory) => writeFile(join(directory, "metadata.json"), "{ nope")],
+      ["a frame that can't be read", async (directory) => { await rm(join(directory, "frame.jpg")); await mkdir(join(directory, "frame.jpg")); }],
     ];
     for (const [name, arrange] of damage) {
       it(`alerts about ${name}, and keeps the row`, async () => {
