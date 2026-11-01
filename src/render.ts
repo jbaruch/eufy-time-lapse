@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type { CaptureRow, State } from "./state.ts";
@@ -68,9 +69,29 @@ function concatQuote(path: string): string {
   return `'${path.replace(/'/g, "'\\''")}'`;
 }
 
+/** The database's word about a frame is only a record of it. A replaced or damaged file must not go into a video under the original's hash. */
+async function verifyFrames(chosen: ReturnType<typeof selectFrames>, dataDir: string): Promise<ReturnType<typeof selectFrames>> {
+  const selected: CaptureRow[] = [];
+  const exclusions = [...chosen.exclusions];
+  for (const frame of chosen.selected) {
+    let content: Buffer;
+    try {
+      content = await readFile(join(dataDir, frame.relative_dir, "frame.jpg"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      exclusions.push({ capture_id: frame.capture_id, reason: "the frame file is missing" });
+      continue;
+    }
+    if (content.length === frame.jpeg_bytes && createHash("sha256").update(content).digest("hex") === frame.sha256) selected.push(frame);
+    else exclusions.push({ capture_id: frame.capture_id, reason: "the frame file doesn't match its record" });
+  }
+  return { selected, exclusions };
+}
+
 /** Builds a video purely from stored frames: no camera contact, and source frames stay untouched. Missing slots compress away. */
 export async function render(options: RenderOptions): Promise<RenderManifest> {
-  const { selected, exclusions } = selectFrames(options.state.capturesBetween(options.from, options.to), options);
+  const chosen = selectFrames(options.state.capturesBetween(options.from, options.to), options);
+  const { selected, exclusions } = await verifyFrames(chosen, options.dataDir);
   if (selected.length === 0) {
     throw new RenderError(`No frames to render between ${options.from} and ${options.to} (${exclusions.length} excluded). Check the dates, or use --include-degraded.`);
   }

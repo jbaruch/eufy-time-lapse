@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { promisify } from "node:util";
@@ -57,10 +58,14 @@ describe("render", () => {
   let dir: { path: string; remove: () => Promise<void> };
   let state: State;
 
-  async function frame(id: string, width: number, height: number): Promise<void> {
+  /** Writes a real frame, and answers what its record should say about it. */
+  async function frame(id: string, width: number, height: number): Promise<Partial<CaptureRow>> {
     const directory = join(dir.path, "spool", id);
     await mkdir(directory, { recursive: true });
-    await run("ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", `testsrc2=size=${width}x${height}:rate=1`, "-frames:v", "1", "-update", "1", join(directory, "frame.jpg")]);
+    const path = join(directory, "frame.jpg");
+    await run("ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", `testsrc2=size=${width}x${height}:rate=1`, "-frames:v", "1", "-update", "1", path]);
+    const content = await readFile(path);
+    return { jpeg_bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") };
   }
 
   async function probe(path: string): Promise<{ width: number; height: number; frames: number; duration: number; streams: number; codec: string }> {
@@ -75,15 +80,11 @@ describe("render", () => {
     dir = await tempDir();
     state = new State(join(dir.path, "state.sqlite"));
     for (const id of ["1", "2", "3", "4", "5", "6"]) {
-      await frame(id, 640, 360);
-      state.insertCapture(capture(id));
+      state.insertCapture(capture(id, await frame(id, 640, 360)));
     }
-    await frame("7", 320, 180);
-    state.insertCapture(capture("7", { quality_status: "degraded", width: 320, height: 180 }));
-    await frame("8", 640, 360);
-    state.insertCapture(capture("8", { kind: "manual", slot_id: null }));
-    await frame("9", 640, 360);
-    state.insertCapture(capture("9", { local_date: "2026-07-02", frame_received_at: "2026-07-02T13:00:00.000Z" }));
+    state.insertCapture(capture("7", { ...(await frame("7", 320, 180)), quality_status: "degraded", width: 320, height: 180 }));
+    state.insertCapture(capture("8", { ...(await frame("8", 640, 360)), kind: "manual", slot_id: null }));
+    state.insertCapture(capture("9", { ...(await frame("9", 640, 360)), local_date: "2026-07-02", frame_received_at: "2026-07-02T13:00:00.000Z" }));
   });
   after(async () => {
     state.close();
@@ -134,12 +135,41 @@ describe("render", () => {
     await assert.rejects(render({ ...base, state, dataDir: dir.path, from: "2020-01-01", to: "2020-01-02", outputPath: join(dir.path, "renders", "none.mp4") }), (error: RenderError) => error instanceof RenderError && /No frames/.test(error.message));
   });
 
-  it("fails loudly on a missing source frame, and leaves the others alone", async () => {
-    const empty = new State(join(dir.path, "other.sqlite"));
-    empty.insertCapture(capture("missing", { relative_dir: "spool/not-there" }));
-    await assert.rejects(render({ ...base, state: empty, dataDir: dir.path, outputPath: join(dir.path, "renders", "broken.mp4") }), RenderError);
-    empty.close();
-    await writeFile(join(dir.path, "still-here"), "");
-    await readFile(join(dir.path, "spool", "1", "frame.jpg"));
+  describe("a frame that no longer matches its record", () => {
+    async function withBadFrame(arrange: (path: string, good: Partial<CaptureRow>) => Promise<Partial<CaptureRow>>): Promise<{ other: State; good: string }> {
+      const other = new State(join(dir.path, `verify-${verified++}.sqlite`));
+      const goodId = `good-${verified}`;
+      other.insertCapture(capture(goodId, { ...(await frame(goodId, 640, 360)), frame_received_at: "2026-07-01T13:00:01.000Z" }));
+      const badId = `bad-${verified}`;
+      const facts = await frame(badId, 640, 360);
+      other.insertCapture(capture(badId, { ...(await arrange(join(dir.path, "spool", badId, "frame.jpg"), facts)), relative_dir: `spool/${badId}`, frame_received_at: "2026-07-01T13:00:02.000Z" }));
+      return { other, good: goodId };
+    }
+    let verified = 0;
+
+    const cases: Array<[string, (path: string, good: Partial<CaptureRow>) => Promise<Partial<CaptureRow>>, RegExp]> = [
+      ["was deleted", async (path, good) => { await rm(path); return good; }, /missing/],
+      ["was replaced", async (path, good) => { const size = good.jpeg_bytes ?? 0; await writeFile(path, Buffer.alloc(size, 7)); return good; }, /doesn't match/],
+      ["was cut short", async (path, good) => { await writeFile(path, Buffer.alloc(10)); return good; }, /doesn't match/],
+    ];
+    for (const [name, arrange, reason] of cases) {
+      it(`leaves one that ${name} out, lists why, and renders the rest`, async () => {
+        const { other, good } = await withBadFrame(arrange);
+        const outputPath = join(dir.path, "renders", `verify-${verified}.mp4`);
+        const manifest = await render({ ...base, state: other, dataDir: dir.path, outputPath });
+        assert.deepEqual(manifest.inputs.map((input) => input.capture_id), [good]);
+        assert.equal(manifest.exclusions.length, 1);
+        assert.match(manifest.exclusions[0]?.reason ?? "", reason);
+        other.close();
+      });
+    }
+
+    it("explains when nothing is left to render, and leaves the source files alone", async () => {
+      const other = new State(join(dir.path, "only-bad.sqlite"));
+      other.insertCapture(capture("missing", { relative_dir: "spool/not-there" }));
+      await assert.rejects(render({ ...base, state: other, dataDir: dir.path, outputPath: join(dir.path, "renders", "broken.mp4") }), RenderError);
+      other.close();
+      await readFile(join(dir.path, "spool", "1", "frame.jpg"));
+    });
   });
 });
