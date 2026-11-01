@@ -18,8 +18,13 @@ on_host() {
 }
 
 # The lines of the first list that aren't in the second. comm needs input sorted in its own locale, so both use one.
+# Sorted here rather than in process substitutions, where a failing sort would look like an empty list, and an empty list
+# of what to keep is how files get deleted.
 lines_only_in() {
-  LC_ALL=C comm -23 <(printf '%s\n' "$1" | LC_ALL=C sort) <(printf '%s\n' "$2" | LC_ALL=C sort)
+  local first second
+  first="$(printf '%s\n' "$1" | LC_ALL=C sort)" || return 1
+  second="$(printf '%s\n' "$2" | LC_ALL=C sort)" || return 1
+  LC_ALL=C comm -23 <(printf '%s\n' "$first") <(printf '%s\n' "$second")
 }
 
 # What the host holds outside the data directory, .env and the manifest, matching a find test. find doesn't follow a
@@ -103,7 +108,7 @@ main() {
     done <<< "$previous"
   fi
 
-  local unverifiable present extras stale
+  local unverifiable present present_paths changed extras stale claimed
   unverifiable="$(inventory '! -type d ! -type f')"
   if [[ -n "$unverifiable" ]]; then
     echo "$host has symlinks or special files, which could lead anywhere, so nothing was deployed. Look at them, then remove them:" >&2
@@ -111,17 +116,21 @@ main() {
     exit 1
   fi
   present="$(hashed_inventory)"
-  extras="$(paths_of "$(lines_only_in "$present" "$previous")")"
+  # One step at a time throughout: set -e can't see a failure inside a substitution that's an argument to something else.
+  changed="$(lines_only_in "$present" "$previous")"
+  extras="$(paths_of "$changed")"
   if [[ -n "$extras" ]]; then
     echo "$host has files the last deploy didn't ship, or that changed since, so nothing was deployed. Look at them, then remove them:" >&2
     printf '%s\n' "$extras" >&2
     exit 1
   fi
   # Every file on the host is now known to be exactly what the last deploy shipped, so these are safe to remove.
-  stale="$(lines_only_in "$(paths_of "$present")" "$tracked")"
+  present_paths="$(paths_of "$present")"
+  stale="$(lines_only_in "$present_paths" "$tracked")"
 
   # Claimed before anything lands, so a deploy that dies halfway can be run again: what it left is already owned.
-  write_manifest "$(printf '%s\n%s\n' "$previous" "$shipping" | LC_ALL=C sort -u | sed '/^$/d')"
+  claimed="$(printf '%s\n%s\n' "$previous" "$shipping" | LC_ALL=C sort -u | sed '/^$/d')"
+  write_manifest "$claimed"
   if [[ -n "$stale" ]]; then
     # shellcheck disable=SC2016 # These expand on the host.
     printf '%s\n' "$stale" | on_host 'set -e; while IFS= read -r file; do

@@ -185,6 +185,8 @@ describe("scripts/deploy.sh", () => {
     // The retry wait, so a test of it takes no real time.
     await executable(join(stubs, "sleep"), "exit 0");
     await executable(join(stubs, "sha256sum"), options.corrupt === true ? 'echo "0000  $1"' : 'exec shasum -a 256 "$@"');
+    // The real sort, until a test says which call should fail.
+    await executable(join(stubs, "sort"), `calls=0\nif [ -f '${base}/sort-calls' ]; then calls="$(cat '${base}/sort-calls')"; fi\ncalls=$((calls + 1))\necho "$calls" > '${base}/sort-calls'\nif [ "\${SORT_FAILS_ON_CALL:-0}" -eq "$calls" ]; then echo "sort broke" >&2; exit 2; fi\nPATH='${process.env.PATH ?? ""}' exec sort "$@"`);
     // The real tar, then whatever a test wants to go wrong right after it.
     await executable(join(stubs, "tar"), `PATH='${process.env.PATH ?? ""}' tar "$@"\nif [ -n "\${AFTER_TAR:-}" ]; then eval "$AFTER_TAR"; fi`);
     // Which locales a machine has installed varies, so every deploy test checks the one comm's input is sorted in.
@@ -540,6 +542,30 @@ describe("scripts/deploy.sh", () => {
       assert.equal(result.code, 0, result.stderr);
       assert.equal(await readFile(join(home, directory, "compose.yaml"), "utf8"), "services: {}\n");
       assert.deepEqual((await readdir(home)).sort(), [directory, "app"].sort(), "nothing ran, so nothing else turned up");
+    });
+  }
+
+  // Eight sorts in a deploy with a file to remove. The first six come before anything on the host changes.
+  for (const call of [1, 2, 3, 4, 5, 6, 7, 8]) {
+    it(`stops when sort fails on its call ${call}, and never restarts${call <= 6 ? " or changes anything" : ""}`, async () => {
+      const { repo, host, log, env } = await world();
+      await writeFile(join(repo, "going-away.txt"), "old\n");
+      await git(repo, "add", "-A");
+      await git(repo, "commit", "-q", "-m", "add");
+      assert.equal((await bash([script, "somehost", "app"], { cwd: repo, env })).code, 0);
+      await rm(join(repo, "going-away.txt"));
+      await git(repo, "add", "-A");
+      await git(repo, "commit", "-q", "-m", "remove");
+      await rm(join(host, "..", "..", "sort-calls"));
+      const calls = await readFile(log, "utf8");
+      const manifest = await readFile(join(host, ".deployed-files"), "utf8");
+      const result = await bash([script, "somehost", "app"], { cwd: repo, env: { ...env, SORT_FAILS_ON_CALL: String(call) } });
+      assert.notEqual(result.code, 0);
+      assert.equal(await readFile(log, "utf8"), calls);
+      if (call <= 6) {
+        assert.equal(await readFile(join(host, "going-away.txt"), "utf8"), "old\n");
+        assert.equal(await readFile(join(host, ".deployed-files"), "utf8"), manifest);
+      }
     });
   }
 
