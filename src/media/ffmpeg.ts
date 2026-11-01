@@ -19,10 +19,16 @@ export interface StreamProperties {
   height: number;
 }
 
-interface ExecFailure extends Error {
-  code?: string | number;
+export interface ToolFailure extends Error {
+  cmd: string;
+  code?: string | number | null;
   killed?: boolean;
   stderr?: string;
+}
+
+/** What execFile raises when a tool can't start, exits badly, is killed or says too much: it always names the command. A bug on the way there doesn't. */
+export function isToolFailure(error: unknown): error is ToolFailure {
+  return error instanceof Error && typeof (error as ToolFailure).cmd === "string";
 }
 
 async function runTool(tool: "ffmpeg" | "ffprobe", args: string[], timeoutMs: number): Promise<string> {
@@ -30,11 +36,11 @@ async function runTool(tool: "ffmpeg" | "ffprobe", args: string[], timeoutMs: nu
     const { stdout } = await run(tool, args, { timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 4 * 1024 * 1024 });
     return stdout;
   } catch (error) {
-    const failure = error as ExecFailure;
-    if (failure.code === "ENOENT") {
+    if (!isToolFailure(error)) throw error;
+    if (error.code === "ENOENT") {
       throw new Error(`${tool} is not installed or not on PATH. Install FFmpeg and run this again.`, { cause: error });
     }
-    const detail = failure.killed === true ? `timed out after ${timeoutMs} ms` : (failure.stderr ?? failure.message).trim();
+    const detail = error.killed === true ? `timed out after ${timeoutMs} ms` : (error.stderr ?? error.message).trim();
     throw new CaptureFailure("decode_failed", "decode", `${tool} failed: ${detail}`, { cause: error });
   }
 }
