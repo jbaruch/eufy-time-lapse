@@ -18,6 +18,10 @@ interface Outcome {
 
 async function bash(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string } = {}): Promise<Outcome> {
   const child = run("bash", args, { cwd: options.cwd, env: { ...process.env, ...options.env } });
+  // A script may exit without reading its input. Its exit code is the outcome; a closed pipe isn't one.
+  child.child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
+    if (error.code !== "EPIPE") throw error;
+  });
   child.child.stdin?.end(options.input ?? "");
   try {
     const { stdout, stderr } = await child;
@@ -27,6 +31,14 @@ async function bash(args: string[], options: { cwd?: string; env?: NodeJS.Proces
     return { code: failure.code, stdout: failure.stdout, stderr: failure.stderr };
   }
 }
+
+describe("the bash helper", () => {
+  it("reports the script's result when the script never reads its input", async () => {
+    // More than a pipe holds, so the write is still pending when the script exits.
+    const result = await bash(["-c", "exit 0"], { input: "x".repeat(4 * 1024 * 1024) });
+    assert.equal(result.code, 0);
+  });
+});
 
 describe("scripts/set-credentials.sh", () => {
   const script = join(SCRIPTS, "set-credentials.sh");
