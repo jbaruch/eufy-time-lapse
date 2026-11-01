@@ -7,7 +7,7 @@ import { acquireFrame } from "../capture/acquire.ts";
 import { evaluateProbe, maskSerial, REPORT_SCHEMA_VERSION } from "./report.ts";
 import type { CameraLink, ProbeAttempt, ProbeReport } from "./report.ts";
 
-export const FRAME_POLICY = "last keyframe of the stream window; all keyframes kept for review";
+export const FRAME_POLICY = "last keyframe at the stream's highest resolution, never rescaled; all keyframes kept for review";
 
 export interface ProbeOptions {
   adapter: CameraAdapter;

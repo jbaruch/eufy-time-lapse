@@ -1,17 +1,17 @@
 import { execFile } from "node:child_process";
-import { readdir } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { CaptureFailure } from "../adapters/adapter.ts";
 import type { VideoCodecName } from "../adapters/adapter.ts";
+import { splitKeyframes } from "./annexb.ts";
+import type { RawFormat } from "./annexb.ts";
 
 const run = promisify(execFile);
 
 const PROBE_TIMEOUT_MS = 15_000;
 const DECODE_TIMEOUT_MS = 30_000;
 const MAX_KEYFRAMES = 64;
-const FORMAT_BY_CODEC = { h264: "h264", h265: "hevc" } as const;
-type RawFormat = (typeof FORMAT_BY_CODEC)[keyof typeof FORMAT_BY_CODEC];
 
 export interface StreamProperties {
   codec: string;
@@ -70,37 +70,48 @@ export async function identifyStream(
   throw new CaptureFailure("decode_failed", "decode", `Could not identify the camera's video stream (${tried.join("; ")}). The raw stream is kept at ${path}.`);
 }
 
-/** Decodes every keyframe in a raw stream to JPEG, at its actual resolution. Returns paths in stream order. */
-export async function extractKeyframes(path: string, format: RawFormat, outputDir: string): Promise<string[]> {
-  await runTool(
-    "ffmpeg",
-    [
-      "-nostdin",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-y",
-      "-skip_frame",
-      "nokey",
-      "-f",
-      format,
-      "-i",
-      path,
-      "-fps_mode",
-      "passthrough",
-      "-frames:v",
-      String(MAX_KEYFRAMES),
-      "-q:v",
-      "2",
-      join(outputDir, "keyframe-%03d.jpg"),
-    ],
-    DECODE_TIMEOUT_MS,
-  );
-  const names = (await readdir(outputDir)).filter((name) => /^keyframe-\d+\.jpg$/.test(name)).sort();
-  if (names.length === 0) {
-    throw new CaptureFailure("decode_failed", "decode", `FFmpeg found no decodable keyframe in the stream. The raw stream is kept at ${path}.`);
+export interface ExtractedKeyframes {
+  /** JPEG paths in stream order, each at the keyframe's own resolution. */
+  paths: string[];
+  /** Keyframes that wouldn't decode, while others did. */
+  errors: string[];
+}
+
+/**
+ * Decodes every keyframe in a raw stream to JPEG, one FFmpeg run per keyframe. The camera starts low and
+ * steps up mid-stream, and one FFmpeg output can't follow: it scales to the first frame's size, and with
+ * -noautoscale it still writes that size. A run per keyframe means nothing is ever rescaled.
+ */
+export async function extractKeyframes(path: string, format: RawFormat, outputDir: string): Promise<ExtractedKeyframes> {
+  const units = splitKeyframes(await readFile(path), format).slice(-MAX_KEYFRAMES);
+  const paths: string[] = [];
+  const errors: string[] = [];
+
+  for (const [index, unit] of units.entries()) {
+    const name = `keyframe-${String(index + 1).padStart(3, "0")}`;
+    const unitPath = join(outputDir, `${name}.${format}`);
+    const imagePath = join(outputDir, `${name}.jpg`);
+    await writeFile(unitPath, unit);
+    try {
+      await runTool(
+        "ffmpeg",
+        ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-f", format, "-i", unitPath, "-frames:v", "1", "-update", "1", "-q:v", "2", imagePath],
+        DECODE_TIMEOUT_MS,
+      );
+      paths.push(imagePath);
+    } catch (error) {
+      if (!(error instanceof CaptureFailure)) throw error;
+      errors.push(`${name}: ${error.message}`);
+    } finally {
+      await rm(unitPath, { force: true });
+    }
   }
-  return names.map((name) => join(outputDir, name));
+
+  if (paths.length === 0) {
+    const detail = errors.length > 0 ? errors.join("; ") : "the stream holds no keyframe with parameter sets";
+    throw new CaptureFailure("decode_failed", "decode", `No keyframe decoded (${detail}). The raw stream is kept at ${path}.`);
+  }
+  return { paths, errors };
 }
 
 export async function probeImage(path: string): Promise<StreamProperties> {

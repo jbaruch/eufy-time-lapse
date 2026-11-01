@@ -74,7 +74,7 @@ describe("runProbe", () => {
     assert.deepEqual(JSON.parse(text), JSON.parse(JSON.stringify(report)));
     assert.equal(text.includes(CAMERA.key), false);
     assert.equal(report.camera.serial_masked.endsWith("1234"), true);
-    assert.equal(report.schema_version, 1);
+    assert.equal(report.schema_version, 2);
   });
 
   it("keeps going after a failed attempt and reports the next experiment", async () => {

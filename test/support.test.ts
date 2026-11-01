@@ -23,6 +23,7 @@ describe("loadConfig", () => {
   it("applies defaults", () => {
     const config = loadConfig(base);
     assert.equal(config.adapter, "mega");
+    assert.deepEqual([config.minWidth, config.minHeight], [3840, 2160], "the owner requires native 4K");
     assert.equal(config.country, "US");
     assert.equal(config.acceptInvitations, false);
     assert.equal(config.link, null);
@@ -55,6 +56,8 @@ describe("loadConfig", () => {
 
   it("rejects values it doesn't understand", () => {
     assert.throws(() => loadConfig({ ...base, TIMELAPSE_ADAPTER: "bridge" }), /mega/);
+    assert.throws(() => loadConfig({ ...base, TIMELAPSE_MIN_WIDTH: "4k" }), /TIMELAPSE_MIN_WIDTH/);
+    assert.throws(() => loadConfig({ ...base, TIMELAPSE_MIN_HEIGHT: "-1" }), /TIMELAPSE_MIN_HEIGHT/);
     assert.throws(() => loadConfig({ ...base, TIMELAPSE_CAMERA_LINK: "ethernet" }), /cellular/);
     assert.throws(() => loadConfig({ ...base, EUFY_ACCEPT_INVITATIONS: "yes" }), /true/);
   });

@@ -8,6 +8,10 @@ export class ConfigError extends Error {
   }
 }
 
+/** The owner requires native 4K. A smaller frame is kept, but marked degraded. */
+const DEFAULT_MIN_WIDTH = 3840;
+const DEFAULT_MIN_HEIGHT = 2160;
+
 export type AdapterName = "mega" | "legacy";
 
 export interface AppConfig {
@@ -20,6 +24,8 @@ export interface AppConfig {
   link: CameraLink | null;
   operator: string | null;
   dataDir: string;
+  minWidth: number;
+  minHeight: number;
 }
 
 function optional(env: NodeJS.ProcessEnv, name: string): string | undefined {
@@ -55,6 +61,14 @@ function parseBoolean(env: NodeJS.ProcessEnv, name: string, fallback: boolean): 
   throw new ConfigError(`${name} must be "true" or "false", got "${value}".`);
 }
 
+function parsePixels(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const value = optional(env, name);
+  if (value === undefined) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) throw new ConfigError(`${name} must be a positive whole number of pixels, got "${value}".`);
+  return parsed;
+}
+
 function parseAdapter(value: string | undefined): AdapterName {
   if (value === undefined || value === "mega") return "mega";
   if (value === "legacy") return value;
@@ -79,5 +93,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     link: parseLink(optional(env, "TIMELAPSE_CAMERA_LINK")),
     operator: optional(env, "TIMELAPSE_CELLULAR_OPERATOR") ?? null,
     dataDir: optional(env, "TIMELAPSE_DATA_DIR") ?? "./data",
+    minWidth: parsePixels(env, "TIMELAPSE_MIN_WIDTH", DEFAULT_MIN_WIDTH),
+    minHeight: parsePixels(env, "TIMELAPSE_MIN_HEIGHT", DEFAULT_MIN_HEIGHT),
   };
 }

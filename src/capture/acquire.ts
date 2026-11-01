@@ -64,6 +64,8 @@ export interface AttemptRecord {
   audio_error: string | null;
   frame: { file: string; width: number; height: number; bytes: number; sha256: string } | null;
   keyframes: KeyframeRecord[];
+  /** Keyframes that wouldn't decode, while others did. */
+  keyframe_errors: string[];
 }
 
 interface StreamStats {
@@ -224,6 +226,7 @@ export async function acquireFrame(options: AcquireOptions): Promise<AttemptReco
     audio_error: stats?.audioError ?? null,
     frame: null,
     keyframes: [],
+    keyframe_errors: [],
   };
 
   if (failure === undefined && session !== undefined) {
@@ -241,6 +244,18 @@ export async function acquireFrame(options: AcquireOptions): Promise<AttemptReco
   return record;
 }
 
+/**
+ * The last keyframe at the stream's highest resolution. A cold start begins low and steps up, and the
+ * latest frame has had the longest to settle, but it must not win if the camera stepped back down.
+ */
+export function chooseKeyframe(keyframes: KeyframeRecord[]): KeyframeRecord | undefined {
+  const pixels = (keyframe: KeyframeRecord): number => keyframe.width * keyframe.height;
+  return keyframes.reduce<KeyframeRecord | undefined>(
+    (best, keyframe) => (best === undefined || pixels(keyframe) >= pixels(best) ? keyframe : best),
+    undefined,
+  );
+}
+
 async function saveFrame(
   record: AttemptRecord,
   session: LiveSession,
@@ -250,25 +265,27 @@ async function saveFrame(
 ): Promise<void> {
   const { format, properties } = await identifyStream(streamPath, session.codec);
   record.video.actual_codec = properties.codec;
+  // Only the stream's first configuration, and the camera steps up from there. Replaced below by the chosen frame's size.
   record.video.actual_width = properties.width;
   record.video.actual_height = properties.height;
 
-  const keyframePaths = await extractKeyframes(streamPath, format, options.outputDir);
-  for (const path of keyframePaths) {
+  const extracted = await extractKeyframes(streamPath, format, options.outputDir);
+  record.keyframe_errors = extracted.errors;
+  for (const path of extracted.paths) {
     const image = await probeImage(path);
     const { size } = await stat(path);
     record.keyframes.push({ file: basename(path), width: image.width, height: image.height, bytes: size });
   }
 
-  // The last keyframe has had the longest to settle after a cold start. Every keyframe stays on disk,
-  // so the policy can be revisited against real footage.
-  const chosen = keyframePaths[keyframePaths.length - 1];
-  const chosenRecord = record.keyframes[record.keyframes.length - 1];
-  if (chosen === undefined || chosenRecord === undefined) {
+  const chosenRecord = chooseKeyframe(record.keyframes);
+  if (chosenRecord === undefined) {
     throw new CaptureFailure("decode_failed", "decode", "FFmpeg returned no keyframes.");
   }
+  record.video.actual_width = chosenRecord.width;
+  record.video.actual_height = chosenRecord.height;
+
   const framePath = join(options.outputDir, "frame.jpg");
-  await copyFile(chosen, `${framePath}.tmp`);
+  await copyFile(join(options.outputDir, chosenRecord.file), `${framePath}.tmp`);
   await rename(`${framePath}.tmp`, framePath);
 
   const content = await readFile(framePath);

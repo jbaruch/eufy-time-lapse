@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { after, before, describe, it } from "node:test";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
-import { acquireFrame } from "../src/capture/acquire.ts";
+import { acquireFrame, chooseKeyframe } from "../src/capture/acquire.ts";
 import type { AcquireOptions } from "../src/capture/acquire.ts";
 import { liveSession, MockAdapter, rawVideo, tempDir } from "./helpers/fixtures.ts";
 import type { MockBehavior } from "./helpers/fixtures.ts";
@@ -19,6 +19,24 @@ async function exists(path: string): Promise<boolean> {
     throw error;
   }
 }
+
+describe("chooseKeyframe", () => {
+  const keyframe = (file: string, width: number, height: number) => ({ file, width, height, bytes: 1 });
+
+  it("takes the last keyframe at the highest resolution", () => {
+    const chosen = chooseKeyframe([keyframe("a", 1280, 720), keyframe("b", 3840, 2160), keyframe("c", 3840, 2160)]);
+    assert.equal(chosen?.file, "c");
+  });
+
+  it("ignores a later, smaller keyframe", () => {
+    const chosen = chooseKeyframe([keyframe("a", 3840, 2160), keyframe("b", 1280, 720)]);
+    assert.equal(chosen?.file, "a");
+  });
+
+  it("has nothing to choose from an empty list", () => {
+    assert.equal(chooseKeyframe([]), undefined);
+  });
+});
 
 describe("acquireFrame", () => {
   let dir: { path: string; remove: () => Promise<void> };
@@ -98,6 +116,35 @@ describe("acquireFrame", () => {
     assert.equal(record.status, "captured_degraded");
     assert.deepEqual([record.frame?.width, record.frame?.height], [640, 360]);
     assert.equal(await exists(join(outputDir, "frame.jpg")), true);
+  });
+
+  it("keeps each frame at its own size when the stream steps up mid-session, as the camera does", async () => {
+    const { outputDir, result } = attempt({ open: async () => liveSession(Buffer.concat([lowRes, h264]), { codec: "h264" }) });
+    const record = await result;
+
+    assert.equal(record.status, "captured");
+    const sizes = new Set(record.keyframes.map((keyframe) => `${keyframe.width}x${keyframe.height}`));
+    assert.deepEqual([...sizes].sort(), ["1280x720", "640x360"], "no frame was rescaled to the first frame's size");
+    assert.deepEqual([record.frame?.width, record.frame?.height], [1280, 720]);
+    assert.deepEqual([record.video.actual_width, record.video.actual_height], [1280, 720], "reports the frame, not the stream's first config");
+
+    const saved = await readFile(join(outputDir, "frame.jpg"));
+    assert.equal(record.frame?.bytes, saved.length);
+  });
+
+  it("doesn't take a late low-resolution frame when the stream steps back down", async () => {
+    const { result } = attempt({ open: async () => liveSession(Buffer.concat([h264, lowRes]), { codec: "h264" }) });
+    const record = await result;
+    assert.equal(record.status, "captured");
+    assert.deepEqual([record.frame?.width, record.frame?.height], [1280, 720]);
+    assert.deepEqual(record.keyframes.at(-1)?.width, 640, "the fixture really does end low");
+  });
+
+  it("marks a frame degraded when the stream never reaches the required size", async () => {
+    const { result } = attempt({ open: async () => liveSession(h264, { codec: "h264" }) }, { minWidth: 3840, minHeight: 2160 });
+    const record = await result;
+    assert.equal(record.status, "captured_degraded");
+    assert.deepEqual([record.frame?.width, record.frame?.height], [1280, 720], "kept at its real size, not scaled to fit");
   });
 
   it("fails and still releases the camera when no video arrives before the deadline", async () => {

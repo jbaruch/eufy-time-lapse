@@ -25,6 +25,7 @@ function captured(overrides: Partial<ProbeAttempt> = {}): ProbeAttempt {
     audio_error: null,
     frame: { file: "frame.jpg", width: 1920, height: 1080, bytes: 500, sha256: "abc" },
     keyframes: [],
+    keyframe_errors: [],
     battery: { percent: 80, observedAt: null, note: "none", age_seconds: null },
     telemetry: {},
     ...overrides,

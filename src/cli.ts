@@ -31,8 +31,6 @@ const EXIT_USAGE = 2;
 const EXIT_INTERRUPTED = 130;
 const ACQUISITION_TIMEOUT_MS = 60_000;
 const CLEANUP_TIMEOUT_MS = 10_000;
-const MIN_WIDTH = 1280;
-const MIN_HEIGHT = 720;
 const CAMERA_ID = "site-overview";
 
 function log(message: string): void {
@@ -136,8 +134,8 @@ async function commandProbe(config: AppConfig, dataDir: string, sessionDir: stri
         streamMs: streamSeconds * 1000,
         acquisitionTimeoutMs: ACQUISITION_TIMEOUT_MS,
         cleanupTimeoutMs: CLEANUP_TIMEOUT_MS,
-        minWidth: MIN_WIDTH,
-        minHeight: MIN_HEIGHT,
+        minWidth: config.minWidth,
+        minHeight: config.minHeight,
         link: config.link,
         operator: config.operator,
         signal: controller.signal,
