@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, it } from "node:test";
 import { promisify } from "node:util";
 import { ffmpegVersionLine, outputSize, render, RenderError, selectFrames } from "../src/render.ts";
@@ -96,19 +97,20 @@ describe("outputSize", () => {
 });
 
 const OWNER = { projectId: "construction", cameraId: "site-overview" };
+const frameDir = (id: string, date = "2026-07-01"): string => join("spool", OWNER.projectId, OWNER.cameraId, ...date.split("-"), id);
 
 describe("render", () => {
   let dir: { path: string; remove: () => Promise<void> };
   let state: State;
 
   /** Writes a real frame, and answers what its record should say about it. */
-  async function frame(id: string, width: number, height: number): Promise<Partial<CaptureRow>> {
-    const directory = join(dir.path, "spool", id);
+  async function frame(id: string, width: number, height: number, date?: string): Promise<Partial<CaptureRow>> {
+    const directory = join(dir.path, frameDir(id, date));
     await mkdir(directory, { recursive: true });
     const path = join(directory, "frame.jpg");
     await run("ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", `testsrc2=size=${width}x${height}:rate=1`, "-frames:v", "1", "-update", "1", path]);
     const content = await readFile(path);
-    return { jpeg_bytes: content.length, sha256: createHash("sha256").update(content).digest("hex") };
+    return { jpeg_bytes: content.length, sha256: createHash("sha256").update(content).digest("hex"), relative_dir: frameDir(id, date) };
   }
 
   /** Stores a capture's record beside its frame and in the database, as the service does. */
@@ -134,7 +136,7 @@ describe("render", () => {
     }
     await keep(state, capture("7", { ...(await frame("7", 320, 180)), quality_status: "degraded", width: 320, height: 180 }));
     await keep(state, capture("8", { ...(await frame("8", 640, 360)), kind: "manual", slot_id: null }));
-    await keep(state, capture("9", { ...(await frame("9", 640, 360)), local_date: "2026-07-02", frame_received_at: "2026-07-02T13:00:00.000Z" }));
+    await keep(state, capture("9", { ...(await frame("9", 640, 360, "2026-07-02")), local_date: "2026-07-02", frame_received_at: "2026-07-02T13:00:00.000Z" }));
   });
   after(async () => {
     state.close();
@@ -195,7 +197,7 @@ describe("render", () => {
   });
 
   describe("an output path that lands on the service's own files", () => {
-    const frameOne = () => join(dir.path, "spool", "1", "frame.jpg");
+    const frameOne = () => join(dir.path, frameDir("1"), "frame.jpg");
 
     async function assertRefused(outputPath: string): Promise<void> {
       const before = await readFile(frameOne());
@@ -203,7 +205,7 @@ describe("render", () => {
       await assert.rejects(render({ ...base, state, dataDir: dir.path, outputPath }), (error: RenderError) => error instanceof RenderError && /belongs to the service/.test(error.message));
       assert.deepEqual(await readFile(frameOne()), before);
       assert.deepEqual(await readFile(join(dir.path, "state.sqlite")), database);
-      assert.deepEqual((await readdir(join(dir.path, "spool", "1"))).sort(), ["frame.jpg", "metadata.json"]);
+      assert.deepEqual((await readdir(join(dir.path, frameDir("1")))).sort(), ["frame.jpg", "metadata.json"]);
     }
 
     it("refuses a frame", async () => {
@@ -211,7 +213,7 @@ describe("render", () => {
     });
 
     it("refuses a new file in a frame's directory", async () => {
-      await assertRefused(join(dir.path, "spool", "1", "video.mp4"));
+      await assertRefused(join(dir.path, frameDir("1"), "video.mp4"));
     });
 
     it("refuses the database", async () => {
@@ -223,7 +225,7 @@ describe("render", () => {
     });
 
     it("refuses a path that climbs back out of renders", async () => {
-      await assertRefused(join(dir.path, "renders", "..", "spool", "1", "frame.jpg"));
+      await assertRefused(join(dir.path, "renders", "..", frameDir("1"), "frame.jpg"));
     });
 
     it("refuses a symlink to a frame", async () => {
@@ -236,7 +238,7 @@ describe("render", () => {
     it("refuses a symlink to nothing yet, which writing would create inside the spool", async () => {
       await mkdir(join(dir.path, "renders"), { recursive: true });
       const link = join(dir.path, "renders", "dangling.mp4");
-      await symlink(join(dir.path, "spool", "1", "not-yet.mp4"), link);
+      await symlink(join(dir.path, frameDir("1"), "not-yet.mp4"), link);
       await assertRefused(link);
     });
 
@@ -244,7 +246,7 @@ describe("render", () => {
       await mkdir(join(dir.path, "renders"), { recursive: true });
       const link = join(dir.path, "renders", "link-to-spool");
       await symlink(join(dir.path, "spool"), link);
-      await assertRefused(join(link, "1", "frame.jpg"));
+      await assertRefused(join(link, OWNER.projectId, OWNER.cameraId, "2026", "07", "01", "1", "frame.jpg"));
     });
 
     it("refuses when only the manifest beside the video would land there", async () => {
@@ -271,8 +273,8 @@ describe("render", () => {
       await keep(other, capture(goodId, { ...(await frame(goodId, 640, 360)), frame_received_at: "2026-07-01T13:00:01.000Z" }));
       const badId = `bad-${verified}`;
       const facts = await frame(badId, 640, 360);
-      await keep(other, capture(badId, { ...facts, relative_dir: `spool/${badId}`, frame_received_at: "2026-07-01T13:00:02.000Z" }));
-      await arrange(join(dir.path, "spool", badId, "frame.jpg"), facts);
+      await keep(other, capture(badId, { ...facts, frame_received_at: "2026-07-01T13:00:02.000Z" }));
+      await arrange(join(dir.path, frameDir(badId), "frame.jpg"), facts);
       return { other, good: goodId };
     }
 
@@ -280,6 +282,15 @@ describe("render", () => {
       const path = join(dirname(framePath), "metadata.json");
       await writeFile(path, JSON.stringify({ ...(JSON.parse(await readFile(path, "utf8")) as object), ...change }));
     }
+
+    let elsewhere: { path: string; remove: () => Promise<void> };
+    const outside = (): string => elsewhere.path;
+    before(async () => {
+      elsewhere = await tempDir();
+    });
+    after(async () => {
+      await elsewhere.remove();
+    });
 
     const cases: Array<[string, (path: string, good: Partial<CaptureRow>) => Promise<void>, RegExp]> = [
       ["was deleted", async (path) => rm(path), /frame file is missing/],
@@ -292,6 +303,9 @@ describe("render", () => {
       ["has metadata from another camera", async (path) => editMetadata(path, { camera_id: "other-camera" }), /metadata file doesn't match/],
       ["has metadata naming another slot", async (path) => editMetadata(path, { slot_id: "another-slot" }), /metadata file doesn't match/],
       ["has metadata with another receive time", async (path) => editMetadata(path, { frame_received_at: "2026-07-01T13:00:09.000Z" }), /metadata file doesn't match/],
+      ["has its frame linked in from elsewhere", async (path) => { const away = `${outside()}/frame-${verified}.jpg`; await rename(path, away); await symlink(away, path); }, /frame file leads outside/],
+      ["has its metadata linked in from elsewhere", async (path) => { const here = join(dirname(path), "metadata.json"); const away = `${outside()}/metadata-${verified}.json`; await rename(here, away); await symlink(away, here); }, /metadata file leads outside/],
+      ["has its directory linked in from elsewhere", async (path) => { const here = dirname(path); const away = `${outside()}/directory-${verified}`; await rename(here, away); await symlink(away, here); }, /leads outside/],
     ];
     for (const [name, arrange, reason] of cases) {
       it(`leaves one that ${name} out, lists why, and renders the rest`, async () => {
@@ -305,12 +319,43 @@ describe("render", () => {
       });
     }
 
+    for (const [name, location] of [
+      ["inside the data directory, but not where it belongs", (id: string) => join("copies", id)],
+      ["outside the data directory", (id: string) => join("..", "copies-outside", id)],
+      ["in another camera's place", (id: string) => join("spool", OWNER.projectId, "other-camera", "2026", "07", "01", id)],
+    ] as const) {
+      it(`leaves out a row recording a perfect copy ${name}`, async () => {
+        const other = new State(join(dir.path, `verify-${verified++}.sqlite`));
+        const goodId = `good-${verified}`;
+        await keep(other, capture(goodId, { ...(await frame(goodId, 640, 360)), frame_received_at: "2026-07-01T13:00:01.000Z" }));
+        const badId = `bad-${verified}`;
+        const facts = await frame(badId, 640, 360);
+        await keep(other, capture(badId, { ...facts, frame_received_at: "2026-07-01T13:00:02.000Z" }));
+        const relative = location(badId);
+        await cp(join(dir.path, frameDir(badId)), join(dir.path, relative), { recursive: true });
+        new DatabaseSync(join(dir.path, `verify-${verified - 1}.sqlite`)).prepare("UPDATE captures SET relative_dir = ? WHERE capture_id = ?").run(relative, badId);
+        const manifest = await render({ ...base, state: other, dataDir: dir.path, outputPath: join(dir.path, "renders", `verify-${verified}.mp4`) });
+        assert.deepEqual(manifest.inputs.map((input) => input.capture_id), [goodId]);
+        assert.match(manifest.exclusions[0]?.reason ?? "", /recorded location/);
+        other.close();
+      });
+    }
+
+    it("leaves out a row whose capture id would climb out of the spool", async () => {
+      const other = new State(join(dir.path, `verify-${verified++}.sqlite`));
+      const facts = await frame(`climb-${verified}`, 640, 360);
+      const climbing = "../../../../../../../outside";
+      other.insertCapture(capture(climbing, { ...facts, relative_dir: join(frameDir("x"), "..", climbing), frame_received_at: "2026-07-01T13:00:02.000Z" }));
+      await assert.rejects(render({ ...base, state: other, dataDir: dir.path, outputPath: join(dir.path, "renders", `verify-${verified}.mp4`) }), /No frames/);
+      other.close();
+    });
+
     it("explains when nothing is left to render, and leaves the source files alone", async () => {
       const other = new State(join(dir.path, "only-bad.sqlite"));
       other.insertCapture(capture("missing", { relative_dir: "spool/not-there" }));
       await assert.rejects(render({ ...base, state: other, dataDir: dir.path, outputPath: join(dir.path, "renders", "broken.mp4") }), RenderError);
       other.close();
-      await readFile(join(dir.path, "spool", "1", "frame.jpg"));
+      await readFile(join(dir.path, frameDir("1"), "frame.jpg"));
     });
   });
 });

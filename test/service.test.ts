@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, mkdir, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readdir, readFile, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, it } from "node:test";
@@ -748,6 +748,12 @@ describe("CaptureService", () => {
       ["a frame received before its slot's time", async (h) => spooled(h, "bad", JSON.stringify(scheduledFor("bad", { frame_received_at: "2026-05-01T12:59:00.000Z" })))],
       ["a frame received after the present", async (h) => spooled(h, "bad", JSON.stringify(scheduledFor("bad", { frame_received_at: "2026-08-01T00:00:00.000Z" })))],
       ["no frame", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad")), null)],
+      ["a frame linked in from elsewhere", async (h) => {
+        await spooled(h, "bad", JSON.stringify(metadataFor("bad")), null);
+        const away = join(h.dataDir, "..", `away-${run}.jpg`);
+        await writeFile(away, FRAME);
+        await symlink(away, join(h.dataDir, "spool", "construction", "site-overview", "2026", "05", "01", "bad", "frame.jpg"));
+      }],
       ["a directory in place of its metadata", async (h) => { await mkdir(join(h.dataDir, "spool", "construction", "site-overview", "2026", "05", "01", "bad", "metadata.json"), { recursive: true }); }],
       ["a frame of the wrong size", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad")), Buffer.from("short"))],
       ["a frame with the wrong hash", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad")), Buffer.alloc(FRAME.length, 1))],
@@ -980,6 +986,7 @@ describe("CaptureService", () => {
       ["metadata with another receive time", async (directory) => editMetadata(directory, { frame_received_at: "2026-07-01T13:00:09.000Z" })],
       ["metadata that isn't JSON", async (directory) => writeFile(join(directory, "metadata.json"), "{ nope")],
       ["a frame that can't be read", async (directory) => { await rm(join(directory, "frame.jpg")); await mkdir(join(directory, "frame.jpg")); }],
+      ["a frame linked in from elsewhere", async (directory) => { const away = `${directory}-away.jpg`; await rename(join(directory, "frame.jpg"), away); await symlink(away, join(directory, "frame.jpg")); }],
     ];
     for (const [name, arrange] of damage) {
       it(`alerts about ${name}, and keeps the row`, async () => {
@@ -991,6 +998,19 @@ describe("CaptureService", () => {
         h.state.close();
       });
     }
+
+    it("alerts about a row recording a location that isn't the capture's own", async () => {
+      const { h, directory } = await saved();
+      const [capture] = h.state.allCaptures();
+      assert.ok(capture !== undefined);
+      await cp(directory, join(h.dataDir, "copies", capture.capture_id), { recursive: true });
+      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"));
+      raw.prepare("UPDATE captures SET relative_dir = ? WHERE capture_id = ?").run(join("copies", capture.capture_id), capture.capture_id);
+      raw.close();
+      await h.service.auditStoredFrames(h.signal);
+      assert.ok(h.notices.some((notice) => notice.includes(`1 stored frame(s) ${DAMAGE}`)), h.notices.join("; "));
+      h.state.close();
+    });
 
     it("leaves what it found in place", async () => {
       const { h, directory } = await saved();

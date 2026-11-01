@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { isFileSystemError } from "./config.ts";
 import type { CameraLink } from "./probe/report.ts";
@@ -93,48 +93,62 @@ export function parseCaptureMetadata(text: string): AdoptableCapture | null {
   return valid ? (record as unknown as AdoptableCapture) : null;
 }
 
-function readFailure(error: unknown): string {
-  // A bug isn't a bad file. One unreadable file, on the other hand, must not stop capture or a render.
-  if (!isFileSystemError(error)) throw error;
-  return error.code ?? error.name;
+/** A name that can only be one directory. Dots and separators are how a stored value climbs out of the spool. */
+const SAFE_NAME = /^[\w-][\w.-]*$/;
+const LOCAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+export function spoolDay(owner: CaptureOwner, localDate: string): string {
+  const [year, month, day] = localDate.split("-") as [string, string, string];
+  return join("spool", owner.projectId, owner.cameraId, year, month, day);
+}
+
+/** Where a capture lives, worked out from who it is. A path a row recorded is only a claim about that. */
+export function spoolDirectory(owner: CaptureOwner, localDate: string, captureId: string): string {
+  return join(spoolDay(owner, localDate), captureId);
+}
+
+type StoredFile = { bytes: Buffer } | { problem: string };
+
+/** A stored file, if it's really at its place in the spool. A link leading elsewhere could be anything. */
+async function readStoredFile(dataDir: string, relativePath: string, label: string): Promise<StoredFile> {
+  try {
+    const location = await realpath(join(dataDir, relativePath));
+    if (location !== join(await realpath(dataDir), relativePath)) return { problem: `the ${label} file leads outside the spool` };
+    return { bytes: await readFile(location) };
+  } catch (error) {
+    // A bug isn't a bad file. One unreadable file, on the other hand, must not stop capture or a render.
+    if (!isFileSystemError(error)) throw error;
+    return { problem: error.code === "ENOENT" ? `the ${label} file is missing` : `the ${label} file can't be read (${error.code})` };
+  }
+}
+
+function frameMatches(frame: Buffer, facts: { jpeg_bytes: number; sha256: string }): boolean {
+  return frame.length === facts.jpeg_bytes && createHash("sha256").update(frame).digest("hex") === facts.sha256;
 }
 
 /** What's stored at a place in the spool, if its record, that place and its frame all agree, and it's this camera's. */
 export async function readStoredCapture(dataDir: string, relativeDir: string, captureId: string, localDate: string, owner: CaptureOwner): Promise<AdoptableCapture | null> {
-  const directory = join(dataDir, relativeDir);
-  try {
-    const metadata = parseCaptureMetadata(await readFile(join(directory, "metadata.json"), "utf8"));
-    if (metadata === null || metadata.capture_id !== captureId || metadata.local_date !== localDate) return null;
-    if (metadata.project_id !== owner.projectId || metadata.camera_id !== owner.cameraId) return null;
-    const frame = await readFile(join(directory, "frame.jpg"));
-    const matches = frame.length === metadata.jpeg_bytes && createHash("sha256").update(frame).digest("hex") === metadata.sha256;
-    return matches ? metadata : null;
-  } catch (error) {
-    readFailure(error);
-    return null;
-  }
+  const metadataFile = await readStoredFile(dataDir, join(relativeDir, "metadata.json"), "metadata");
+  if ("problem" in metadataFile) return null;
+  const metadata = parseCaptureMetadata(metadataFile.bytes.toString("utf8"));
+  if (metadata === null || metadata.capture_id !== captureId || metadata.local_date !== localDate) return null;
+  if (metadata.project_id !== owner.projectId || metadata.camera_id !== owner.cameraId) return null;
+  const frameFile = await readStoredFile(dataDir, join(relativeDir, "frame.jpg"), "frame");
+  return !("problem" in frameFile) && frameMatches(frameFile.bytes, metadata) ? metadata : null;
 }
 
 /** What's wrong with what's stored for a database row, in words, or null if it's all still what the row says. */
 export async function storedCaptureProblem(dataDir: string, row: CaptureRow, owner: CaptureOwner): Promise<string | null> {
-  const directory = join(dataDir, row.relative_dir);
-  let frame: Buffer;
-  try {
-    frame = await readFile(join(directory, "frame.jpg"));
-  } catch (error) {
-    const code = readFailure(error);
-    return code === "ENOENT" ? "the frame file is missing" : `the frame file can't be read (${code})`;
+  if (!SAFE_NAME.test(row.capture_id) || !LOCAL_DATE.test(row.local_date) || row.relative_dir !== spoolDirectory(owner, row.local_date, row.capture_id)) {
+    return "its recorded location isn't where this camera's frames belong";
   }
-  if (frame.length !== row.jpeg_bytes || createHash("sha256").update(frame).digest("hex") !== row.sha256) return "the frame file doesn't match its record";
+  const frameFile = await readStoredFile(dataDir, join(row.relative_dir, "frame.jpg"), "frame");
+  if ("problem" in frameFile) return frameFile.problem;
+  if (!frameMatches(frameFile.bytes, row)) return "the frame file doesn't match its record";
 
-  let text: string;
-  try {
-    text = await readFile(join(directory, "metadata.json"), "utf8");
-  } catch (error) {
-    const code = readFailure(error);
-    return code === "ENOENT" ? "the metadata file is missing" : `the metadata file can't be read (${code})`;
-  }
-  const stored = parseCaptureMetadata(text);
+  const metadataFile = await readStoredFile(dataDir, join(row.relative_dir, "metadata.json"), "metadata");
+  if ("problem" in metadataFile) return metadataFile.problem;
+  const stored = parseCaptureMetadata(metadataFile.bytes.toString("utf8"));
   const agrees =
     stored !== null &&
     stored.project_id === owner.projectId &&

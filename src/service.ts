@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { copyFile, mkdir, readdir, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { CaptureFailure } from "./adapters/adapter.ts";
 import type { BatteryReading, CameraAdapter, CameraInfo } from "./adapters/adapter.ts";
 import { AlertTracker } from "./alerts.ts";
@@ -14,7 +14,7 @@ import { dataBudgetSpent, decide, nextBatteryPaused, reservedSessionMs, sessionB
 import type { PolicyInput } from "./policy.ts";
 import type { CameraLink } from "./probe/report.ts";
 import { addDays, formatClock, isActiveForInterval, localParts, planDay } from "./schedule.ts";
-import { readStoredCapture, storedCaptureProblem } from "./stored-capture.ts";
+import { readStoredCapture, spoolDirectory, storedCaptureProblem } from "./stored-capture.ts";
 import type { AdoptableCapture, CaptureMetadata, CaptureOwner } from "./stored-capture.ts";
 import type { ScheduleConfig } from "./schedule.ts";
 import type { ServiceConfig } from "./service-config.ts";
@@ -210,11 +210,6 @@ export class CaptureService {
       this.state.addEvent("capture_damaged", `${row.relative_dir}: ${problem}`);
     }
     await this.alerts.set("spool_damaged", damaged.length > 0, `${damaged.length} stored frame(s) no longer match their records, starting with ${damaged[0] ?? ""}. They're left as they are for a person to look at, and renders leave them out`);
-  }
-
-  private spoolDay(localDate: string): string {
-    const [year, month, day] = localDate.split("-") as [string, string, string];
-    return join("spool", this.config.project.id, this.config.camera.id, year, month, day);
   }
 
   /** A service that runs for a year needs its diagnostics to expire. Frames and the database never do. */
@@ -565,8 +560,7 @@ export class CaptureService {
     if (record.frame === null) throw new Error("publish needs a frame");
     const receivedAt = record.timing.frame_saved_at ?? this.now().toISOString();
     const localDate = localParts(new Date(receivedAt), this.zone).date;
-    const relativeDay = this.spoolDay(localDate);
-    const relativeDir = join(relativeDay, captureId);
+    const relativeDir = spoolDirectory(this.owner, localDate, captureId);
     const tempDir = join(this.options.dataDir, "spool-tmp", captureId);
     await mkdir(tempDir, { recursive: true });
     await copyFile(join(this.options.dataDir, "work", record.attempt_id, "frame.jpg"), join(tempDir, "frame.jpg"));
@@ -619,7 +613,7 @@ export class CaptureService {
       traffic_measurement_basis: TRAFFIC_BASIS,
     };
     await writeFile(join(tempDir, "metadata.json"), `${JSON.stringify(metadata, null, 2)}\n`);
-    await mkdir(join(this.options.dataDir, relativeDay), { recursive: true });
+    await mkdir(dirname(join(this.options.dataDir, relativeDir)), { recursive: true });
     await rename(tempDir, join(this.options.dataDir, relativeDir));
     this.insertCaptureRow(metadata, relativeDir);
     return relativeDir;
