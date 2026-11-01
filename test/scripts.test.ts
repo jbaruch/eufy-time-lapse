@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmod, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -146,6 +147,10 @@ describe("scripts/deploy.sh", () => {
   after(async () => {
     await root.remove();
   });
+
+  const HEADER = "# eufy-time-lapse deployed files, schema_version=2";
+  const V1_HEADER = "# eufy-time-lapse deployed files, schema_version=1";
+  const entry = (path: string, content: string): string => `${createHash("sha256").update(content).digest("hex")}  ${path}`;
 
   async function executable(path: string, body: string): Promise<void> {
     await writeFile(path, `#!/usr/bin/env bash\nset -euo pipefail\n${body}\n`);
@@ -306,8 +311,101 @@ describe("scripts/deploy.sh", () => {
     const retried = await bash([script, "somehost", "app"], { cwd: repo, env });
     assert.equal(retried.code, 0, retried.stderr);
     assert.equal((await readdir(host)).includes("going-away.txt"), false);
-    assert.equal(await readFile(join(host, ".deployed-files"), "utf8"), "# eufy-time-lapse deployed files, schema_version=1\narriving.txt\ncompose.yaml\nsrc/cli.ts\n");
+    assert.equal(await readFile(join(host, ".deployed-files"), "utf8"), `${HEADER}\n${entry("arriving.txt", "new\n")}\n${entry("compose.yaml", "services: {}\n")}\n${entry("src/cli.ts", "// code\n")}\n`);
     assert.match(await readFile(log, "utf8"), /compose up -d/);
+  });
+
+  it("names a file cut short by a dying unpack, and goes through once it's removed", async () => {
+    const { repo, host, env } = await world();
+    const interrupted = await bash([script, "somehost", "app"], { cwd: repo, env: { ...env, AFTER_TAR: 'printf "half" > src/cli.ts; exit 1' } });
+    assert.notEqual(interrupted.code, 0);
+    const refused = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /src\/cli\.ts/);
+    await rm(join(host, "src", "cli.ts"));
+    const retried = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(retried.code, 0, retried.stderr);
+    assert.equal(await readFile(join(host, "src", "cli.ts"), "utf8"), "// code\n");
+  });
+
+  it("refuses a shipped file edited on the host, and keeps the edit", async () => {
+    const { repo, host, log, env } = await world();
+    assert.equal((await bash([script, "somehost", "app"], { cwd: repo, env })).code, 0);
+    await writeFile(join(host, "src", "cli.ts"), "// fixed by hand at 3am\n");
+    await writeFile(join(repo, "compose.yaml"), "services: { new: {} }\n");
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-q", "-m", "change");
+    const calls = await readFile(log, "utf8");
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /changed since/);
+    assert.match(result.stderr, /src\/cli\.ts/);
+    assert.equal(await readFile(join(host, "src", "cli.ts"), "utf8"), "// fixed by hand at 3am\n");
+    assert.equal(await readFile(join(host, "compose.yaml"), "utf8"), "services: {}\n");
+    assert.equal(await readFile(log, "utf8"), calls);
+  });
+
+  it("refuses to delete a file edited on the host that this commit dropped", async () => {
+    const { repo, host, env } = await world();
+    await writeFile(join(repo, "going-away.txt"), "old\n");
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-q", "-m", "add");
+    assert.equal((await bash([script, "somehost", "app"], { cwd: repo, env })).code, 0);
+    await writeFile(join(host, "going-away.txt"), "edited\n");
+    await rm(join(repo, "going-away.txt"));
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-q", "-m", "remove");
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /going-away\.txt/);
+    assert.equal(await readFile(join(host, "going-away.txt"), "utf8"), "edited\n");
+  });
+
+  it("upgrades a version 1 manifest, recording what's there", async () => {
+    const { repo, host, env } = await world();
+    await mkdir(join(host, "src"));
+    await writeFile(join(host, "compose.yaml"), "older\n");
+    await writeFile(join(host, "src", "cli.ts"), "// older\n");
+    await writeFile(join(host, "dropped.txt"), "older\n");
+    await writeFile(join(host, ".deployed-files"), `${V1_HEADER}\ncompose.yaml\ndropped.txt\nsrc/cli.ts\n`);
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await readFile(join(host, "compose.yaml"), "utf8"), "services: {}\n");
+    assert.equal((await readdir(host)).includes("dropped.txt"), false);
+    assert.equal(await readFile(join(host, ".deployed-files"), "utf8"), `${HEADER}\n${entry("compose.yaml", "services: {}\n")}\n${entry("src/cli.ts", "// code\n")}\n`);
+  });
+
+  it("refuses a file a version 1 manifest doesn't list, and changes nothing", async () => {
+    const { repo, host, log, env } = await world();
+    await writeFile(join(host, "unlisted.txt"), "?");
+    await writeFile(join(host, ".deployed-files"), `${V1_HEADER}\ncompose.yaml\n`);
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /unlisted\.txt/);
+    assert.equal(await readFile(join(host, ".deployed-files"), "utf8"), `${V1_HEADER}\ncompose.yaml\n`);
+    assert.equal(await readFile(log, "utf8"), "");
+  });
+
+  it("refuses a manifest line with no hash, and changes nothing", async () => {
+    const { repo, host, log, env } = await world();
+    await writeFile(join(host, ".deployed-files"), `${HEADER}\ncompose.yaml\n`);
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /doesn't understand/);
+    assert.deepEqual(await readdir(host), [".deployed-files"]);
+    assert.equal(await readFile(log, "utf8"), "");
+  });
+
+  it("refuses an unsafe path in a current manifest too, and leaves what it names", async () => {
+    const { repo, host, log, env } = await world();
+    const outside = join(host, "..", "outside.txt");
+    await writeFile(outside, "keep me");
+    await writeFile(join(host, ".deployed-files"), `${HEADER}\n${entry("../outside.txt", "keep me")}\n`);
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /unsafe path/);
+    assert.equal(await readFile(outside, "utf8"), "keep me");
+    assert.equal(await readFile(log, "utf8"), "");
   });
 
   it("removes a directory the removed files leave empty, and keeps one still in use", async () => {
@@ -358,12 +456,12 @@ describe("scripts/deploy.sh", () => {
   it("records what it shipped under a versioned header", async () => {
     const { repo, host, env } = await world();
     assert.equal((await bash([script, "somehost", "app"], { cwd: repo, env })).code, 0);
-    assert.equal(await readFile(join(host, ".deployed-files"), "utf8"), "# eufy-time-lapse deployed files, schema_version=1\ncompose.yaml\nsrc/cli.ts\n");
+    assert.equal(await readFile(join(host, ".deployed-files"), "utf8"), `${HEADER}\n${entry("compose.yaml", "services: {}\n")}\n${entry("src/cli.ts", "// code\n")}\n`);
   });
 
   it("refuses a manifest it doesn't understand, and touches nothing", async () => {
     const { repo, host, log, env } = await world();
-    await writeFile(join(host, ".deployed-files"), "# eufy-time-lapse deployed files, schema_version=2\ncompose.yaml\n");
+    await writeFile(join(host, ".deployed-files"), "# eufy-time-lapse deployed files, schema_version=3\ncompose.yaml\n");
     const result = await bash([script, "somehost", "app"], { cwd: repo, env });
     assert.equal(result.code, 1);
     assert.match(result.stderr, /doesn't understand/);
