@@ -766,7 +766,8 @@ describe("CaptureService", () => {
       });
     }
 
-    it("finds a later try's stream", async () => {
+    /** The first try fails cleanly, and the process dies tearing down the second. */
+    async function diedOnSecondTry(options: Parameters<typeof harness>[0] = {}): Promise<Awaited<ReturnType<typeof harness>>> {
       let opens = 0;
       const h = await harness({
         open: async () => {
@@ -777,12 +778,97 @@ describe("CaptureService", () => {
           if (opens === 1) return { status: "ok", detail: null };
           throw died;
         },
+        ...options,
       });
       await assert.rejects(h.service.tick(h.signal), RangeError);
       h.state.close();
+      return h;
+    }
+
+    it("finds a later try's stream, and counts the try before it", async () => {
+      const h = await diedOnSecondTry();
       const { service, state } = h.restart();
       await service.reconcile();
       assert.equal(state.getSlot(SLOT_0800)?.state, "captured");
+      const [capture] = state.allCaptures();
+      assert.ok(capture !== undefined);
+      const metadata = JSON.parse(await readFile(join(h.dataDir, capture.relative_dir, "metadata.json"), "utf8")) as CaptureMetadata;
+      assert.equal(metadata.attempt_count, 2);
+      state.close();
+    });
+
+    it("replaces the reservation with the tries, so the wake is counted and nothing stays running", async () => {
+      const h = await diedOnSecondTry();
+      const { service, state } = h.restart();
+      await service.reconcile();
+      const attempts = state.attemptsSince("2000-01-01T00:00:00Z");
+      assert.deepEqual(attempts.map((attempt) => attempt.attempt_id).sort(), [WORK_KEY, `${WORK_KEY}-retry-1`]);
+      assert.equal(attempts.some((attempt) => attempt.status === "running"), false);
+      const first = attempts.find((attempt) => attempt.attempt_id === WORK_KEY);
+      assert.deepEqual([first?.status, first?.reason, first?.cleanup_status], ["failed", "unknown_after_crash", "unknown_after_crash"]);
+      const second = attempts.find((attempt) => attempt.attempt_id === `${WORK_KEY}-retry-1`);
+      assert.deepEqual([second?.status, second?.cleanup_status], ["captured", "unknown_after_crash"]);
+      const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup } = DEFAULT_SERVICE_CONFIG.capture;
+      assert.ok(state.sessionUsedMs("2026-07-01") >= (acquire + cleanup) * 1000, "the try whose details died is charged in full");
+      assert.equal(state.recentFirstTries(5).length, 1, "and the first try counts as one");
+      state.close();
+    });
+
+    it("finds a try from before the setting was lowered", async () => {
+      const h = await diedOnSecondTry();
+      const lowered = serviceConfig({ capture: { ...DEFAULT_SERVICE_CONFIG.capture, max_attempts: 1 } });
+      const state = new State(join(h.dataDir, "state.sqlite"), () => new Date(h.clock.ms));
+      const service = new CaptureService({ config: lowered, state, createAdapter: () => h.adapter, dataDir: h.dataDir, minWidth: 1280, minHeight: 720, link: "cellular", operator: null, log: () => {}, notify: async () => {}, now: () => new Date(h.clock.ms), sleep: async () => {}, diskFreeMb: async () => 50_000 });
+      await service.reconcile();
+      assert.equal(state.getSlot(SLOT_0800)?.state, "captured");
+      state.close();
+    });
+
+    it("ignores another slot's directories, however alike they look", async () => {
+      const h = await diedDuringTeardown();
+      await mkdir(join(h.dataDir, "work", `${WORK_KEY}9`));
+      await mkdir(join(h.dataDir, "work", `${WORK_KEY}-retry-x`));
+      const { service, state } = h.restart();
+      await service.reconcile();
+      assert.equal(state.attemptsSince("2000-01-01T00:00:00Z").length, 1);
+      state.close();
+    });
+
+    const altered = (change: Record<string, unknown>) => async (workDir: string): Promise<void> => {
+      const path = join(workDir, "pending.json");
+      await writeFile(path, JSON.stringify({ ...(JSON.parse(await readFile(path, "utf8")) as object), ...change }));
+    };
+    const unusable: Array<[string, (workDir: string) => Promise<void>, RegExp]> = [
+      ["a fractional byte count", altered({ video_bytes: 1.5 }), /isn't one this build writes/],
+      ["a fractional retry count", altered({ connect_retries: 0.5 }), /isn't one this build writes/],
+      ["a time that isn't the writer's format", altered({ stream_stopped_at: "July 1 2026 13:00" }), /isn't one this build writes/],
+      ["times out of order", altered({ stream_started_at: "2026-07-01T14:00:00.000Z" }), /isn't one this build writes/],
+      ["a stream that won't decode", async (workDir) => writeFile(join(workDir, "stream.bin"), "not video"), /won't decode/],
+      ["a record it can't read", async (workDir) => { await rm(join(workDir, "pending.json")); await mkdir(join(workDir, "pending.json")); }, /can't be read \(EISDIR\)/],
+    ];
+    for (const [name, damage, reason] of unusable) {
+      it(`says a frame was lost, and why, with ${name}`, async () => {
+        const h = await diedDuringTeardown();
+        await damage(join(h.dataDir, "work", WORK_KEY));
+        const { service, state } = h.restart();
+        await service.reconcile();
+        assert.deepEqual([state.getSlot(SLOT_0800)?.state, state.getSlot(SLOT_0800)?.reason], ["missed", "unknown_after_crash"]);
+        assert.ok(h.notices.some((notice) => notice.includes("couldn't be recovered")), h.notices.join("; "));
+        const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"));
+        const event = raw.prepare("SELECT detail FROM events WHERE kind = 'capture_unrecoverable'").get() as { detail: string } | undefined;
+        raw.close();
+        assert.match(event?.detail ?? "", reason);
+        await access(join(h.dataDir, "work", WORK_KEY), undefined);
+        state.close();
+      });
+    }
+
+    it("raises no alarm when a try died before there was anything to lose", async () => {
+      const h = await diedDuringTeardown();
+      await rm(join(h.dataDir, "work", WORK_KEY, "pending.json"));
+      const { service, state } = h.restart();
+      await service.reconcile();
+      assert.equal(h.notices.some((notice) => notice.includes("couldn't be recovered")), false, h.notices.join("; "));
       state.close();
     });
 
@@ -1590,7 +1676,8 @@ describe("CaptureService", () => {
       });
     }
 
-    it("finds a later try's stream", async () => {
+    /** The first try fails cleanly, and the process dies tearing down the second. */
+    async function diedOnSecondTry(options: Parameters<typeof harness>[0] = {}): Promise<Awaited<ReturnType<typeof harness>>> {
       let opens = 0;
       const h = await harness({
         open: async () => {
@@ -1601,12 +1688,97 @@ describe("CaptureService", () => {
           if (opens === 1) return { status: "ok", detail: null };
           throw died;
         },
+        ...options,
       });
       await assert.rejects(h.service.tick(h.signal), RangeError);
       h.state.close();
+      return h;
+    }
+
+    it("finds a later try's stream, and counts the try before it", async () => {
+      const h = await diedOnSecondTry();
       const { service, state } = h.restart();
       await service.reconcile();
       assert.equal(state.getSlot(SLOT_0800)?.state, "captured");
+      const [capture] = state.allCaptures();
+      assert.ok(capture !== undefined);
+      const metadata = JSON.parse(await readFile(join(h.dataDir, capture.relative_dir, "metadata.json"), "utf8")) as CaptureMetadata;
+      assert.equal(metadata.attempt_count, 2);
+      state.close();
+    });
+
+    it("replaces the reservation with the tries, so the wake is counted and nothing stays running", async () => {
+      const h = await diedOnSecondTry();
+      const { service, state } = h.restart();
+      await service.reconcile();
+      const attempts = state.attemptsSince("2000-01-01T00:00:00Z");
+      assert.deepEqual(attempts.map((attempt) => attempt.attempt_id).sort(), [WORK_KEY, `${WORK_KEY}-retry-1`]);
+      assert.equal(attempts.some((attempt) => attempt.status === "running"), false);
+      const first = attempts.find((attempt) => attempt.attempt_id === WORK_KEY);
+      assert.deepEqual([first?.status, first?.reason, first?.cleanup_status], ["failed", "unknown_after_crash", "unknown_after_crash"]);
+      const second = attempts.find((attempt) => attempt.attempt_id === `${WORK_KEY}-retry-1`);
+      assert.deepEqual([second?.status, second?.cleanup_status], ["captured", "unknown_after_crash"]);
+      const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup } = DEFAULT_SERVICE_CONFIG.capture;
+      assert.ok(state.sessionUsedMs("2026-07-01") >= (acquire + cleanup) * 1000, "the try whose details died is charged in full");
+      assert.equal(state.recentFirstTries(5).length, 1, "and the first try counts as one");
+      state.close();
+    });
+
+    it("finds a try from before the setting was lowered", async () => {
+      const h = await diedOnSecondTry();
+      const lowered = serviceConfig({ capture: { ...DEFAULT_SERVICE_CONFIG.capture, max_attempts: 1 } });
+      const state = new State(join(h.dataDir, "state.sqlite"), () => new Date(h.clock.ms));
+      const service = new CaptureService({ config: lowered, state, createAdapter: () => h.adapter, dataDir: h.dataDir, minWidth: 1280, minHeight: 720, link: "cellular", operator: null, log: () => {}, notify: async () => {}, now: () => new Date(h.clock.ms), sleep: async () => {}, diskFreeMb: async () => 50_000 });
+      await service.reconcile();
+      assert.equal(state.getSlot(SLOT_0800)?.state, "captured");
+      state.close();
+    });
+
+    it("ignores another slot's directories, however alike they look", async () => {
+      const h = await diedDuringTeardown();
+      await mkdir(join(h.dataDir, "work", `${WORK_KEY}9`));
+      await mkdir(join(h.dataDir, "work", `${WORK_KEY}-retry-x`));
+      const { service, state } = h.restart();
+      await service.reconcile();
+      assert.equal(state.attemptsSince("2000-01-01T00:00:00Z").length, 1);
+      state.close();
+    });
+
+    const altered = (change: Record<string, unknown>) => async (workDir: string): Promise<void> => {
+      const path = join(workDir, "pending.json");
+      await writeFile(path, JSON.stringify({ ...(JSON.parse(await readFile(path, "utf8")) as object), ...change }));
+    };
+    const unusable: Array<[string, (workDir: string) => Promise<void>, RegExp]> = [
+      ["a fractional byte count", altered({ video_bytes: 1.5 }), /isn't one this build writes/],
+      ["a fractional retry count", altered({ connect_retries: 0.5 }), /isn't one this build writes/],
+      ["a time that isn't the writer's format", altered({ stream_stopped_at: "July 1 2026 13:00" }), /isn't one this build writes/],
+      ["times out of order", altered({ stream_started_at: "2026-07-01T14:00:00.000Z" }), /isn't one this build writes/],
+      ["a stream that won't decode", async (workDir) => writeFile(join(workDir, "stream.bin"), "not video"), /won't decode/],
+      ["a record it can't read", async (workDir) => { await rm(join(workDir, "pending.json")); await mkdir(join(workDir, "pending.json")); }, /can't be read \(EISDIR\)/],
+    ];
+    for (const [name, damage, reason] of unusable) {
+      it(`says a frame was lost, and why, with ${name}`, async () => {
+        const h = await diedDuringTeardown();
+        await damage(join(h.dataDir, "work", WORK_KEY));
+        const { service, state } = h.restart();
+        await service.reconcile();
+        assert.deepEqual([state.getSlot(SLOT_0800)?.state, state.getSlot(SLOT_0800)?.reason], ["missed", "unknown_after_crash"]);
+        assert.ok(h.notices.some((notice) => notice.includes("couldn't be recovered")), h.notices.join("; "));
+        const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"));
+        const event = raw.prepare("SELECT detail FROM events WHERE kind = 'capture_unrecoverable'").get() as { detail: string } | undefined;
+        raw.close();
+        assert.match(event?.detail ?? "", reason);
+        await access(join(h.dataDir, "work", WORK_KEY), undefined);
+        state.close();
+      });
+    }
+
+    it("raises no alarm when a try died before there was anything to lose", async () => {
+      const h = await diedDuringTeardown();
+      await rm(join(h.dataDir, "work", WORK_KEY, "pending.json"));
+      const { service, state } = h.restart();
+      await service.reconcile();
+      assert.equal(h.notices.some((notice) => notice.includes("couldn't be recovered")), false, h.notices.join("; "));
       state.close();
     });
 

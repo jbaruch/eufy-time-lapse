@@ -39,15 +39,17 @@ function isPendingCapture(value: unknown): value is PendingCapture {
   if (typeof value !== "object" || value === null) return false;
   const record = value as Record<string, unknown>;
   const isText = (field: string): boolean => typeof record[field] === "string" && record[field].length > 0;
-  const isTime = (field: string): boolean => typeof record[field] === "string" && !Number.isNaN(Date.parse(record[field]));
-  const isAmount = (field: string): boolean => typeof record[field] === "number" && Number.isFinite(record[field]) && record[field] >= 0;
+  // The exact form the writer uses, which is also what makes these compare correctly below.
+  const isStamp = (field: string): boolean => typeof record[field] === "string" && !Number.isNaN(Date.parse(record[field])) && new Date(record[field]).toISOString() === record[field];
+  const isCount = (field: string): boolean => Number.isInteger(record[field]) && (record[field] as number) >= 0;
+  const stamps = ["request_started_at", "stream_started_at", "first_media_at", "stream_stopped_at"];
   return (
     record.schema_version === 1 &&
     ["attempt_id", "adapter", "adapter_version"].every(isText) &&
-    ["request_started_at", "stream_started_at", "first_media_at", "stream_stopped_at"].every(isTime) &&
-    ["connect_ms", "connect_retries", "audio_bytes"].every(isAmount) &&
-    typeof record.video_bytes === "number" &&
-    record.video_bytes > 0 &&
+    stamps.every(isStamp) &&
+    stamps.every((field, index) => index === 0 || (record[stamps[index - 1] as string] as string) <= (record[field] as string)) &&
+    ["connect_ms", "connect_retries", "audio_bytes", "video_bytes"].every(isCount) &&
+    (record.video_bytes as number) > 0 &&
     (record.stream_stop === "target_reached" || record.stream_stop === "deadline" || record.stream_stop === "stream_ended") &&
     (record.connection_path === "direct" || record.connection_path === "relay" || record.connection_path === null) &&
     (record.cold_connection === true || record.cold_connection === false || record.cold_connection === null) &&
@@ -55,21 +57,23 @@ function isPendingCapture(value: unknown): value is PendingCapture {
   );
 }
 
-/** The record an attempt left behind, or null if it left none this build can vouch for. */
-export async function readPendingCapture(directory: string): Promise<PendingCapture | null> {
+/** The record an attempt left behind, whether it left none, or left one this build can't use. Those last two differ: one lost nothing. */
+export type PendingRead = { kind: "none" } | { kind: "found"; pending: PendingCapture } | { kind: "unusable"; reason: string };
+
+export async function readPendingCapture(directory: string): Promise<PendingRead> {
   let content: string;
   try {
     content = await readFile(join(directory, PENDING_FILE), "utf8");
   } catch (error) {
     if (!isFileSystemError(error)) throw error;
-    return null;
+    return error.code === "ENOENT" ? { kind: "none" } : { kind: "unusable", reason: `its record can't be read (${error.code})` };
   }
   let value: unknown;
   try {
     value = JSON.parse(content);
   } catch (error) {
-    if (error instanceof SyntaxError) return null;
-    throw error;
+    if (!(error instanceof SyntaxError)) throw error;
+    return { kind: "unusable", reason: "its record isn't JSON" };
   }
-  return isPendingCapture(value) ? value : null;
+  return isPendingCapture(value) ? { kind: "found", pending: value } : { kind: "unusable", reason: "its record isn't one this build writes" };
 }

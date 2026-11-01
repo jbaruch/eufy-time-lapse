@@ -194,7 +194,12 @@ export class State {
     return this.db.prepare(sql).get(...params) as T | undefined;
   }
 
+  /** All of `work` or none of it. One already open just gets joined, so these can be built out of each other. */
   inTransaction(work: () => void): void {
+    if (this.db.isTransaction) {
+      work();
+      return;
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       work();

@@ -309,13 +309,18 @@ export interface RecoveredAttempt {
   adapter: { name: string; version: string };
 }
 
+export type RecoveryOutcome = { kind: "none" } | { kind: "recovered"; attempt: RecoveredAttempt } | { kind: "unrecoverable"; reason: string };
+
 /**
- * Finishes an attempt whose process died after the stream stopped: decodes what was already received. Answers null if there's
- * no record this build can vouch for, or the stream won't decode, which leaves the slot to count as missed like any other crash.
+ * Finishes an attempt whose process died after the stream stopped: decodes what was already received. An attempt that left no
+ * record lost nothing to recover. One that left a record it can't finish did lose a frame, so that comes back with why.
  */
-export async function recoverAttempt(options: Pick<AcquireOptions, "outputDir" | "minWidth" | "minHeight">): Promise<RecoveredAttempt | null> {
-  const pending = await readPendingCapture(options.outputDir);
-  if (pending === null || pending.attempt_id !== basename(options.outputDir)) return null;
+export async function recoverAttempt(options: Pick<AcquireOptions, "outputDir" | "minWidth" | "minHeight">): Promise<RecoveryOutcome> {
+  const read = await readPendingCapture(options.outputDir);
+  if (read.kind === "none") return read;
+  if (read.kind === "unusable") return { kind: "unrecoverable", reason: read.reason };
+  const { pending } = read;
+  if (pending.attempt_id !== basename(options.outputDir)) return { kind: "unrecoverable", reason: "its record is another attempt's" };
   const record: AttemptRecord = {
     attempt_id: pending.attempt_id,
     capture_session_id: randomUUID(),
@@ -346,9 +351,9 @@ export async function recoverAttempt(options: Pick<AcquireOptions, "outputDir" |
     await saveFrame(record, pending.codec, join(options.outputDir, "stream.bin"), options, () => new Date(pending.stream_stopped_at));
   } catch (error) {
     if (!(error instanceof CaptureFailure)) throw error;
-    return null;
+    return { kind: "unrecoverable", reason: `its stream won't decode: ${error.message}` };
   }
-  return { record, adapter: { name: pending.adapter, version: pending.adapter_version } };
+  return { kind: "recovered", attempt: { record, adapter: { name: pending.adapter, version: pending.adapter_version } } };
 }
 
 /**
