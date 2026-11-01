@@ -126,7 +126,7 @@ async function main(): Promise<void> {
   const controller = new AbortController();
   for (const name of ["SIGINT", "SIGTERM"] as const) process.on(name, () => controller.abort("terminated"));
 
-  await withCameraLock(join(dataDir, "camera.lock"), async (lockLost) => {
+  await withCameraLock(join(dataDir, "camera-lock.sqlite"), async (lockLost) => {
     const authenticated = await adapter.authenticate();
     if (authenticated.status !== "authenticated") throw new Error(`Eufy wants a manual login step: ${authenticated.status}. Run the login command.`);
     const camera = await adapter.discoverCamera(config.cameraSerial);

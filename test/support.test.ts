@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { access, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { once } from "node:events";
+import { access, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -103,122 +105,126 @@ describe("withCameraLock", () => {
   });
 
   const NOW = Date.parse("2026-07-01T13:00:00Z");
-  const at = { now: () => NOW };
+  const at = (ms: number) => ({ now: () => ms });
 
-  async function heldSince(path: string, ms: number): Promise<void> {
-    await writeFile(path, "some-other-holder");
-    await utimes(path, new Date(ms), new Date(ms));
+  /** Leaves a claim behind with the given heartbeat time, as a crashed holder does, by holding the lock through `inner`. */
+  async function heldSince<T>(path: string, ms: number, inner: () => Promise<T>): Promise<T> {
+    return await withCameraLock(path, inner, at(ms));
   }
 
   it("replaces a lock whose holder stopped its heartbeat, as a crashed container does", async () => {
     const path = lockPath();
-    await heldSince(path, NOW - 60_000);
-    assert.equal(await withCameraLock(path, async () => "recovered", at), "recovered");
+    const result = await heldSince(path, NOW - 60_000, () => withCameraLock(path, async () => "recovered", at(NOW)));
+    assert.equal(result, "recovered");
   });
 
   it("respects a lock with a live heartbeat, whatever process wrote it", async () => {
     const path = lockPath();
-    await heldSince(path, NOW - 10_000);
-    await assert.rejects(withCameraLock(path, async () => "second", at), CameraLockHeldError);
+    await heldSince(path, NOW - 10_000, async () => {
+      await assert.rejects(withCameraLock(path, async () => "second", at(NOW)), CameraLockHeldError);
+    });
   });
 
-  describe("when contenders overlap", () => {
-    const turn = async (): Promise<void> => {
-      await new Promise((resolve) => setImmediate(resolve));
-    };
+  it("is free again once released", async () => {
+    const path = lockPath();
+    await withCameraLock(path, async () => "first", at(NOW));
+    assert.equal(await withCameraLock(path, async () => "second", at(NOW)), "second");
+  });
 
-    it("re-judges the lock once its turn comes, so one replaced in the meantime survives", async () => {
-      const path = lockPath();
-      await heldSince(path, NOW - 60_000);
-      await writeFile(`${path}.guard`, "");
-      await utimes(`${path}.guard`, new Date(NOW), new Date(NOW));
-      // It sees a stale lock now, but can't act until the guard clears. By then a new holder has taken over.
-      const contender = withCameraLock(path, async () => "should not run", at);
-      await turn();
-      await writeFile(path, "the-new-holder");
-      await utimes(path, new Date(NOW), new Date(NOW));
-      await rm(`${path}.guard`);
-      await assert.rejects(contender, CameraLockHeldError);
-      assert.equal(await readFile(path, "utf8"), "the-new-holder");
-    });
-
-    it("doesn't release during another contender's turn, and finishes after it", async () => {
-      const path = lockPath();
-      let release: (() => void) | undefined;
-      const holding = withCameraLock(
+  it("doesn't let a stale holder's release remove its successor's claim", async () => {
+    const path = lockPath();
+    await heldSince(path, NOW - 60_000, async () => {
+      // The successor takes over, and is still holding when the stale holder finishes.
+      let finish = (): void => {};
+      const successor = withCameraLock(
         path,
         () =>
           new Promise<string>((resolve) => {
-            release = () => resolve("done");
+            finish = () => resolve("done");
           }),
-        at,
+        at(NOW),
       );
-      // The work starts only after taking the lock has finished, guard released.
-      while (release === undefined) await turn();
-      await writeFile(`${path}.guard`, "");
-      await utimes(`${path}.guard`, new Date(NOW), new Date(NOW));
-      release();
-      await turn();
-      await turn();
-      assert.ok((await readFile(path, "utf8")).length > 0, "still there while the guard is held");
-      await rm(`${path}.guard`);
-      assert.equal(await holding, "done");
-      await assert.rejects(stat(path), { code: "ENOENT" });
+      await new Promise((resolve) => setImmediate(resolve));
+      return { finish, successor };
+    }).then(async ({ finish, successor }) => {
+      await assert.rejects(withCameraLock(path, async () => "third", at(NOW)), CameraLockHeldError);
+      finish();
+      await successor;
     });
-
-    it("gives up on a guard that stays held, and calls the camera busy", async () => {
-      const path = lockPath();
-      await writeFile(`${path}.guard`, "");
-      await utimes(`${path}.guard`, new Date(NOW), new Date(NOW));
-      await assert.rejects(withCameraLock(path, async () => "should not run", at), CameraLockHeldError);
-      await rm(`${path}.guard`);
-    });
-
-    it("clears the guard of a contender that crashed holding it", async () => {
-      const path = lockPath();
-      await heldSince(path, NOW - 60_000);
-      await writeFile(`${path}.guard`, "");
-      await utimes(`${path}.guard`, new Date(NOW - 60_000), new Date(NOW - 60_000));
-      assert.equal(await withCameraLock(path, async () => "recovered", at), "recovered");
-      await assert.rejects(stat(`${path}.guard`), { code: "ENOENT" });
-    });
+    assert.equal(await withCameraLock(path, async () => "free", at(NOW)), "free");
   });
 
-  it("doesn't remove a lock that another holder has taken over", async () => {
+  it("holds against a real second process, and frees up when that process finishes", async () => {
     const path = lockPath();
-    await withCameraLock(path, async () => {
-      await writeFile(path, "my-successor");
-    });
-    assert.equal(await readFile(path, "utf8"), "my-successor");
+    const module = new URL("../src/lock.ts", import.meta.url).href;
+    const holder = spawn(process.execPath, ["--input-type=module", "-e", `
+      import { withCameraLock } from ${JSON.stringify(module)};
+      await withCameraLock(${JSON.stringify(path)}, () => new Promise((resolve) => {
+        process.stdin.once("data", resolve);
+        process.stdout.write("holding\\n");
+      }));
+      process.exit(0);
+    `], { stdio: ["pipe", "pipe", "inherit"] });
+    await once(holder.stdout, "data");
+    await assert.rejects(withCameraLock(path, async () => "mine"), CameraLockHeldError);
+    const exited = once(holder, "exit");
+    holder.stdin.write("done\n");
+    assert.deepEqual((await exited)[0], 0);
+    assert.equal(await withCameraLock(path, async () => "mine"), "mine");
   });
 
-  it("keeps a live holder's lock fresh", async (t) => {
+  it("refuses a lock file from a version it doesn't know, rather than guessing", async () => {
+    const path = lockPath();
+    await withCameraLock(path, async () => "first", at(NOW));
+    const db = new DatabaseSync(path);
+    db.exec("PRAGMA user_version = 99");
+    db.close();
+    await assert.rejects(withCameraLock(path, async () => "second", at(NOW)), /version 99/);
+  });
+
+  it("keeps a live holder's claim fresh", async (t) => {
     t.mock.timers.enable({ apis: ["setInterval"] });
     const path = lockPath();
-    await withCameraLock(path, async () => {
-      const before = (await stat(path)).mtimeMs;
-      t.mock.timers.tick(5_000);
-      while ((await stat(path)).mtimeMs === before) await new Promise((resolve) => setImmediate(resolve));
-      assert.equal((await stat(path)).mtimeMs, NOW);
-    }, at);
+    let clock = NOW;
+    await withCameraLock(
+      path,
+      async () => {
+        clock = NOW + 60_000;
+        t.mock.timers.tick(5_000);
+        await assert.rejects(withCameraLock(path, async () => "second", at(clock)), CameraLockHeldError, "its heartbeat kept it alive");
+      },
+      { now: () => clock },
+    );
   });
 
   for (const [name, breakIt] of [
     ["disappears", async (path: string): Promise<void> => rm(path)],
-    ["is taken by another holder", async (path: string): Promise<void> => writeFile(path, "my-successor")],
+    [
+      "is taken by another holder",
+      async (path: string): Promise<void> => {
+        await withCameraLock(path, async () => "successor", at(NOW + 60_000)).then(() => {
+          const db = new DatabaseSync(path);
+          db.prepare("INSERT OR REPLACE INTO holder (id, token, heartbeat_at) VALUES (1, 'my-successor', ?)").run(NOW + 60_000);
+          db.close();
+        });
+      },
+    ],
   ] as const) {
     it(`stops the camera work, and says so, when the lock ${name}`, async (t) => {
       t.mock.timers.enable({ apis: ["setInterval"] });
       const path = lockPath();
       let sawAbort = false;
       await assert.rejects(
-        withCameraLock(path, async (lost) => {
-          await breakIt(path);
-          t.mock.timers.tick(5_000);
-          while (!lost.aborted) await new Promise((resolve) => setImmediate(resolve));
-          sawAbort = true;
-          return "finished anyway";
-        }),
+        withCameraLock(
+          path,
+          async (lost) => {
+            await breakIt(path);
+            t.mock.timers.tick(5_000);
+            sawAbort = lost.aborted;
+            return "finished anyway";
+          },
+          at(NOW),
+        ),
         (error: Error) => error instanceof CameraLockLostError && /data directory is writable/.test(error.message),
       );
       assert.equal(sawAbort, true);
@@ -229,10 +235,9 @@ describe("withCameraLock", () => {
     t.mock.timers.enable({ apis: ["setInterval"] });
     const path = lockPath();
     await assert.rejects(
-      withCameraLock(path, async (lost) => {
+      withCameraLock(path, async () => {
         await rm(path);
         t.mock.timers.tick(5_000);
-        while (!lost.aborted) await new Promise((resolve) => setImmediate(resolve));
         throw new RangeError("aborted work");
       }),
       CameraLockLostError,

@@ -135,7 +135,7 @@ async function commandLogin(paths: Paths): Promise<number> {
   const adapter = buildAdapter(config, paths.sessionDir, fileWriter(join(paths.dataDir, "login.log")), false);
   const readline = createInterface({ input: process.stdin, output: process.stderr });
   try {
-    const result = await withCameraLock(join(paths.dataDir, "camera.lock"), () =>
+    const result = await withCameraLock(join(paths.dataDir, "camera-lock.sqlite"), () =>
       runLogin({
         adapter,
         dataDir: paths.dataDir,
@@ -175,7 +175,7 @@ async function commandProbe(paths: Paths, args: string[]): Promise<number> {
   const signal = terminationSignal();
 
   try {
-    const report = await withCameraLock(join(paths.dataDir, "camera.lock"), (lockLost) =>
+    const report = await withCameraLock(join(paths.dataDir, "camera-lock.sqlite"), (lockLost) =>
       runProbe({
         adapter,
         runId,
