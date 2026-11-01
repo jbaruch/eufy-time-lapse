@@ -1,7 +1,7 @@
 # Eufy S330 Construction Time-Lapse Service — Technical Specification
 
-**Version:** 1.1  
-**Date:** October 31, 2026  
+**Version:** 1.1\
+**Date:** October 31, 2026\
 **Status:** Native LTE feasibility shown on the actual camera, at 98% of first tries in a back-to-back run (section 3.1). Battery behavior on solar is not yet measured. The capture service runs on the target host. The offsite archiver and monthly preview are not built.
 
 **Changes in 1.1**, from running the real camera and from the owner's decisions:
