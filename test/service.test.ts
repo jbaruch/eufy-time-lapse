@@ -1338,6 +1338,36 @@ describe("CaptureService", () => {
     });
   });
 
+  describe("a manual capture", () => {
+    it("doesn't wake the camera with the disk at its floor, and says what to do", async () => {
+      const h = await harness();
+      h.disk.mb = DEFAULT_SERVICE_CONFIG.storage.min_free_disk_mb;
+      const result = await h.service.captureManual(h.signal);
+      assert.ok(result instanceof CaptureFailure);
+      assert.equal(result.reason, "storage_full");
+      assert.match(result.message, /Free some space/);
+      assert.equal(h.adapter.opens, 0);
+      assert.equal(h.state.attemptsSince("2000-01-01T00:00:00Z").length, 0, "nothing reserved");
+      h.state.close();
+    });
+
+    it("keeps the frame and says so when closing the connection reports a fault", async () => {
+      const h = await harness({ teardown: async () => ({ status: "error", detail: "stop refused" }) });
+      const result = await h.service.captureManual(h.signal);
+      assert.equal(result instanceof CaptureFailure, false);
+      assert.equal(h.state.allCaptures().length, 1);
+      assert.ok(h.notices.some((notice) => notice.includes("may not have closed") && notice.includes("stop refused")), h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("says nothing about the connection when it closed", async () => {
+      const h = await harness();
+      await h.service.captureManual(h.signal);
+      assert.equal(h.notices.some((notice) => notice.includes("may not have closed")), false, h.notices.join("; "));
+      h.state.close();
+    });
+  });
+
   describe("a service adopting a frame in the moment after another process published it", () => {
     /** Runs `adopt` with the row at the point the publisher is about to save it: after the rename, before the insert. */
     function interleave(h: Awaited<ReturnType<typeof harness>>, adopt: (row: CaptureRow, insert: (row: CaptureRow) => CaptureRow) => void): void {

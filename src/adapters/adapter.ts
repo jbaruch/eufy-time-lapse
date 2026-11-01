@@ -9,6 +9,7 @@ export type FailureReason =
   | "stale_source"
   | "budget_spent"
   | "cleanup_timeout"
+  | "storage_full"
   | "aborted";
 
 export type FailurePhase = "auth" | "discovery" | "connect" | "stream_start" | "first_media" | "decode" | "cleanup";

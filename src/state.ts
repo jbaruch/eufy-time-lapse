@@ -324,6 +324,10 @@ export class State {
     return this.one<CaptureRow>("SELECT * FROM captures WHERE capture_id = ?", row.capture_id) as CaptureRow;
   }
 
+  getCapture(captureId: string): CaptureRow | undefined {
+    return this.one<CaptureRow>("SELECT * FROM captures WHERE capture_id = ?", captureId);
+  }
+
   hasCapture(captureId: string): boolean {
     return this.one("SELECT 1 FROM captures WHERE capture_id = ?", captureId) !== undefined;
   }

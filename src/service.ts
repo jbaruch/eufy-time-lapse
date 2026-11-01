@@ -729,6 +729,9 @@ export class CaptureService {
     if (sessionBudgetSpent(budgets, this.config) || dataBudgetSpent(budgets, this.config)) {
       return new CaptureFailure("budget_spent", "discovery", "The camera-contact or data budget is spent, and manual captures share them. Raise it in the config, or wait for it to reset.");
     }
+    if ((await this.freeDiskMb()) <= this.config.storage.min_free_disk_mb) {
+      return new CaptureFailure("storage_full", "discovery", `The disk is at or below its ${this.config.storage.min_free_disk_mb} MB floor, so the camera wasn't woken. Free some space, or lower storage.min_free_disk_mb.`);
+    }
     const key = `manual-${randomUUID()}`;
     const reservationId = `reservation-${key}`;
     // Charged in full if the process dies mid-capture, the same as a scheduled one.
@@ -787,9 +790,14 @@ export class CaptureService {
       // This process is about to end, so anything that teardown does later has nobody to tell. Say so now, and fail the command.
       return new CaptureFailure("cleanup_timeout", "cleanup", `The frame was saved as capture ${captureId}, but the camera connection didn't close in time. It may stay open for a while, which spends battery. Don't run another capture yet.`);
     }
+    if (result.chosen.cleanup.status !== "ok") {
+      // The frame is safe, so the command still succeeded. The camera connection is what needs looking at.
+      this.options.log(`The frame was saved as capture ${captureId}, but closing the camera connection reported a problem: ${result.chosen.cleanup.detail ?? "no detail"}`);
+      await this.alerts.raise("cleanup_failed", `the camera connection may not have closed after a manual capture: ${result.chosen.cleanup.detail ?? "no detail"}`);
+    }
     await this.adapter.shutdown();
     this.adapter = undefined;
-    const row = this.state.allCaptures().find((capture) => capture.capture_id === captureId);
+    const row = this.state.getCapture(captureId);
     if (row === undefined) throw new Error(`capture ${captureId} was published but has no row`);
     return row;
   }
