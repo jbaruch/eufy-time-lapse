@@ -27,6 +27,8 @@ function captured(overrides: Partial<ProbeAttempt> = {}): ProbeAttempt {
     frame: { file: "frame.jpg", width: 1920, height: 1080, bytes: 500, sha256: "abc" },
     keyframes: [],
     keyframe_errors: [],
+    other_tries: [],
+    first_try_status: "captured",
     battery: { percent: 80, observedAt: null, note: "none", age_seconds: null },
     telemetry: {},
     ...overrides,
@@ -92,6 +94,22 @@ describe("evaluateProbe", () => {
     const result = verdict([captured(), captured(), leaky]);
     assert.equal(result.result, "fail");
     assert.match(result.criteria.resources_released.detail, /still open/);
+  });
+
+  it("does not pass when an earlier try failed to release the camera, even if the retry captured", () => {
+    const leakyTry = captured({ status: "failed", frame: null, cleanup: { status: "timeout", detail: "still open" } });
+    const rescued = captured({ other_tries: [leakyTry], first_try_status: "failed" });
+    const result = verdict([captured(), rescued, captured()]);
+    assert.equal(result.result, "fail");
+    assert.match(result.criteria.resources_released.detail, /attempt 2: cleanup timeout/);
+  });
+
+  it("passes a capture a retry rescued, and still counts it against the first try", () => {
+    const failedTry = captured({ status: "failed", frame: null, failure: { reason: "capture_timeout", phase: "first_media", message: "hung up" } });
+    const rescued = captured({ other_tries: [failedTry], first_try_status: "failed" });
+    const result = verdict([captured(), rescued, captured()]);
+    assert.equal(result.result, "pass");
+    assert.equal(result.first_try_captures, 2);
   });
 
   it("does not pass when the library woke the camera outside an attempt", () => {

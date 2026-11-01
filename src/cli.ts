@@ -31,6 +31,9 @@ const ACQUISITION_TIMEOUT_MS = 60_000;
 const CLEANUP_TIMEOUT_MS = 10_000;
 /** Two, so exposure has settled after the step up, and one bad frame can't cost the shot. */
 const TARGET_KEYFRAMES = 2;
+const MAX_TRIES = 2;
+const RETRY_DELAY_MS = 30_000;
+const SLOT_DEADLINE_MS = 180_000;
 const CAMERA_ID = "site-overview";
 
 function log(message: string): void {
@@ -116,6 +119,9 @@ async function commandProbe(config: AppConfig, dataDir: string, sessionDir: stri
         attempts,
         intervalMs: intervalMinutes * 60_000,
         targetKeyframes: TARGET_KEYFRAMES,
+        maxTries: MAX_TRIES,
+        retryDelayMs: RETRY_DELAY_MS,
+        slotDeadlineMs: SLOT_DEADLINE_MS,
         acquisitionTimeoutMs: ACQUISITION_TIMEOUT_MS,
         cleanupTimeoutMs: CLEANUP_TIMEOUT_MS,
         minWidth: config.minWidth,

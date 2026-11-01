@@ -5,11 +5,15 @@ import type { AttemptRecord } from "../capture/acquire.ts";
  * Probe report schema. Owner and sole writer: src/probe/probe.ts. Readers are humans and the Phase 1
  * sign-off. Bump REPORT_SCHEMA_VERSION on any shape change.
  */
-export const REPORT_SCHEMA_VERSION = 3;
+export const REPORT_SCHEMA_VERSION = 4;
 
 export type CameraLink = "cellular" | "wifi";
 
+/** One scheduled capture. Its top-level fields are the try whose frame the slot keeps. */
 export interface ProbeAttempt extends AttemptRecord {
+  /** Every other try. A failed try still woke the camera, so it stays on the record. */
+  other_tries: AttemptRecord[];
+  first_try_status: AttemptRecord["status"];
   battery: BatteryReading & { age_seconds: number | null };
   telemetry: Record<string, string | number | boolean>;
 }
@@ -30,6 +34,8 @@ export interface ProbeVerdict {
     native_lte_confirmed: Criterion;
   };
   next_experiment: string | null;
+  /** How many captures needed no retry. Retries rescue a capture, and this keeps the failure rate visible. */
+  first_try_captures: number;
 }
 
 export interface ProbeReport {
@@ -44,6 +50,9 @@ export interface ProbeReport {
     attempts: number;
     interval_ms: number;
     target_keyframes: number;
+    max_tries: number;
+    retry_delay_ms: number;
+    slot_deadline_ms: number;
     acquisition_timeout_ms: number;
     cleanup_timeout_ms: number;
     min_width: number;
@@ -129,9 +138,10 @@ export function evaluateProbe(input: {
         : `${attempt.frame.width}x${attempt.frame.height} is below ${minWidth}x${minHeight}`;
     }),
     resources_released: (() => {
-      const cleanups = summarize(attempts, (attempt) =>
-        attempt.cleanup.status === "ok" ? null : `cleanup ${attempt.cleanup.status}: ${attempt.cleanup.detail ?? "no detail"}`,
-      );
+      const cleanups = summarize(attempts, (attempt) => {
+        const faulty = [attempt, ...attempt.other_tries].find((entry) => entry.cleanup.status !== "ok");
+        return faulty === undefined ? null : `cleanup ${faulty.cleanup.status}: ${faulty.cleanup.detail ?? "no detail"}`;
+      });
       if (unexpectedConnections === 0) return cleanups;
       const problem = `${unexpectedConnections} connection(s) opened outside an attempt`;
       return { passed: false, detail: cleanups.passed ? problem : `${cleanups.detail}; ${problem}` };
@@ -150,5 +160,6 @@ export function evaluateProbe(input: {
     result,
     criteria,
     next_experiment: result === "fail" ? chooseNextExperiment(criteria, attempts, unexpectedConnections) : null,
+    first_try_captures: attempts.filter((attempt) => attempt.first_try_status === "captured").length,
   };
 }

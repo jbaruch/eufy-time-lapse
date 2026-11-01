@@ -1,9 +1,8 @@
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
 import { CaptureFailure } from "../adapters/adapter.ts";
 import type { CameraAdapter } from "../adapters/adapter.ts";
-import { acquireFrame } from "../capture/acquire.ts";
+import { abortableSleep, captureSlot } from "../capture/slot.ts";
 import { evaluateProbe, maskSerial, REPORT_SCHEMA_VERSION } from "./report.ts";
 import type { CameraLink, ProbeAttempt, ProbeReport } from "./report.ts";
 
@@ -18,6 +17,9 @@ export interface ProbeOptions {
   attempts: number;
   intervalMs: number;
   targetKeyframes: number;
+  maxTries: number;
+  retryDelayMs: number;
+  slotDeadlineMs: number;
   acquisitionTimeoutMs: number;
   cleanupTimeoutMs: number;
   minWidth: number;
@@ -28,14 +30,6 @@ export interface ProbeOptions {
   log: (message: string) => void;
   now?: () => Date;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
-}
-
-async function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
-  try {
-    await delay(ms, undefined, { signal });
-  } catch (error) {
-    if (!(error instanceof Error) || error.name !== "AbortError") throw error;
-  }
 }
 
 async function writeReport(runDir: string, report: ProbeReport): Promise<void> {
@@ -94,6 +88,9 @@ export async function runProbe(options: ProbeOptions): Promise<ProbeReport> {
       attempts: options.attempts,
       interval_ms: options.intervalMs,
       target_keyframes: options.targetKeyframes,
+      max_tries: options.maxTries,
+      retry_delay_ms: options.retryDelayMs,
+      slot_deadline_ms: options.slotDeadlineMs,
       acquisition_timeout_ms: options.acquisitionTimeoutMs,
       cleanup_timeout_ms: options.cleanupTimeoutMs,
       min_width: options.minWidth,
@@ -117,20 +114,28 @@ export async function runProbe(options: ProbeOptions): Promise<ProbeReport> {
     const reading = await adapter.discoverCamera(camera.key);
     const readAt = now();
     options.log(`attempt ${index + 1} of ${options.attempts}: connecting`);
-    const record = await acquireFrame({
+    const slot = await captureSlot({
       adapter,
       cameraKey: camera.key,
-      outputDir: join(options.runDir, `attempt-${index + 1}`),
+      slotDir: join(options.runDir, `attempt-${index + 1}`),
       acquisitionTimeoutMs: options.acquisitionTimeoutMs,
       cleanupTimeoutMs: options.cleanupTimeoutMs,
       targetKeyframes: options.targetKeyframes,
       minWidth: options.minWidth,
       minHeight: options.minHeight,
+      maxTries: options.maxTries,
+      retryDelayMs: options.retryDelayMs,
+      slotDeadlineMs: options.slotDeadlineMs,
       signal: options.signal,
+      log: options.log,
+      sleep,
       now,
     });
+    const record = slot.chosen;
     attempts.push({
       ...record,
+      other_tries: slot.otherTries,
+      first_try_status: slot.firstTryStatus,
       battery: {
         ...reading.battery,
         age_seconds:
@@ -143,7 +148,7 @@ export async function runProbe(options: ProbeOptions): Promise<ProbeReport> {
     options.log(
       record.frame === null
         ? `attempt ${index + 1}: failed (${record.failure?.reason ?? "unknown"}): ${record.failure?.message ?? "no detail"}`
-        : `attempt ${index + 1}: ${record.status}, ${record.frame.width}x${record.frame.height}, cleanup ${record.cleanup.status}`,
+        : `attempt ${index + 1}: ${record.status}, ${record.frame.width}x${record.frame.height}, ${slot.otherTries.length + 1} tries, cleanup ${record.cleanup.status}`,
     );
 
     report.unexpected_connections = adapter.unexpectedConnectionCount();

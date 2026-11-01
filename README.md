@@ -60,17 +60,18 @@ The probe has to run on the host that will run the service, because P2P behavior
    ```
 
 4. Run three cold captures, 15 minutes apart. Each holds the stream until two keyframes at the required
-   size arrive (default 3840x2160), or 60 seconds pass. Keep the app's live view closed:
+   size arrive (default 3840x2160), or 60 seconds pass. A failed or undersized try gets one retry 30 seconds
+   later, and the best frame wins. Keep the app's live view closed:
 
    ```bash
    docker compose run --rm timelapse probe
    ```
 
-Each run writes to `data/probe/<run-id>/`:
+Each run writes to `data/probe/<run-id>/`. A retry's files go in `attempt-N-retry-1/`:
 
 | File | Contents |
 | --- | --- |
-| `report.json` | Timings, codec, resolution, traffic, battery, cleanup, verdict, and the next experiment if it failed |
+| `report.json` | Timings, codec, resolution, traffic, battery, cleanup, every try, first-try success count, verdict, and the next experiment if it failed |
 | `attempt-N/frame.jpg` | The selected frame |
 | `attempt-N/keyframe-*.jpg` | Every keyframe, for judging quality after a cold start |
 | `attempt-N/stream.bin` | The raw video |

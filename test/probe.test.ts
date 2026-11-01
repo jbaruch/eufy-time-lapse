@@ -33,6 +33,9 @@ describe("runProbe", () => {
       attempts: 3,
       intervalMs: 900_000,
       targetKeyframes: 2,
+      maxTries: 2,
+      retryDelayMs: 30_000,
+      slotDeadlineMs: 180_000,
       acquisitionTimeoutMs: 2_000,
       cleanupTimeoutMs: 100,
       minWidth: 1280,
@@ -74,15 +77,33 @@ describe("runProbe", () => {
     assert.deepEqual(JSON.parse(text), JSON.parse(JSON.stringify(report)));
     assert.equal(text.includes(CAMERA.key), false);
     assert.equal(report.camera.serial_masked.endsWith("1234"), true);
-    assert.equal(report.schema_version, 3);
+    assert.equal(report.schema_version, 4);
   });
 
-  it("keeps going after a failed attempt and reports the next experiment", async () => {
+  it("passes when a retry rescues a capture, and keeps the failed try on the record", async () => {
     let calls = 0;
     const opts = options({
       open: async () => {
         calls += 1;
-        if (calls === 2) throw new CaptureFailure("camera_unreachable", "connect", "no route");
+        if (calls === 2) throw new CaptureFailure("capture_timeout", "first_media", "the camera hung up");
+        return liveSession(video);
+      },
+    });
+    const report = await runProbe(opts);
+    assert.equal(report.verdict.result, "pass");
+    assert.equal(report.verdict.first_try_captures, 2);
+    assert.deepEqual(report.attempts.map((attempt) => attempt.status), ["captured", "captured", "captured"]);
+    assert.equal(report.attempts[1]?.first_try_status, "failed");
+    assert.equal(report.attempts[1]?.other_tries[0]?.failure?.message, "the camera hung up");
+    assert.deepEqual(opts.sleeps, [900_000, 30_000, 900_000], "the retry waits inside its slot");
+  });
+
+  it("keeps going when a capture fails every try, and reports the next experiment", async () => {
+    let calls = 0;
+    const opts = options({
+      open: async () => {
+        calls += 1;
+        if (calls === 2 || calls === 3) throw new CaptureFailure("camera_unreachable", "connect", "no route");
         return liveSession(video);
       },
     });
