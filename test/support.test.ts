@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
 import { ConfigError, loadConfig } from "../src/config.ts";
-import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "../src/lock.ts";
+import { CameraLockHeldError, CameraLockLostError, evictIfStale, withCameraLock } from "../src/lock.ts";
 import { runLogin } from "../src/login.ts";
 import { createRedactingLogger, Redactor } from "../src/logging.ts";
 import { State } from "../src/state.ts";
@@ -120,6 +120,42 @@ describe("withCameraLock", () => {
     const path = lockPath();
     await heldSince(path, NOW - 10_000);
     await assert.rejects(withCameraLock(path, async () => "second", at), CameraLockHeldError);
+  });
+
+  describe("evicting a stale lock", () => {
+    it("re-checks under its guard, so a lock replaced after it looked stale survives", async () => {
+      const path = lockPath();
+      await heldSince(path, NOW - 1_000);
+      await evictIfStale(path, at.now);
+      assert.equal(await readFile(path, "utf8"), "some-other-holder");
+    });
+
+    it("removes a lock that's still stale, and its guard", async () => {
+      const path = lockPath();
+      await heldSince(path, NOW - 60_000);
+      await evictIfStale(path, at.now);
+      await assert.rejects(stat(path), { code: "ENOENT" });
+      await assert.rejects(stat(`${path}.evict`), { code: "ENOENT" });
+    });
+
+    it("leaves it to another contender already evicting", async () => {
+      const path = lockPath();
+      await heldSince(path, NOW - 60_000);
+      await writeFile(`${path}.evict`, "");
+      await utimes(`${path}.evict`, new Date(NOW - 1_000), new Date(NOW - 1_000));
+      await assert.rejects(evictIfStale(path, at.now), CameraLockHeldError);
+      assert.equal(await readFile(path, "utf8"), "some-other-holder");
+    });
+
+    it("clears the guard of a contender that crashed while evicting", async () => {
+      const path = lockPath();
+      await heldSince(path, NOW - 60_000);
+      await writeFile(`${path}.evict`, "");
+      await utimes(`${path}.evict`, new Date(NOW - 60_000), new Date(NOW - 60_000));
+      await assert.rejects(evictIfStale(path, at.now), CameraLockHeldError);
+      await assert.rejects(stat(`${path}.evict`), { code: "ENOENT" });
+      assert.equal(await withCameraLock(path, async () => "recovered", at), "recovered");
+    });
   });
 
   it("doesn't remove a lock that another holder has taken over", async () => {

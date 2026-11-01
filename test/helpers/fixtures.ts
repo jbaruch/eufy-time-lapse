@@ -55,6 +55,7 @@ export interface MockBehavior {
   open?: (signal: AbortSignal) => Promise<LiveSession>;
   teardown?: () => Promise<CleanupResult>;
   auth?: AuthState[];
+  authFailure?: () => Error;
   camera?: CameraInfo;
   unexpected?: number;
 }
@@ -64,6 +65,7 @@ export class MockAdapter implements CameraAdapter {
   readonly version = "0.0.0";
   teardowns = 0;
   opens = 0;
+  shutdowns = 0;
   private readonly behavior: MockBehavior;
 
   constructor(behavior: MockBehavior = {}) {
@@ -71,6 +73,7 @@ export class MockAdapter implements CameraAdapter {
   }
 
   async authenticate(): Promise<AuthState> {
+    if (this.behavior.authFailure !== undefined) throw this.behavior.authFailure();
     return this.behavior.auth?.shift() ?? { status: "authenticated" };
   }
 
@@ -93,5 +96,7 @@ export class MockAdapter implements CameraAdapter {
     return this.behavior.unexpected ?? 0;
   }
 
-  async shutdown(): Promise<void> {}
+  async shutdown(): Promise<void> {
+    this.shutdowns += 1;
+  }
 }

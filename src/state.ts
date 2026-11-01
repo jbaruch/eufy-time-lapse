@@ -325,12 +325,12 @@ export class State {
     this.db.prepare("INSERT INTO events (at, kind, detail) VALUES (?, ?, ?)").run(this.stamp(), kind, detail);
   }
 
-  /** Scheduled slots whose time has come, newest first. Grid slots a battery tier passed over don't count as outcomes here. */
   /** Scheduled slots' first tries, newest first. A retry's attempt id carries a -retry- suffix, and a manual capture has no slot. */
   recentFirstTries(limit: number): AttemptRow[] {
     return this.all<AttemptRow>("SELECT * FROM attempts WHERE slot_id IS NOT NULL AND attempt_id NOT LIKE '%-retry-%' AND status != 'running' ORDER BY started_at DESC LIMIT ?", limit);
   }
 
+  /** Scheduled slots whose time has come, newest first. Grid slots a battery tier passed over don't count as outcomes here. */
   recentOutcomes(limit: number): SlotRow[] {
     return this.all<SlotRow>("SELECT * FROM slots WHERE state IN ('captured', 'captured_degraded', 'missed') ORDER BY scheduled_at_utc DESC LIMIT ?", limit);
   }

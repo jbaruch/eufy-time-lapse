@@ -29,6 +29,29 @@ function isErrno(error: unknown, code: string): boolean {
   return (error as NodeJS.ErrnoException).code === code;
 }
 
+/**
+ * Removes a stale lock, re-checking under a guard. Without the guard, two contenders could judge the same lock stale,
+ * and the slower one would remove the lock the faster one had just taken, leaving both with the camera.
+ */
+export async function evictIfStale(lockPath: string, now: () => number): Promise<void> {
+  const guardPath = `${lockPath}.evict`;
+  try {
+    await (await open(guardPath, "wx")).close();
+  } catch (error) {
+    if (!isErrno(error, "EEXIST")) throw error;
+    // Another contender is evicting. A guard this old means it crashed doing so, and the next try can take over.
+    if (now() - (await stat(guardPath)).mtimeMs >= STALE_AFTER_MS) await rm(guardPath, { force: true });
+    throw new CameraLockHeldError(lockPath);
+  }
+  try {
+    if (now() - (await stat(lockPath)).mtimeMs >= STALE_AFTER_MS) await rm(lockPath, { force: true });
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) throw error;
+  } finally {
+    await rm(guardPath, { force: true });
+  }
+}
+
 async function acquire(lockPath: string, token: string, now: () => number): Promise<void> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -47,7 +70,7 @@ async function acquire(lockPath: string, token: string, now: () => number): Prom
       throw error;
     }
     if (ageMs < STALE_AFTER_MS) throw new CameraLockHeldError(lockPath);
-    await rm(lockPath, { force: true });
+    await evictIfStale(lockPath, now);
   }
   throw new Error(`Could not take the camera lock at ${lockPath}: another process keeps recreating it.`);
 }

@@ -275,12 +275,20 @@ describe("acquireFrame", () => {
     assert.equal(adapter.teardowns, 1);
   });
 
-  it("keeps the frame when teardown rejects, and records the fault", async () => {
-    const { outputDir, result } = attempt({
+  it("propagates a teardown that rejects, because that's a bug rather than a fault it understands", async () => {
+    const { result } = attempt({
       open: async () => liveSession(h265),
       teardown: async () => {
-        throw new Error("stop refused");
+        throw new TypeError("a bug");
       },
+    });
+    await assert.rejects(result, TypeError);
+  });
+
+  it("keeps the frame when teardown reports a fault, and records it", async () => {
+    const { outputDir, result } = attempt({
+      open: async () => liveSession(h265),
+      teardown: async () => ({ status: "error", detail: "stop refused" }),
     });
     const record = await result;
     assert.equal(record.status, "captured");

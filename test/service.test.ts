@@ -7,12 +7,14 @@ import { CaptureFailure } from "../src/adapters/adapter.ts";
 import type { AuthState, CameraInfo, LiveSession } from "../src/adapters/adapter.ts";
 import { DEFAULT_SERVICE_CONFIG } from "../src/service-config.ts";
 import type { ServiceConfig } from "../src/service-config.ts";
+import { CameraLockHeldError } from "../src/lock.ts";
 import { CaptureService, parseCaptureMetadata, scheduleRevision } from "../src/service.ts";
 import type { CaptureMetadata } from "../src/service.ts";
 import { State } from "../src/state.ts";
 import type { AttemptRow } from "../src/state.ts";
 import { buildCalibration, buildStatus } from "../src/status.ts";
 import { CAMERA, liveSession, MockAdapter, rawVideo, tempDir } from "./helpers/fixtures.ts";
+import type { MockBehavior } from "./helpers/fixtures.ts";
 
 const SLOT_0800 = "construction/site-overview/2026-07-01T13:00:00.000Z";
 const AT_0800 = Date.parse("2026-07-01T13:00:00Z");
@@ -64,7 +66,7 @@ describe("CaptureService", () => {
     restart: () => { service: CaptureService; state: State };
   }
 
-  async function harness(options: { open?: (signal: AbortSignal) => Promise<LiveSession>; camera?: CameraInfo; auth?: AuthState[]; config?: ServiceConfig; startMs?: number } = {}): Promise<Harness> {
+  async function harness(options: { open?: (signal: AbortSignal) => Promise<LiveSession>; teardown?: MockBehavior["teardown"]; authFailure?: MockBehavior["authFailure"]; camera?: CameraInfo; auth?: AuthState[]; config?: ServiceConfig; startMs?: number } = {}): Promise<Harness> {
     run += 1;
     const dataDir = join(root.path, `data-${run}`);
     await mkdir(dataDir, { recursive: true });
@@ -72,7 +74,7 @@ describe("CaptureService", () => {
     const now = (): Date => new Date(clock.ms);
     const disk = { mb: 50_000 };
     const notices: string[] = [];
-    const adapter = new MockAdapter({ open: options.open ?? fresh, camera: options.camera ?? reading(80), ...(options.auth ? { auth: options.auth } : {}) });
+    const adapter = new MockAdapter({ open: options.open ?? fresh, camera: options.camera ?? reading(80), ...(options.teardown ? { teardown: options.teardown } : {}), ...(options.authFailure ? { authFailure: options.authFailure } : {}), ...(options.auth ? { auth: options.auth } : {}) });
     const created = { count: 0 };
     const build = (state: State): CaptureService =>
       new CaptureService({
@@ -530,7 +532,7 @@ describe("CaptureService", () => {
     it("gives the reservation back when the lock proves no try began", async () => {
       const h = await harness();
       await writeFile(join(h.dataDir, "camera.lock"), "another-holder");
-      await utimes(join(h.dataDir, "camera.lock"), new Date(), new Date());
+      await utimes(join(h.dataDir, "camera.lock"), new Date(h.clock.ms), new Date(h.clock.ms));
       await h.service.tick(h.signal);
       assert.equal(h.adapter.opens, 0);
       assert.equal(h.state.getSlot(SLOT_0800)?.reason, "camera_busy");
@@ -567,6 +569,77 @@ describe("CaptureService", () => {
       await h.service.tick(h.signal);
       assert.deepEqual([h.state.getSlot(SLOT_0800)?.state, h.state.getSlot(SLOT_0800)?.reason], ["missed", "lock_lost"]);
       assert.equal(h.state.sessionUsedMs("2026-07-01"), 120_000);
+      h.state.close();
+    });
+  });
+
+  describe("the camera client's lifetime", () => {
+    it("shuts down every client that failed to start, so a long outage doesn't leak one per slot", async () => {
+      const h = await harness({ authFailure: () => new CaptureFailure("camera_unreachable", "auth", "Eufy's cloud can't be reached") });
+      await runAt(h, [0, 5, 10]);
+      assert.equal(h.created.count, 3);
+      assert.equal(h.adapter.shutdowns, 3);
+      assert.equal(h.state.getSlot(SLOT_0800)?.reason, "camera_unreachable");
+      h.state.close();
+    });
+
+    it("shuts down a client that wants a login, and stops making new ones", async () => {
+      const h = await harness({ auth: [{ status: "tfa_required" }] });
+      await runAt(h, [0, 5]);
+      assert.equal(h.created.count, 1);
+      assert.equal(h.adapter.shutdowns, 1);
+      h.state.close();
+    });
+
+    it("retires a client whose teardown timed out, stops retrying on it, and starts fresh for the next slot", async () => {
+      let hung = true;
+      const h = await harness({ teardown: async () => (hung ? { status: "timeout", detail: "still running" } : { status: "ok", detail: null }), open: async () => await hangUp() });
+      await runAt(h, [0]);
+      assert.equal(h.adapter.opens, 1, "no second try on a connection that may be cut off");
+      assert.equal(h.created.count, 1);
+      assert.equal(h.adapter.shutdowns, 1);
+      hung = false;
+      await runAt(h, [5]);
+      assert.equal(h.created.count, 2, "the next slot gets a new client");
+      h.state.close();
+    });
+  });
+
+  describe("a manual capture", () => {
+    it("spends the same budget, and is charged like any capture", async () => {
+      const h = await harness();
+      const result = await h.service.captureManual(h.signal);
+      assert.equal(result instanceof CaptureFailure, false);
+      assert.deepEqual(h.state.attemptsSince("2000-01-01").map((attempt) => [attempt.status, attempt.slot_id]), [["captured", null]]);
+      h.state.close();
+    });
+
+    it("refuses when the budget is spent, without touching the camera", async () => {
+      const config = serviceConfig({ capture: { ...DEFAULT_SERVICE_CONFIG.capture, max_session_seconds_per_day: 1 } });
+      const h = await harness({ config });
+      const result = await h.service.captureManual(h.signal);
+      assert.ok(result instanceof CaptureFailure && result.reason === "budget_spent");
+      assert.equal(h.adapter.opens, 0);
+      h.state.close();
+    });
+
+    it("keeps its reservation charged when it dies unexpectedly", async () => {
+      const h = await harness({
+        open: async () => {
+          throw new TypeError("a bug");
+        },
+      });
+      await assert.rejects(h.service.captureManual(h.signal), TypeError);
+      assert.equal(h.state.sessionUsedMs("2026-07-01"), 40_000);
+      h.state.close();
+    });
+
+    it("gives its reservation back when the lock proves no try began", async () => {
+      const h = await harness();
+      await writeFile(join(h.dataDir, "camera.lock"), "another-holder");
+      await utimes(join(h.dataDir, "camera.lock"), new Date(h.clock.ms), new Date(h.clock.ms));
+      await assert.rejects(h.service.captureManual(h.signal), CameraLockHeldError);
+      assert.equal(h.state.sessionUsedMs("2026-07-01"), 0);
       h.state.close();
     });
   });

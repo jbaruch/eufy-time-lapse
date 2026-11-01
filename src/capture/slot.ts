@@ -67,6 +67,10 @@ export async function captureSlot(options: SlotOptions): Promise<SlotResult> {
     tries.push(record);
 
     if (!shouldRetry(record) || index + 1 === options.maxTries || signal.aborted) break;
+    if (record.cleanup.status === "timeout") {
+      options.log("not retrying: the last try's teardown is still running, and could cut off another try on this connection");
+      break;
+    }
 
     const needed = options.retryDelayMs + options.acquisitionTimeoutMs + options.cleanupTimeoutMs;
     if (now().getTime() - startedAt + needed > options.slotDeadlineMs) {

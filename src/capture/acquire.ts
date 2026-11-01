@@ -167,9 +167,8 @@ async function boundedTeardown(adapter: CameraAdapter, cameraKey: string, timeou
   const timedOut = new Promise<CleanupResult>((resolve) => {
     timer = setTimeout(() => resolve({ status: "timeout", detail: `teardown did not finish within ${timeoutMs} ms` }), timeoutMs);
   });
-  // A teardown fault must never cost a frame that is already on disk, so it's recorded, not thrown.
-  const attempted = adapter.teardown(cameraKey, timeoutMs).catch((error: Error) => ({ status: "error" as const, detail: error.message }));
-  const result = await Promise.race([attempted, timedOut]);
+  // An adapter reports a teardown it understands as a result, so that fault can't cost the frame. A rejection is a bug.
+  const result = await Promise.race([adapter.teardown(cameraKey, timeoutMs), timedOut]);
   clearTimeout(timer);
   return result;
 }

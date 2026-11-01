@@ -7,6 +7,7 @@ export type FailureReason =
   | "capture_timeout"
   | "decode_failed"
   | "stale_source"
+  | "budget_spent"
   | "aborted";
 
 export type FailurePhase = "auth" | "discovery" | "connect" | "stream_start" | "first_media" | "decode";
@@ -92,6 +93,7 @@ export interface CameraAdapter {
   /** Starts a new live session. Rejects with CaptureFailure; aborts promptly when `signal` fires. */
   openLiveSession(cameraKey: string, signal: AbortSignal): Promise<LiveSession>;
   /** Stops the stream and the camera connection. Reports problems in its result. */
+  /** Resolves with the outcome, including one that failed in a way the adapter understands. A rejection means a bug. */
   teardown(cameraKey: string, timeoutMs: number): Promise<CleanupResult>;
   /** Connections to the camera that opened outside an attempt. Each one wakes it. */
   unexpectedConnectionCount(): number;

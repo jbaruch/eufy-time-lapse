@@ -35,11 +35,11 @@ export function reservedSessionMs(config: ServiceConfig["capture"]): number {
 }
 
 /** Whether a slot may wake the camera. Each rule is explicit and recorded, so the capture rate never changes silently. */
-export function sessionBudgetSpent(input: PolicyInput, config: ServiceConfig): boolean {
+export function sessionBudgetSpent(input: Pick<PolicyInput, "sessionUsedMs">, config: ServiceConfig): boolean {
   return input.sessionUsedMs + reservedSessionMs(config.capture) > config.capture.max_session_seconds_per_day * 1000;
 }
 
-export function dataBudgetSpent(input: PolicyInput, config: ServiceConfig): boolean {
+export function dataBudgetSpent(input: Pick<PolicyInput, "monthBytes">, config: ServiceConfig): boolean {
   const { monthly_budget_mb: budget, pause_fraction: fraction } = config.traffic;
   return budget !== null && input.monthBytes >= budget * 1024 * 1024 * fraction;
 }

@@ -111,6 +111,10 @@ function validate(config: ServiceConfig): void {
 
   id("project.id", config.project.id);
   id("camera.id", config.camera.id);
+  // A JSON array holding one string would otherwise pass: both checks below coerce it to that string.
+  for (const [path, value] of [["project.site_time_zone", config.project.site_time_zone], ["schedule.window_start", config.schedule.window_start], ["schedule.window_end_exclusive", config.schedule.window_end_exclusive]] as const) {
+    if (typeof value !== "string") fail(`${path} must be text, got ${JSON.stringify(value)}.`);
+  }
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: config.project.site_time_zone });
   } catch (error) {

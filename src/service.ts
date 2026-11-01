@@ -9,6 +9,7 @@ import { TRAFFIC_BASIS } from "./capture/acquire.ts";
 import type { AttemptRecord } from "./capture/acquire.ts";
 import { abortableSleep, captureSlot } from "./capture/slot.ts";
 import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "./lock.ts";
+import type { LockOptions } from "./lock.ts";
 import { dataBudgetSpent, decide, nextBatteryPaused, reservedSessionMs, sessionBudgetSpent } from "./policy.ts";
 import type { PolicyInput } from "./policy.ts";
 import type { CameraLink } from "./probe/report.ts";
@@ -86,8 +87,11 @@ export interface CaptureMetadata {
   traffic_measurement_basis: string;
 }
 
-/** Reads a capture's stored metadata, or null if it isn't a version and shape this build understands. */
-export function parseCaptureMetadata(text: string): CaptureMetadata | null {
+/** The part of a capture's stored metadata that recovery reads, which is all this code vouches for. */
+export type AdoptableCapture = Pick<CaptureMetadata, "capture_id" | "slot_id" | "kind" | "local_date" | "frame_received_at" | "width" | "height" | "jpeg_bytes" | "sha256" | "quality_status">;
+
+/** Reads what recovery needs from stored metadata, or null if it isn't a version and shape this build understands. */
+export function parseCaptureMetadata(text: string): AdoptableCapture | null {
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -106,7 +110,7 @@ export function parseCaptureMetadata(text: string): CaptureMetadata | null {
     (record.slot_id === null || typeof record.slot_id === "string") &&
     (record.kind === "scheduled" || record.kind === "manual") &&
     (record.quality_status === "ok" || record.quality_status === "degraded");
-  return valid ? (record as unknown as CaptureMetadata) : null;
+  return valid ? (record as unknown as AdoptableCapture) : null;
 }
 
 export function scheduleConfigOf(config: ServiceConfig): ScheduleConfig {
@@ -149,6 +153,10 @@ export class CaptureService {
 
   private get lockPath(): string {
     return join(this.options.dataDir, "camera.lock");
+  }
+
+  private get lockOptions(): LockOptions {
+    return { now: () => this.now().getTime() };
   }
 
   private async freeDiskMb(): Promise<number> {
@@ -208,7 +216,7 @@ export class CaptureService {
     }
   }
 
-  private async readMetadata(relativeDir: string): Promise<CaptureMetadata | null> {
+  private async readMetadata(relativeDir: string): Promise<AdoptableCapture | null> {
     try {
       return parseCaptureMetadata(await readFile(join(this.options.dataDir, relativeDir, "metadata.json"), "utf8"));
     } catch (error) {
@@ -299,18 +307,18 @@ export class CaptureService {
   /** A cloud read that doesn't wake the camera. Nothing here contacts the camera, including the login restore. */
   private async readCamera(): Promise<BatteryReading | null> {
     if (this.state.getFlag("auth_required") !== undefined) {
-      this.adapter = undefined;
+      await this.retireAdapter();
       return null;
     }
+    // Holds a timer and a client from the moment it exists, so a failed start must still shut it down.
+    let starting: CameraAdapter | undefined;
     try {
       if (this.adapter === undefined) {
-        const adapter = this.options.createAdapter();
-        const auth = await adapter.authenticate();
-        if (auth.status !== "authenticated") {
-          await adapter.shutdown();
-          throw new CaptureFailure("auth_required", "auth", "Eufy wants a manual login step. Run the login command in a terminal.");
-        }
-        this.adapter = adapter;
+        starting = this.options.createAdapter();
+        const auth = await starting.authenticate();
+        if (auth.status !== "authenticated") throw new CaptureFailure("auth_required", "auth", "Eufy wants a manual login step. Run the login command in a terminal.");
+        this.adapter = starting;
+        starting = undefined;
       }
       this.camera = await this.adapter.discoverCamera(this.camera?.key ?? this.options.cameraSerial);
       return this.camera.battery;
@@ -319,15 +327,22 @@ export class CaptureService {
       if (!(error instanceof CaptureFailure)) throw error;
       if (error.reason === "auth_required") {
         this.state.setFlag("auth_required", error.message);
-        await this.adapter?.shutdown();
-        this.adapter = undefined;
+        await this.retireAdapter();
         return null;
       }
       // The cloud being unreachable is a reason to skip a reading. The capture attempt reports its own failure.
       this.state.addEvent("camera_read_failed", error.message);
       this.options.log(`could not read camera state: ${error.message}`);
       return null;
+    } finally {
+      await starting?.shutdown();
     }
+  }
+
+  private async retireAdapter(): Promise<void> {
+    const adapter = this.adapter;
+    this.adapter = undefined;
+    await adapter?.shutdown();
   }
 
   private effectivePercent(reading: BatteryReading | null): number | null {
@@ -446,6 +461,7 @@ export class CaptureService {
           sleep: this.sleep,
           now: this.now,
         }),
+        this.lockOptions,
       );
     } catch (error) {
       if (error instanceof CameraLockHeldError) {
@@ -465,6 +481,11 @@ export class CaptureService {
 
     const { chosen, otherTries } = result;
     this.state.settleReservation(reservationId, [chosen, ...otherTries].map((record) => this.attemptRow(record, slot.slot_id, local.date)));
+    if ([chosen, ...otherTries].some((record) => record.cleanup.status === "timeout")) {
+      // Its teardown is still running, and could cut off a later capture on the same adapter. Not awaited: it may hang too.
+      this.adapter = undefined;
+      adapter.shutdown().catch((error: Error) => this.options.log(`an abandoned camera client failed to shut down: ${error.message}`));
+    }
 
     const cleanupFault = [chosen, ...otherTries].find((record) => record.cleanup.status !== "ok");
     await this.alerts.set("cleanup_failed", cleanupFault !== undefined, `the camera connection may not have closed: ${cleanupFault?.cleanup.detail ?? ""}`);
@@ -515,7 +536,7 @@ export class CaptureService {
     };
   }
 
-  private insertCaptureRow(metadata: CaptureMetadata, relativeDir: string): CaptureRow {
+  private insertCaptureRow(metadata: AdoptableCapture, relativeDir: string): CaptureRow {
     const row: CaptureRow = {
       capture_id: metadata.capture_id,
       slot_id: metadata.slot_id,
@@ -647,8 +668,39 @@ export class CaptureService {
     }
     const adapter = this.adapter;
     const camera = this.camera;
-    const local = localParts(this.now(), this.zone);
+    const startedAt = this.now();
+    const local = localParts(startedAt, this.zone);
+    const budgets = { sessionUsedMs: this.state.sessionUsedMs(local.date), monthBytes: this.state.monthBytes(local.date.slice(0, 7)) };
+    if (sessionBudgetSpent(budgets, this.config) || dataBudgetSpent(budgets, this.config)) {
+      return new CaptureFailure("budget_spent", "discovery", "The camera-contact or data budget is spent, and manual captures share them. Raise it in the config, or wait for it to reset.");
+    }
     const key = `manual-${randomUUID()}`;
+    const reservationId = `reservation-${key}`;
+    // Charged in full if the process dies mid-capture, the same as a scheduled one.
+    this.state.insertAttempt({
+      attempt_id: reservationId,
+      slot_id: null,
+      started_at: startedAt.toISOString(),
+      status: "running",
+      reason: null,
+      phase: null,
+      connection_path: null,
+      connect_ms: null,
+      session_ms: null,
+      reserved_ms: (this.config.capture.acquisition_timeout_seconds + this.config.capture.cleanup_timeout_seconds) * 1000,
+      video_bytes: 0,
+      audio_bytes: 0,
+      cleanup_status: null,
+      stream_stop: null,
+      width: null,
+      height: null,
+      budget_day: local.date,
+      budget_month: local.date.slice(0, 7),
+    });
+    const giveBackIfNoTryBegan = (error: unknown): never => {
+      if (error instanceof CameraLockHeldError) this.state.deleteAttempt(reservationId);
+      throw error;
+    };
     const result = await withCameraLock(this.lockPath, (lockLost) =>
       captureSlot({
         adapter,
@@ -667,8 +719,9 @@ export class CaptureService {
         sleep: this.sleep,
         now: this.now,
       }),
-    );
-    this.state.insertAttempt(this.attemptRow(result.chosen, null, local.date));
+      this.lockOptions,
+    ).catch(giveBackIfNoTryBegan);
+    this.state.settleReservation(reservationId, [this.attemptRow(result.chosen, null, local.date)]);
     if (result.chosen.frame === null) {
       return new CaptureFailure(result.chosen.failure?.reason ?? "capture_timeout", result.chosen.failure?.phase ?? "first_media", result.chosen.failure?.message ?? "No frame arrived.");
     }
