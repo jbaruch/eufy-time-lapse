@@ -902,7 +902,8 @@ export class CaptureService {
 
   private async judgeFrame(capture: CaptureRow): Promise<{ reference: FramingReference | undefined; verdict: FramingVerdict }> {
     const at = new Date(capture.frame_received_at);
-    const reference = chooseReference(this.state.framingReferences(new Date(at.getTime() - FRAMING_REFERENCE_DAYS * DAY_MS).toISOString()), at);
+    const references = this.state.framingReferences(new Date(at.getTime() - FRAMING_REFERENCE_DAYS * DAY_MS).toISOString(), this.state.getFlag("framing_position_saved_at") ?? "");
+    const reference = chooseReference(references, at);
     if (reference === undefined) return { reference, verdict: { status: "unsure", dx: null, dy: null, detail: "there's no earlier on-target frame to compare with" } };
     try {
       const comparison = await (this.options.compareFrames ?? compareStoredFrames)(join(this.options.dataDir, reference.relative_dir, "frame.jpg"), join(this.options.dataDir, capture.relative_dir, "frame.jpg"));
@@ -984,6 +985,7 @@ export class CaptureService {
     if (saved instanceof CaptureFailure) return saved;
     this.state.recordFramingCheck({ capture_id: frame.capture_id, checked_at: this.now().toISOString(), status: "on_target", reference_capture_id: null, dx: 0, dy: 0, detail: "this frame was taken when the position was saved" });
     this.state.setFlag("framing_position_id", String(saved));
+    this.state.setFlag("framing_position_saved_at", frame.frame_received_at);
     this.state.setFlag("framing_returned_at", null);
     this.state.addEvent("framing_position_saved", `saved position ${saved}`);
     await this.alerts.clear("framing_off_target");
@@ -998,6 +1000,7 @@ export class CaptureService {
     const forgotten = await this.onCamera((adapter, camera) => adapter.forgetPosition(camera.key, Number(flagged)));
     if (forgotten instanceof CaptureFailure) return forgotten;
     this.state.setFlag("framing_position_id", null);
+    this.state.setFlag("framing_position_saved_at", null);
     this.state.setFlag("framing_returned_at", null);
     this.state.addEvent("framing_position_forgotten", `forgot position ${flagged}`);
     await this.alerts.clear("framing_off_target");

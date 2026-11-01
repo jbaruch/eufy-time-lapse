@@ -422,6 +422,18 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("never compares a new view with frames of the old one, even at the same time of day", async () => {
+      const h = await guarded([steady, steady]);
+      await runAt(h, [0, 5]);
+      h.clock.ms = AT_0800 + 7 * 60 * MINUTE;
+      await h.service.setFramingPosition(h.signal);
+      const newView = h.state.latestFramingCheck()?.capture_id ?? "none";
+      await runAt(h, [24 * 60]);
+      const [reference] = h.calls.at(-1) as [string, string];
+      assert.ok(reference.includes(newView), "the morning after a re-aim, the reference is the new view's frame");
+      h.state.close();
+    });
+
     it("records steady frames and leaves the camera alone", async () => {
       const h = await guarded([steady, steady]);
       await runAt(h, [0, 5]);
@@ -635,7 +647,7 @@ describe("CaptureService", () => {
     it("calls a stored frame that's gone unsure, using the real comparison", async () => {
       const h = await harness({ startMs: BEFORE_FIRST_SLOT });
       await h.service.setFramingPosition(h.signal);
-      const reference = h.state.framingReferences("2000-01-01T00:00:00.000Z")[0];
+      const reference = h.state.framingReferences("2000-01-01T00:00:00.000Z", "")[0];
       await rm(join(h.dataDir, reference?.relative_dir ?? "missing", "frame.jpg"));
       await runAt(h, [0]);
       assert.equal(checks(h)[0]?.status, "unsure");

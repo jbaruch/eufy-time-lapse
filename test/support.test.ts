@@ -583,8 +583,21 @@ describe("State framing checks", () => {
     state.recordFramingCheck(check("old", "2026-10-01T15:00:01.000Z", "on_target"));
     state.recordFramingCheck(check("older", "2026-09-01T15:00:01.000Z", "on_target"));
     state.recordFramingCheck(check("bad", "2026-11-03T15:00:01.000Z", "off_target"));
-    assert.deepEqual(state.framingReferences("2026-11-01T00:00:00.000Z").map((row) => row.capture_id), ["old"]);
-    assert.deepEqual(state.framingReferences("2026-09-15T00:00:00.000Z").map((row) => row.capture_id), ["old"]);
+    assert.deepEqual(state.framingReferences("2026-11-01T00:00:00.000Z", "").map((row) => row.capture_id), ["old"]);
+    assert.deepEqual(state.framingReferences("2026-09-15T00:00:00.000Z", "").map((row) => row.capture_id), ["old"]);
+    await done();
+  });
+
+  it("offers nothing from before the position was saved, however good", async () => {
+    const { state, done } = await opened();
+    state.insertCapture(capture("old-view", "2026-11-02T15:00:00.000Z"));
+    state.insertCapture(capture("new-view", "2026-11-03T15:00:00.000Z"));
+    state.recordFramingCheck(check("old-view", "2026-11-02T15:00:01.000Z", "on_target"));
+    state.recordFramingCheck(check("new-view", "2026-11-03T15:00:01.000Z", "on_target"));
+    const saved = "2026-11-03T15:00:00.000Z";
+    assert.deepEqual(state.framingReferences("2026-11-01T00:00:00.000Z", saved).map((row) => row.capture_id), ["new-view"]);
+    assert.deepEqual(state.framingReferences("2026-11-10T00:00:00.000Z", saved).map((row) => row.capture_id), ["new-view"], "nor as the one of any age");
+    assert.deepEqual(state.framingReferences("2026-11-10T00:00:00.000Z", "2026-11-04T00:00:00.000Z"), []);
     await done();
   });
 

@@ -167,7 +167,7 @@ export interface BatteryRow {
   telemetry_json: string;
 }
 
-export type FlagName = "operator_paused" | "battery_paused" | "battery_override" | "auth_required" | "first_started_at" | "camera_read_failures" | "login_renewal_tried_at" | "framing_position_id" | "framing_returned_at";
+export type FlagName = "operator_paused" | "battery_paused" | "battery_override" | "auth_required" | "first_started_at" | "camera_read_failures" | "login_renewal_tried_at" | "framing_position_id" | "framing_position_saved_at" | "framing_returned_at";
 
 export type FramingCheckStatus = "on_target" | "off_target" | "unsure";
 
@@ -446,11 +446,14 @@ export class State {
     return this.one<FramingCheckRow>("SELECT * FROM framing_checks ORDER BY checked_at DESC, rowid DESC LIMIT 1");
   }
 
-  /** Good frames since a time, or else the newest one of any age, so a long stop doesn't leave nothing to compare with. */
-  framingReferences(since: string): FramingReference[] {
-    const query = "SELECT c.capture_id, c.relative_dir, c.frame_received_at FROM framing_checks f JOIN captures c ON c.capture_id = f.capture_id WHERE f.status = 'on_target'";
-    const recent = this.all<FramingReference>(`${query} AND c.frame_received_at >= ? ORDER BY c.frame_received_at`, since);
-    return recent.length > 0 ? recent : this.all<FramingReference>(`${query} ORDER BY c.frame_received_at DESC LIMIT 1`);
+  /**
+   * Good frames since a time, or else the newest one of any age, so a long stop doesn't leave nothing to compare with.
+   * Nothing from before the position was saved, however good: those frames show another view.
+   */
+  framingReferences(since: string, positionSavedAt: string): FramingReference[] {
+    const query = "SELECT c.capture_id, c.relative_dir, c.frame_received_at FROM framing_checks f JOIN captures c ON c.capture_id = f.capture_id WHERE f.status = 'on_target' AND c.frame_received_at >= ?";
+    const recent = this.all<FramingReference>(`${query} AND c.frame_received_at >= ? ORDER BY c.frame_received_at`, positionSavedAt, since);
+    return recent.length > 0 ? recent : this.all<FramingReference>(`${query} ORDER BY c.frame_received_at DESC LIMIT 1`, positionSavedAt);
   }
 
   /** Off-target verdicts since the last on-target one. Unsure neither adds to them nor ends them. */
