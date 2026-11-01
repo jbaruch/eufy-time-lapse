@@ -179,6 +179,12 @@ function isTransientApiError(error: unknown): error is MegaApiError {
   return status === undefined || status >= 500 || status === 408 || status === 429;
 }
 
+/** How the SDK rejects when its signal fires: the signal's own reason, a DOMException, or a plain "aborted". */
+function isAbortRejection(error: unknown, signal: AbortSignal): boolean {
+  if (error === signal.reason) return true;
+  return error instanceof Error && (error.name === "AbortError" || error.message === "aborted");
+}
+
 function isCameraError(error: unknown): error is Error {
   return (
     error instanceof StationUnreachableError ||
@@ -340,7 +346,8 @@ export class MegaAdapter implements CameraAdapter {
   }
 
   private failureFrom(error: unknown, phase: FailurePhase, signal: AbortSignal): CaptureFailure {
-    if (signal.aborted) {
+    // Only a failure that's about the abort counts as one. A bug that happens to land after the deadline is still a bug.
+    if (signal.aborted && (isAbortRejection(error, signal) || isCameraError(error))) {
       if ((signal.reason as AbortCause) === "terminated") return new CaptureFailure("aborted", phase, "Stopped by a termination signal.", { cause: error });
       return phase === "connect"
         ? new CaptureFailure("camera_unreachable", phase, "No P2P connection to the camera before the attempt deadline.", { cause: error })
@@ -407,13 +414,17 @@ export class MegaAdapter implements CameraAdapter {
       session.codec = codecName(frame.codec);
       session.reportedWidth = frame.width;
       session.reportedHeight = frame.height;
+      // The stream can still deliver after it has stopped. Writing then would be an error with nobody listening.
+      if (video.writableEnded || video.destroyed) return;
       video.write(frame.data);
       if (frame.keyframe) {
         const size = codedSize ?? { width: frame.width, height: frame.height };
         for (const listener of keyframeListeners) listener(size);
       }
     });
-    stream.on("audio", (frame) => audio.write(frame.data));
+    stream.on("audio", (frame) => {
+      if (!audio.writableEnded && !audio.destroyed) audio.write(frame.data);
+    });
     stream.on("stop", () => {
       video.end();
       audio.end();

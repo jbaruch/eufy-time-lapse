@@ -659,7 +659,8 @@ export class CaptureService {
     await this.alerts.set("storage_full", input.diskFreeMb <= storage.min_free_disk_mb, "capture paused: the disk is nearly full");
     await this.alerts.set("session_budget", sessionBudgetSpent(input, this.config), "capture paused: today's camera-contact budget is spent");
     await this.alerts.set("data_budget", dataBudgetSpent(input, this.config), "capture paused: this month's data budget is spent");
-    await this.alerts.set("battery_warning", percent !== null && percent < battery.warn_below_percent, `battery is at ${percent ?? "unknown"}%`);
+    // An unknown reading says nothing either way, so it can't call a low battery recovered.
+    if (percent !== null) await this.alerts.set("battery_warning", percent < battery.warn_below_percent, `battery is at ${percent}%`);
     // With no budget there's nothing to warn about, including a warning left from when there was one.
     const used = this.state.monthBytes(localDate.slice(0, 7));
     const budget = traffic.monthly_budget_mb;

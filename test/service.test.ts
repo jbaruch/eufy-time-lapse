@@ -356,6 +356,19 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("doesn't call a low battery recovered just because the next reading is unknown", async () => {
+      let camera = reading(30);
+      const h = await harness({ camera });
+      await runAt(h, [0]);
+      assert.ok(h.notices.some((notice) => notice.includes("battery is at 30%")));
+      camera = reading(30, null);
+      h.adapter.setCamera(camera);
+      await runAt(h, [60]);
+      assert.equal(h.notices.some((notice) => notice.includes("recovered") && notice.includes("battery")), false, h.notices.join("; "));
+      assert.notEqual(h.state.getAlert("battery_warning"), undefined);
+      h.state.close();
+    });
+
     it("treats a reading of unknown age as unknown, however good it looks", async () => {
       const h = await harness({ camera: reading(100, null) });
       await runAt(h, [5]);

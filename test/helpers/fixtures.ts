@@ -73,6 +73,11 @@ export class MockAdapter implements CameraAdapter {
     this.behavior = behavior;
   }
 
+  /** The camera a later discovery should report, for tests of a reading that changes. */
+  setCamera(camera: CameraInfo): void {
+    this.behavior.camera = camera;
+  }
+
   async authenticate(): Promise<AuthState> {
     if (this.behavior.authFailure !== undefined) throw this.behavior.authFailure();
     return this.behavior.auth?.shift() ?? { status: "authenticated" };

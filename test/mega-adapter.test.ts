@@ -685,3 +685,49 @@ describe("isProgrammingError", () => {
     });
   }
 });
+
+describe("MegaAdapter, when a try's deadline and a failure land together", () => {
+  it("lets a bug through even after the deadline, rather than calling it a timeout", async () => {
+    const { client, adapter } = setup();
+    client.connect = async () => {
+      throw new RangeError("a bug that raced the deadline");
+    };
+    await assert.rejects(adapter.openLiveSession(SERIAL, abortedWith("deadline")), RangeError);
+    await adapter.shutdown();
+  });
+
+  for (const [name, rejection] of [
+    ["the signal's own reason", "deadline"],
+    ["a DOMException", new DOMException("P2P station wait aborted", "AbortError")],
+    ['a plain "aborted"', new Error("aborted")],
+    ["a camera failure", new StationUnreachableError("SN", 45000)],
+  ] as const) {
+    it(`takes ${name} after the deadline as the deadline`, async () => {
+      const { client, adapter } = setup();
+      client.connect = async () => {
+        throw rejection;
+      };
+      await assert.rejects(adapter.openLiveSession(SERIAL, abortedWith("deadline")), (error: CaptureFailure) => error.reason === "camera_unreachable" && /before the attempt deadline/.test(error.message));
+      await adapter.shutdown();
+    });
+  }
+});
+
+describe("MegaAdapter, when frames arrive after the stream has stopped", () => {
+  it("ignores them, instead of raising an error nobody is listening for", async () => {
+    const { client, adapter } = setup();
+    const stream = new FakeStream();
+    client.device = fakeDevice({}, stream);
+    const session = await adapter.openLiveSession(SERIAL, openSignal());
+    const errors: Error[] = [];
+    session.video.on("error", (error: Error) => errors.push(error));
+    session.video.resume();
+    session.audio.resume();
+    stream.stop();
+    stream.emit("video", { data: Buffer.from([1]), codec: "h265", width: 3840, height: 2160, keyframe: true });
+    stream.emit("audio", { data: Buffer.from([1]) });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(errors, []);
+    await adapter.shutdown();
+  });
+});
