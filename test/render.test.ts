@@ -115,7 +115,7 @@ describe("render", () => {
 
   /** Stores a capture's record beside its frame and in the database, as the service does. */
   async function keep(target: State, row: CaptureRow): Promise<void> {
-    const metadata = storedMetadata({ project_id: OWNER.projectId, camera_id: OWNER.cameraId, capture_id: row.capture_id, slot_id: row.slot_id, kind: row.kind, local_date: row.local_date, frame_received_at: row.frame_received_at, width: row.width, height: row.height, jpeg_bytes: row.jpeg_bytes, sha256: row.sha256, quality_status: row.quality_status });
+    const metadata = storedMetadata({ project_id: OWNER.projectId, camera_id: OWNER.cameraId, capture_id: row.capture_id, slot_id: row.slot_id, kind: row.kind, local_date: row.local_date, frame_received_at: row.frame_received_at, width: row.width, height: row.height, jpeg_bytes: row.jpeg_bytes, sha256: row.sha256, quality_status: row.quality_status, schedule_revision: row.slot_id === null ? null : "revision-one", scheduled_at_utc: row.slot_id === null ? null : "2026-05-01T13:00:00.000Z", every_minutes: row.slot_id === null ? null : 5 });
     await writeFile(join(dir.path, row.relative_dir, "metadata.json"), JSON.stringify(metadata));
     target.insertCapture(row);
   }

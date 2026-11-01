@@ -733,9 +733,9 @@ describe("CaptureService", () => {
     const SCHEDULED_AT = "2026-05-01T13:00:00.000Z";
     const STORED_SLOT = `construction/site-overview/${SCHEDULED_AT}`;
     const STORED_REVISION = "revision-one";
-    const metadataFor = (captureId: string, overrides: Record<string, unknown> = {}) => storedMetadata({ capture_id: captureId, jpeg_bytes: FRAME.length, sha256: HASH, ...overrides });
+    const metadataFor = (captureId: string, overrides: Record<string, unknown> = {}) => storedMetadata({ capture_id: captureId, jpeg_bytes: FRAME.length, sha256: HASH, every_minutes: null, ...overrides });
 
-    const scheduledFor = (captureId: string, overrides: Record<string, unknown> = {}) => metadataFor(captureId, { kind: "scheduled", slot_id: STORED_SLOT, schedule_revision: STORED_REVISION, scheduled_at_utc: SCHEDULED_AT, frame_received_at: "2026-05-01T13:00:12.000Z", ...overrides });
+    const scheduledFor = (captureId: string, overrides: Record<string, unknown> = {}) => metadataFor(captureId, { kind: "scheduled", slot_id: STORED_SLOT, schedule_revision: STORED_REVISION, scheduled_at_utc: SCHEDULED_AT, every_minutes: 5, frame_received_at: "2026-05-01T13:00:12.000Z", ...overrides });
 
     async function spooled(h: { dataDir: string }, captureId: string, metadata: string, frame: Buffer | null = FRAME): Promise<void> {
       const directory = join(h.dataDir, "spool", "construction", "site-overview", "2026", "05", "01", captureId);
@@ -1090,6 +1090,8 @@ describe("CaptureService", () => {
       ["metadata with another receive time", async (directory) => editMetadata(directory, { frame_received_at: "2026-07-01T13:00:09.000Z" })],
       ["metadata that isn't JSON", async (directory) => writeFile(join(directory, "metadata.json"), "{ nope")],
       ["metadata claiming a retained frame", async (directory) => editMetadata(directory, { retained: true })],
+      ["metadata with a cleanup status that doesn't exist", async (directory) => editMetadata(directory, { cleanup_status: "probably fine" })],
+      ["metadata that isn't consistent with itself", async (directory) => editMetadata(directory, { every_minutes: null })],
       ["metadata that's lost part of its record", async (directory) => editMetadata(directory, { attempt_id: undefined })],
       ["a frame that can't be read", async (directory) => { await rm(join(directory, "frame.jpg")); await mkdir(join(directory, "frame.jpg")); }],
       ["a frame linked in from elsewhere", async (directory) => { const away = `${directory}-away.jpg`; await rename(join(directory, "frame.jpg"), away); await symlink(away, join(directory, "frame.jpg")); }],
@@ -1432,7 +1434,7 @@ describe("CaptureService", () => {
   });
 
   describe("parseCaptureMetadata", () => {
-    const good = storedMetadata({ kind: "scheduled", slot_id: "slot", schedule_revision: "revision-one", scheduled_at_utc: "2026-05-01T13:00:00.000Z" });
+    const good = storedMetadata({ kind: "scheduled", slot_id: "slot", schedule_revision: "revision-one", scheduled_at_utc: "2026-05-01T13:00:00.000Z", every_minutes: 5 });
 
     it("accepts what this build wrote", () => {
       assert.equal(parseCaptureMetadata(JSON.stringify(good))?.capture_id, "id");
@@ -1445,6 +1447,18 @@ describe("CaptureService", () => {
       ["an unknown quality", JSON.stringify({ ...good, quality_status: "great" })],
       ["a slot id of the wrong type", JSON.stringify({ ...good, slot_id: 5 })],
       ["an empty capture id", JSON.stringify({ ...good, capture_id: "" })],
+      ["a manual frame with a slot", JSON.stringify(storedMetadata({ slot_id: "slot" }))],
+      ["a manual frame with a schedule revision", JSON.stringify(storedMetadata({ schedule_revision: "revision-one" }))],
+      ["a manual frame with a scheduled time", JSON.stringify(storedMetadata({ scheduled_at_utc: "2026-05-01T13:00:00.000Z", every_minutes: null }))],
+      ["a manual frame with a tier", JSON.stringify(storedMetadata({ every_minutes: 5 }))],
+      ["a scheduled frame missing its slot", JSON.stringify({ ...good, slot_id: null })],
+      ["a scheduled frame missing its tier", JSON.stringify({ ...good, every_minutes: null })],
+      ["a cleanup status that doesn't exist", JSON.stringify({ ...good, cleanup_status: "probably fine" })],
+      ["a connection path that doesn't exist", JSON.stringify({ ...good, connection_path: "by mule" })],
+      ["a battery above 100 percent", JSON.stringify({ ...good, battery_percent: 101 })],
+      ["a tier of no minutes", JSON.stringify({ ...good, every_minutes: 0 })],
+      ["a frame received before it was asked for", JSON.stringify({ ...good, request_started_at: "2026-05-01T14:00:00.000Z" })],
+      ["a stream started before it was asked for", JSON.stringify({ ...good, stream_started_at: "2026-05-01T12:00:00.000Z" })],
       ["only the fields recovery reads", JSON.stringify({ schema_version: 1, capture_id: "id", project_id: "construction", camera_id: "site-overview", slot_id: "slot", schedule_revision: "revision-one", scheduled_at_utc: "2026-05-01T13:00:00.000Z", kind: "scheduled", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 10, sha256: "a".repeat(64), quality_status: "ok" })],
       ["no attempt id", JSON.stringify({ ...good, attempt_id: undefined })],
       ["no capture session", JSON.stringify({ ...good, capture_session_id: undefined })],

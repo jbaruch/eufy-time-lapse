@@ -69,6 +69,7 @@ const anyText: Check = (value) => typeof value === "string";
 const time: Check = (value) => typeof value === "string" && !Number.isNaN(Date.parse(value));
 const amount: Check = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
 const positiveWhole: Check = (value) => Number.isInteger(value) && (value as number) > 0;
+const percentage: Check = (value) => typeof value === "number" && value >= 0 && value <= 100;
 const orNull = (check: Check): Check => (value) => value === null || check(value);
 const oneOf = (...choices: readonly unknown[]): Check => (value) => choices.includes(value);
 
@@ -99,7 +100,7 @@ const METADATA_SHAPE: Record<keyof CaptureMetadata, Check> = {
   adapter_version: text,
   camera_firmware: orNull(anyText),
   connection_type: oneOf("cellular", "wifi", null),
-  connection_path: orNull(anyText),
+  connection_path: oneOf("direct", "relay", null),
   cellular_operator: orNull(anyText),
   width: positiveWhole,
   height: positiveWhole,
@@ -110,18 +111,27 @@ const METADATA_SHAPE: Record<keyof CaptureMetadata, Check> = {
   attempt_count: positiveWhole,
   connect_ms: orNull(amount),
   session_ms: amount,
-  cleanup_status: text,
+  cleanup_status: oneOf("ok", "timeout", "error"),
   cleanup_detail: orNull(anyText),
-  battery_percent: orNull(amount),
+  battery_percent: orNull(percentage),
   battery_observed_at: orNull(time),
   battery_note: orNull(anyText),
-  every_minutes: orNull(amount),
+  every_minutes: orNull(positiveWhole),
   media_video_bytes: amount,
   media_audio_bytes: amount,
   traffic_measurement_basis: text,
 };
 
-/** The stored record, or null if it isn't a version and complete shape this build understands. */
+/** What holds between fields: a manual frame has no schedule and a scheduled one has all of it, and nothing arrives before it was asked for. */
+function fieldsAgree(record: CaptureMetadata): boolean {
+  const schedule = [record.slot_id, record.schedule_revision, record.scheduled_at_utc, record.every_minutes];
+  const consistentKind = record.kind === "manual" ? schedule.every((value) => value === null) : schedule.every((value) => value !== null);
+  const requestedAt = Date.parse(record.request_started_at);
+  const streamInOrder = record.stream_started_at === null || Date.parse(record.stream_started_at) >= requestedAt;
+  return consistentKind && streamInOrder && Date.parse(record.frame_received_at) >= requestedAt;
+}
+
+/** The stored record, or null if it isn't a version, complete shape and set of values this build writes. */
 export function parseCaptureMetadata(content: string): CaptureMetadata | null {
   let value: unknown;
   try {
@@ -132,7 +142,8 @@ export function parseCaptureMetadata(content: string): CaptureMetadata | null {
   }
   if (typeof value !== "object" || value === null) return null;
   const record = value as Record<string, unknown>;
-  return Object.entries(METADATA_SHAPE).every(([field, check]) => check(record[field])) ? (record as unknown as CaptureMetadata) : null;
+  if (!Object.entries(METADATA_SHAPE).every(([field, check]) => check(record[field]))) return null;
+  return fieldsAgree(record as unknown as CaptureMetadata) ? (record as unknown as CaptureMetadata) : null;
 }
 
 /** A name that can only be one directory. Dots and separators are how a stored value climbs out of the spool. */

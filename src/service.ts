@@ -171,9 +171,8 @@ export class CaptureService {
 
   /** What a frame's own record can show about its claim on a slot: a manual frame has none, and a scheduled one claims its own time's, after that time. */
   private claimIsWellFormed(metadata: CaptureMetadata): boolean {
-    const { slot_id: slotId, schedule_revision: revision, scheduled_at_utc: scheduledAt } = metadata;
-    if (metadata.kind === "manual") return slotId === null && revision === null && scheduledAt === null;
-    if (slotId === null || revision === null || scheduledAt === null) return false;
+    const { slot_id: slotId, scheduled_at_utc: scheduledAt } = metadata;
+    if (slotId === null || scheduledAt === null) return true;
     if (slotId !== `${this.config.project.id}/${this.config.camera.id}/${scheduledAt}`) return false;
     const receivedAt = Date.parse(metadata.frame_received_at);
     return receivedAt >= Date.parse(scheduledAt) && receivedAt <= this.now().getTime();
