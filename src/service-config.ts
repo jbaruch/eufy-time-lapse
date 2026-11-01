@@ -56,6 +56,7 @@ export const DEFAULT_SERVICE_CONFIG: ServiceConfig = {
   capture: {
     acquisition_timeout_seconds: 30,
     cleanup_timeout_seconds: 10,
+    // Two, so exposure has settled after the step up, and one bad frame can't cost the shot.
     target_keyframes: 2,
     max_attempts: 3,
     retry_delay_seconds: 5,

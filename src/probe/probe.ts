@@ -5,8 +5,21 @@ import type { CameraAdapter } from "../adapters/adapter.ts";
 import { abortableSleep, captureSlot } from "../capture/slot.ts";
 import { evaluateProbe, maskSerial, REPORT_SCHEMA_VERSION } from "./report.ts";
 import type { CameraLink, ProbeAttempt, ProbeReport } from "./report.ts";
+import type { ServiceConfig } from "../service-config.ts";
 
 export const FRAME_POLICY = "last keyframe at the stream's highest resolution, never rescaled; all keyframes kept for review";
+
+/** The service's own capture settings, so a check tests what production will do. */
+export function probeCaptureOptions(capture: ServiceConfig["capture"]): Pick<ProbeOptions, "acquisitionTimeoutMs" | "cleanupTimeoutMs" | "targetKeyframes" | "maxTries" | "retryDelayMs" | "slotDeadlineMs"> {
+  return {
+    acquisitionTimeoutMs: capture.acquisition_timeout_seconds * 1000,
+    cleanupTimeoutMs: capture.cleanup_timeout_seconds * 1000,
+    targetKeyframes: capture.target_keyframes,
+    maxTries: capture.max_attempts,
+    retryDelayMs: capture.retry_delay_seconds * 1000,
+    slotDeadlineMs: capture.slot_deadline_seconds * 1000,
+  };
+}
 
 export interface ProbeOptions {
   adapter: CameraAdapter;
