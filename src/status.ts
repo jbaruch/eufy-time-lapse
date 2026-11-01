@@ -83,7 +83,8 @@ export function summarizeAttempts(attempts: AttemptRow[]): Reliability {
     entry.average_connect_ms = total.connects > 0 ? Math.round(total.connect / total.connects) : null;
     entry.average_session_ms = total.sessions > 0 ? Math.round(total.session / total.sessions) : null;
   }
-  const firstTries = finished.filter((attempt) => !attempt.attempt_id.includes("-retry-"));
+  // Scheduled slots' first tries only, the same as the drift alert, so the two can't disagree. A reservation was never a try.
+  const firstTries = finished.filter((attempt) => attempt.slot_id !== null && !attempt.attempt_id.includes("-retry-") && !attempt.attempt_id.startsWith("reservation-"));
   const firstTrySuccesses = firstTries.filter((attempt) => attempt.status === "captured").length;
   return {
     tries: finished.length,

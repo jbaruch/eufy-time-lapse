@@ -282,6 +282,14 @@ export class State {
     return this.all<SlotRow>("SELECT * FROM slots WHERE state = 'running'");
   }
 
+  /**
+   * A scheduled capture's reservation that's still open at startup belongs to a process that's gone. It stays charged, because
+   * nothing shows what it cost, but it shouldn't read as running. A manual one could be another process's, so that's left be.
+   */
+  closeInterruptedReservations(): void {
+    this.db.prepare("UPDATE attempts SET status = 'failed', reason = 'unknown_after_crash', cleanup_status = 'unknown_after_crash' WHERE status = 'running' AND slot_id IS NOT NULL").run();
+  }
+
   /** A slot left running means the process died mid-capture. Whether the camera connection closed is unknowable. */
   markInterruptedSlots(): SlotRow[] {
     const rows = this.all<SlotRow>("SELECT * FROM slots WHERE state = 'running'");
@@ -392,7 +400,7 @@ export class State {
 
   /** Scheduled slots' first tries, newest first. A retry's attempt id carries a -retry- suffix, and a manual capture has no slot. */
   recentFirstTries(limit: number): AttemptRow[] {
-    return this.all<AttemptRow>("SELECT * FROM attempts WHERE slot_id IS NOT NULL AND attempt_id NOT LIKE '%-retry-%' AND status != 'running' ORDER BY started_at DESC LIMIT ?", limit);
+    return this.all<AttemptRow>("SELECT * FROM attempts WHERE slot_id IS NOT NULL AND attempt_id NOT LIKE '%-retry-%' AND attempt_id NOT LIKE 'reservation-%' AND status != 'running' ORDER BY started_at DESC LIMIT ?", limit);
   }
 
   /** Scheduled slots whose time has come, newest first. Grid slots a battery tier passed over don't count as outcomes here. */

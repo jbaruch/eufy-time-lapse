@@ -337,7 +337,7 @@ export async function recoverAttempt(options: Pick<AcquireOptions, "outputDir" |
     video: { reported_codec: pending.codec, reported_width: null, reported_height: null, reported_fps: null, actual_codec: null, actual_width: null, actual_height: null },
     freshness: { source: "live_p2p", retained: false, basis: FRESHNESS_BASIS, cold_connection: pending.cold_connection },
     traffic: { video_bytes: pending.video_bytes, audio_bytes: pending.audio_bytes, basis: TRAFFIC_BASIS },
-    cleanup: { status: "unknown_after_crash", detail: "the process died before teardown finished" },
+    cleanup: { status: "unknown_after_crash", detail: "the attempt ended before its teardown's outcome was recorded" },
     connect_retries: pending.connect_retries,
     connection_path: pending.connection_path,
     stream_stop: pending.stream_stop,

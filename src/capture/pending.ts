@@ -19,8 +19,8 @@ export interface PendingCapture {
   stream_stop: "target_reached" | "deadline" | "stream_ended";
   connect_ms: number;
   connect_retries: number;
-  connection_path: "direct" | "relay" | null;
-  cold_connection: boolean | null;
+  connection_path: "direct" | "relay";
+  cold_connection: boolean;
   codec: "h264" | "h265" | "unknown";
   video_bytes: number;
   audio_bytes: number;
@@ -51,8 +51,8 @@ function isPendingCapture(value: unknown): value is PendingCapture {
     ["connect_ms", "connect_retries", "audio_bytes", "video_bytes"].every(isCount) &&
     (record.video_bytes as number) > 0 &&
     (record.stream_stop === "target_reached" || record.stream_stop === "deadline" || record.stream_stop === "stream_ended") &&
-    (record.connection_path === "direct" || record.connection_path === "relay" || record.connection_path === null) &&
-    (record.cold_connection === true || record.cold_connection === false || record.cold_connection === null) &&
+    (record.connection_path === "direct" || record.connection_path === "relay") &&
+    typeof record.cold_connection === "boolean" &&
     (record.codec === "h264" || record.codec === "h265" || record.codec === "unknown")
   );
 }

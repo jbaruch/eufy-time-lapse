@@ -121,6 +121,7 @@ export class CaptureService {
       this.state.addEvent("slot_interrupted", slot.slot_id);
       this.options.log(`slot ${slot.local_date} ${slot.local_time} was interrupted by a restart; marked missed`);
     }
+    this.state.closeInterruptedReservations();
     await this.pruneDiagnostics();
   }
 
@@ -240,39 +241,46 @@ export class CaptureService {
    */
   private async recoverInterruptedSlots(): Promise<void> {
     const lost: string[] = [];
-    for (const slot of this.state.runningSlots()) {
-      // A record has to say which tier it ran at, and this slot never got as far as choosing.
-      if (slot.every_minutes === null) continue;
-      const workKey = workKeyFor(slot);
-      // What's on disk, not what the setting says now: it may have been lowered since these tries ran.
-      const tries = await this.tryDirectories(workKey);
-      const recovered: RecoveredAttempt[] = [];
-      for (const attemptId of tries) {
-        const outcome = await recoverAttempt({ outputDir: join(this.options.dataDir, "work", attemptId), minWidth: this.options.minWidth, minHeight: this.options.minHeight });
-        if (outcome.kind === "recovered") {
-          recovered.push(outcome.attempt);
-        } else if (outcome.kind === "unrecoverable") {
-          lost.push(`${slot.local_date} ${slot.local_time}`);
-          this.state.addEvent("capture_unrecoverable", `${attemptId}: ${outcome.reason}`);
-          this.options.log(`${slot.local_date} ${slot.local_time}: couldn't recover the frame a crash interrupted: ${outcome.reason}. Its files stay in work/${attemptId} until they're pruned.`);
-        }
+    for (const slot of this.state.runningSlots()) await this.recoverSlot(slot, lost);
+    await this.syncUnrecoverableAlert(lost);
+  }
+
+  private async syncUnrecoverableAlert(lost: string[]): Promise<void> {
+    await this.alerts.set("capture_unrecoverable", lost.length > 0, `${lost.length} tries that were interrupted couldn't be recovered, starting with ${lost[0] ?? ""}. They count as missed, and the log says why`);
+  }
+
+  /** Finishes one interrupted slot from what its tries left on disk, and answers whether that got it a frame. */
+  private async recoverSlot(slot: SlotRow, lost: string[]): Promise<boolean> {
+    // A record has to say which tier it ran at, and this slot never got as far as choosing.
+    if (slot.every_minutes === null) return false;
+    // What's on disk, not what the setting says now: it may have been lowered since these tries ran.
+    const tries = await this.tryDirectories(workKeyFor(slot));
+    const recovered: RecoveredAttempt[] = [];
+    for (const attemptId of tries) {
+      const outcome = await recoverAttempt({ outputDir: join(this.options.dataDir, "work", attemptId), minWidth: this.options.minWidth, minHeight: this.options.minHeight });
+      if (outcome.kind === "recovered") {
+        recovered.push(outcome.attempt);
+      } else if (outcome.kind === "unrecoverable") {
+        lost.push(`${slot.local_date} ${slot.local_time}`);
+        this.state.addEvent("capture_unrecoverable", `${attemptId}: ${outcome.reason}`);
+        this.options.log(`${slot.local_date} ${slot.local_time}: couldn't recover the frame that was interrupted: ${outcome.reason}. Its files stay in work/${attemptId} until they're pruned.`);
       }
-      const [first] = recovered;
-      if (first === undefined) continue;
-      const chosen = chooseBest(recovered.map((attempt) => attempt.record));
-      // Before the frame, as any capture does. Dying after this finds the same tries again, and settling them twice changes
-      // nothing. Dying after the publish leaves a frame that adoption finishes, and by then nothing is left to settle.
-      this.settleRecoveredTries(slot, tries, recovered);
-      const captureId = randomUUID();
-      const relativeDir = await this.publish(captureId, chosen, tries.length, { adapter: first.adapter, kind: "scheduled", slot, camera: { firmware: null }, reading: null, everyMinutes: slot.every_minutes });
-      this.state.inTransaction(() => {
-        this.state.setSlot(slot.slot_id, chosen.status === "captured" ? "captured" : "captured_degraded", { captureId, everyMinutes: slot.every_minutes });
-        this.state.addEvent("capture_recovered", captureId);
-      });
-      this.options.log(`${slot.local_date} ${slot.local_time}: recovered the frame a crash interrupted (${relativeDir})`);
-      for (const attempt of recovered) await rm(join(this.options.dataDir, "work", attempt.record.attempt_id), { recursive: true, force: true });
     }
-    await this.alerts.set("capture_unrecoverable", lost.length > 0, `${lost.length} tries a crash interrupted couldn't be recovered, starting with ${lost[0] ?? ""}. They count as missed, and the log says why`);
+    // Before the frame, as any capture does. Dying after this finds the same tries again, and settling them twice changes
+    // nothing. Dying after the publish leaves a frame that adoption finishes, and by then nothing is left to settle.
+    if (tries.length > 0) this.settleRecoveredTries(slot, tries, recovered);
+    const [first] = recovered;
+    if (first === undefined) return false;
+    const chosen = chooseBest(recovered.map((attempt) => attempt.record));
+    const captureId = randomUUID();
+    const relativeDir = await this.publish(captureId, chosen, tries.length, { adapter: first.adapter, kind: "scheduled", slot, camera: { firmware: null }, reading: null, everyMinutes: slot.every_minutes });
+    this.state.inTransaction(() => {
+      this.state.setSlot(slot.slot_id, chosen.status === "captured" ? "captured" : "captured_degraded", { captureId, everyMinutes: slot.every_minutes });
+      this.state.addEvent("capture_recovered", captureId);
+    });
+    this.options.log(`${slot.local_date} ${slot.local_time}: recovered the frame that was interrupted (${relativeDir})`);
+    for (const attempt of recovered) await rm(join(this.options.dataDir, "work", attempt.record.attempt_id), { recursive: true, force: true });
+    return true;
   }
 
   /** The tries a slot started, in order. Each one makes its own directory before anything else. */
@@ -591,9 +599,17 @@ export class CaptureService {
         return;
       }
       if (!(error instanceof CameraLockLostError)) throw error;
-      this.state.setSlot(slot.slot_id, "missed", { reason: "lock_lost", everyMinutes });
       this.state.addEvent("lock_lost", error.message);
+      // The bytes may already be safe on disk, and finishing them doesn't touch the camera, whoever has it now.
+      const lost: string[] = [];
+      const running = this.state.getSlot(slot.slot_id);
+      if (running !== undefined && (await this.recoverSlot(running, lost))) {
+        this.options.log(`${slot.local_date} ${slot.local_time}: lost the camera lock after the frame arrived, and kept the frame: ${error.message}`);
+        return;
+      }
+      this.state.setSlot(slot.slot_id, "missed", { reason: "lock_lost", everyMinutes });
       this.options.log(`${slot.local_date} ${slot.local_time}: missed: ${error.message}`);
+      await this.syncUnrecoverableAlert(lost);
       await this.syncFailureAlert();
       return;
     }
