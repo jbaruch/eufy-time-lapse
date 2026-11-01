@@ -305,6 +305,8 @@ Send one notification when an issue begins, at most one reminder per day, and on
 
 Persist the Eufy authentication session across process restarts. Do **not** initiate a full login every 15 or 60 minutes. Prefer a separate account with shared access to the camera if the chosen SDK supports shared-device access; verify this during Phase 1.
 
+A token lasts 30 days, so a run this long replaces one about every month, and that must not take a person. The SDK logs in again when Eufy rejects the token. If that fails, the adapter asks the login directly, because the SDK's error doesn't say why: only a challenge or a refusal stops captures. An outage during the login, or a second rejection inside the SDK's hold-off, is a failed try that the next try repairs.
+
 If authentication requires 2FA or CAPTCHA, pause new camera operations and expose the specific manual step needed. Do not retry logins indefinitely. Supply credentials via Docker secret files or protected environment variables; never write them to the repository, logs, manifests, or HTTP responses. Session files must be readable only by the service account.
 
 A credential gateway such as OneCLI can't hold the Eufy login: the password is ECDH-encrypted into the request body, v6 bodies are encrypted and signed, the camera traffic is UDP, and a gateway writes only headers, query, and path. Credentials sent in a plain header, such as a webhook's, can use the gateway.

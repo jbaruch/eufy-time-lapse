@@ -251,6 +251,23 @@ export class MegaAdapter implements CameraAdapter {
     return new CaptureFailure("auth_required", "auth", `Eufy login failed: ${this.scrub(error.message)}. Check the Eufy credentials, then run the login command.`, { cause: error });
   }
 
+  private manualLoginStep(cause?: Error): CaptureFailure {
+    return new CaptureFailure("auth_required", "auth", "Eufy needs a manual login step. Run the login command in a terminal.", { cause });
+  }
+
+  /**
+   * A token lasts 30 days, so this runs monthly. By now the SDK's own re-login has failed, for a reason its error
+   * doesn't give, and only a person being needed should stop captures. The login itself tells an outage from a refusal.
+   */
+  private async sessionFailure(error: SessionExpiredError, phase: FailurePhase): Promise<CaptureFailure> {
+    const retry = (detail: string): CaptureFailure => new CaptureFailure("camera_unreachable", phase, `${detail} The next try is automatic.`, { cause: error });
+    // Inside the SDK's hold-off, where another login would only trade one token for another. Waiting is the cure.
+    if (error.contended) return retry(`Eufy rejected the login token (${this.scrub(error.message)}).`);
+    const state = await this.authenticate();
+    if (state.status !== "authenticated") return this.manualLoginStep(error);
+    return retry("Eufy rejected the login token, and logging in again worked.");
+  }
+
   /** The SDK reports its relay handshake only in its logs, so the logger passes that along. */
   noteRelayUsed(): void {
     this.relayUsed = true;
@@ -293,9 +310,7 @@ export class MegaAdapter implements CameraAdapter {
   private async restoreLogin(): Promise<void> {
     if (!this.loginNeeded) return;
     const state = await this.authenticate();
-    if (state.status !== "authenticated") {
-      throw new CaptureFailure("auth_required", "auth", "Eufy needs a manual login step. Run the login command in a terminal.");
-    }
+    if (state.status !== "authenticated") throw this.manualLoginStep();
     this.loginNeeded = false;
   }
 
@@ -303,7 +318,7 @@ export class MegaAdapter implements CameraAdapter {
     try {
       return await this.client.getDevice(key);
     } catch (error) {
-      if (error instanceof SessionExpiredError) throw this.authFailure(error);
+      if (error instanceof SessionExpiredError) throw await this.sessionFailure(error, "discovery");
       if (isCameraError(error)) throw this.cloudUnreachable(error, "discovery");
       throw error;
     }
@@ -316,7 +331,7 @@ export class MegaAdapter implements CameraAdapter {
     try {
       listed = await this.client.getDevices();
     } catch (error) {
-      if (error instanceof SessionExpiredError) throw this.authFailure(error);
+      if (error instanceof SessionExpiredError) throw await this.sessionFailure(error, "discovery");
       if (isCameraError(error)) throw this.cloudUnreachable(error, "discovery");
       throw error;
     }
@@ -349,7 +364,7 @@ export class MegaAdapter implements CameraAdapter {
     };
   }
 
-  private failureFrom(error: unknown, phase: FailurePhase, signal: AbortSignal): CaptureFailure {
+  private async failureFrom(error: unknown, phase: FailurePhase, signal: AbortSignal): Promise<CaptureFailure> {
     // Only a failure that's about the abort counts as one. A bug that happens to land after the deadline is still a bug.
     if (signal.aborted && (isAbortRejection(error, signal) || isCameraError(error))) {
       if ((signal.reason as AbortCause) === "terminated") return new CaptureFailure("aborted", phase, "Stopped by a termination signal.", { cause: error });
@@ -357,6 +372,7 @@ export class MegaAdapter implements CameraAdapter {
         ? new CaptureFailure("camera_unreachable", phase, "No P2P connection to the camera before the attempt deadline.", { cause: error })
         : new CaptureFailure("capture_timeout", phase, "The camera connected, but the live stream did not start before the attempt deadline.", { cause: error });
     }
+    if (error instanceof SessionExpiredError) return this.sessionFailure(error, phase);
     if (isCameraError(error)) return new CaptureFailure("camera_unreachable", phase, `${error.name}: ${this.scrub(error.message)}`, { cause: error });
     throw error;
   }
@@ -379,7 +395,7 @@ export class MegaAdapter implements CameraAdapter {
     try {
       await this.client.connectStation(cameraKey, signal);
     } catch (error) {
-      throw this.failureFrom(error, "connect", signal);
+      throw await this.failureFrom(error, "connect", signal);
     }
     const connectMs = Date.now() - startedAt;
 
@@ -387,7 +403,7 @@ export class MegaAdapter implements CameraAdapter {
     try {
       stream = await camera.live({ signal });
     } catch (error) {
-      throw this.failureFrom(error, "stream_start", signal);
+      throw await this.failureFrom(error, "stream_start", signal);
     }
     this.stream = stream;
 

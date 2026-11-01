@@ -50,10 +50,12 @@ class FakeClient implements MegaClient {
     this.sessions.set(SERIAL, {});
   };
   listError: Error | undefined;
+  loginError: Error | undefined;
   lastSeenMs: number | undefined;
 
   async login(): Promise<MegaLoginResult> {
     this.logins += 1;
+    if (this.loginError !== undefined) throw this.loginError;
     return this.loginResults.shift() ?? { status: "ok" };
   }
   async submitVerifyCode(code: string): Promise<MegaLoginResult> {
@@ -205,10 +207,69 @@ describe("MegaAdapter discovery", () => {
     await adapter.shutdown();
   });
 
-  it("asks for a login when the session is gone", async () => {
+  it("asks for a login when a finished token's replacement needs a person", async () => {
     const { client, adapter } = setup();
-    client.listError = new SessionExpiredError("needs 2FA");
+    client.listError = new SessionExpiredError("token rejected");
+    client.loginResults = [{ status: "2fa" }];
     await assert.rejects(adapter.discoverCamera(), (error: CaptureFailure) => error.reason === "auth_required");
+    await adapter.shutdown();
+  });
+
+  it("asks for a login when Eufy refuses a finished token's replacement", async () => {
+    const { client, adapter } = setup();
+    client.listError = new SessionExpiredError("token rejected");
+    client.loginError = new MegaApiError("wrong password", 26006, 401);
+    await assert.rejects(adapter.discoverCamera(), (error: CaptureFailure) => error.reason === "auth_required");
+    await adapter.shutdown();
+  });
+
+  it("carries on by itself when a finished token's replacement works", async () => {
+    const { client, adapter } = setup();
+    client.listError = new SessionExpiredError("token rejected");
+    await assert.rejects(adapter.discoverCamera(), (error: CaptureFailure) => error.reason === "camera_unreachable" && /logging in again worked/.test(error.message));
+    assert.equal(client.logins, 1);
+    client.listError = undefined;
+    assert.equal((await adapter.discoverCamera()).key, SERIAL);
+    await adapter.shutdown();
+  });
+
+  it("doesn't stop captures for an outage during a finished token's replacement", async () => {
+    const { client, adapter } = setup();
+    client.listError = new SessionExpiredError("token rejected");
+    client.loginError = new TypeError("fetch failed");
+    await assert.rejects(adapter.discoverCamera(), (error: CaptureFailure) => error.reason === "camera_unreachable");
+    await adapter.shutdown();
+  });
+
+  it("waits out the SDK's hold-off without spending a login", async () => {
+    const { client, adapter } = setup();
+    client.listError = new SessionExpiredError("token rejected again", { contended: true, retryAfterMs: 60_000 });
+    await assert.rejects(adapter.discoverCamera(), (error: CaptureFailure) => error.reason === "camera_unreachable" && /token rejected again/.test(error.message));
+    assert.equal(client.logins, 0);
+    await adapter.shutdown();
+  });
+
+  it("retries in the slot, not crashes, when a token dies during a connect", async () => {
+    const { client, adapter } = setup();
+    client.connect = async () => {
+      throw new SessionExpiredError("token rejected");
+    };
+    await assert.rejects(adapter.openLiveSession(SERIAL, openSignal()), (error: CaptureFailure) => error.reason === "camera_unreachable" && error.phase === "connect");
+    assert.equal(client.logins, 1);
+    await adapter.shutdown();
+  });
+
+  it("retries in the slot, not crashes, when a token dies during a stream start", async () => {
+    const { client, adapter } = setup();
+    client.device = fakeDevice({
+      camera: () => ({
+        live: async () => {
+          throw new SessionExpiredError("token rejected");
+        },
+      }),
+    });
+    await assert.rejects(adapter.openLiveSession(SERIAL, openSignal()), (error: CaptureFailure) => error.reason === "camera_unreachable" && error.phase === "stream_start");
+    assert.equal(client.logins, 1);
     await adapter.shutdown();
   });
 });
