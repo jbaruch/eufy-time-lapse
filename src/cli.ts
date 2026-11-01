@@ -72,7 +72,12 @@ async function commandLogin(config: AppConfig, dataDir: string, sessionDir: stri
         adapter,
         dataDir,
         ...(config.cameraSerial ? { cameraSerial: config.cameraSerial } : {}),
-        prompt: (question) => readline.question(question),
+        prompt: async (question) => {
+          if (process.stdin.isTTY !== true) {
+            throw new CaptureFailure("auth_required", "auth", "Eufy needs a code from you, and this session has no terminal. Run the login command from an interactive terminal (ssh -t).");
+          }
+          return await readline.question(question);
+        },
         log,
       }),
     );

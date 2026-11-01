@@ -167,6 +167,20 @@ describe("LegacyAdapter authentication", () => {
     });
   });
 
+  it("keeps going when only the legacy backend errors, as the library does", async () => {
+    const { client, adapter } = setup();
+    client.onConnectCall = () => {
+      client.emit("connection error", new Error("Invalid passport profile response"));
+      client.emit("connect");
+    };
+    assert.deepEqual(await adapter.authenticate(), { status: "authenticated" });
+  });
+
+  it("fails when connect() finishes with no outcome and no error", async () => {
+    const { adapter } = setup();
+    await assert.rejects(adapter.authenticate(), /finished without a result/);
+  });
+
   it("skips the login when the cloud session is already up", async () => {
     const { client, adapter } = setup();
     client.apiConnected = true;

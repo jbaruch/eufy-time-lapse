@@ -25,7 +25,7 @@ import type {
 } from "./adapter.ts";
 
 const CAMERA_MODEL_PREFIX = "T86P2";
-const AUTH_TIMEOUT_MS = 60_000;
+const AUTH_TIMEOUT_MS = 120_000;
 const CLOSE_POLL_MS = 100;
 
 const TELEMETRY_PROPERTIES = [
@@ -218,31 +218,40 @@ export class LegacyAdapter implements CameraAdapter {
     }
 
     return await new Promise<AuthState>((resolve, reject) => {
+      // The library logs in to two backends and treats the legacy one as best-effort, so a "connection
+      // error" isn't final. The login has failed only if connect() finishes without reaching an outcome.
+      let lastError: Error | undefined;
+      let settled = false;
       const onConnect = (): void => settle(() => resolve({ status: "authenticated" }));
       const onTfa = (): void => settle(() => resolve({ status: "tfa_required" }));
       const onCaptcha = (id: string, image: string): void =>
         settle(() => resolve({ status: "captcha_required", captchaId: id, captchaImage: image }));
+      const onError = (error: Error): void => {
+        lastError = error;
+      };
       const fail = (error: Error): void =>
         settle(() =>
           reject(new CaptureFailure("auth_required", "auth", `Eufy login failed: ${error.message}. Check EUFY_EMAIL, EUFY_PASSWORD and EUFY_COUNTRY, then run the login command.`, { cause: error })),
         );
       const timer = setTimeout(
-        () => fail(new Error(`no answer from the Eufy cloud within ${AUTH_TIMEOUT_MS / 1000} s`)),
+        () => fail(lastError ?? new Error(`no answer from the Eufy cloud within ${AUTH_TIMEOUT_MS / 1000} s`)),
         AUTH_TIMEOUT_MS,
       );
       const settle = (done: () => void): void => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         client.off("connect", onConnect);
         client.off("tfa request", onTfa);
         client.off("captcha request", onCaptcha);
-        client.off("connection error", fail);
+        client.off("connection error", onError);
         done();
       };
       client.on("connect", onConnect);
       client.on("tfa request", onTfa);
       client.on("captcha request", onCaptcha);
-      client.on("connection error", fail);
-      client.connect(options).catch(fail);
+      client.on("connection error", onError);
+      client.connect(options).then(() => fail(lastError ?? new Error("the login finished without a result")), fail);
     });
   }
 
@@ -259,7 +268,7 @@ export class LegacyAdapter implements CameraAdapter {
       throw new CaptureFailure(
         "camera_not_found",
         "discovery",
-        `No matching ${CAMERA_MODEL_PREFIX} on this account (it sees: ${seen}). If this is a separate account, share the camera to it from the owner account and accept the invitation.`,
+        `No matching ${CAMERA_MODEL_PREFIX} on this account (it sees: ${seen}). If this is a separate account, share the camera to it from the owner account and accept the invitation. If the eufy app already shows the camera on this account, the legacy API isn't returning it, and the next step is a different adapter.`,
       );
     }
     if (others.length > 0) {
