@@ -103,7 +103,7 @@ describe("evaluateProbe", () => {
     const expectations = [
       ["auth", /login command/],
       ["discovery", /visible to this account/],
-      ["connect", /eufy-sdk 0\.5\.0/],
+      ["connect", /TIMELAPSE_ADAPTER/],
       ["stream_start", /no video arrived/],
       ["first_media", /no video arrived/],
       ["decode", /stream\.bin/],

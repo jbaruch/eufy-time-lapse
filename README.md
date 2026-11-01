@@ -15,16 +15,20 @@ and libx265.
 
 Eufy has no official API, so this speaks its reverse-engineered protocol and needs a real account login.
 
-Use a separate Eufy account and share the camera to it from the owner account. Store its login on the
-capture host:
+The default client is [`@mega-yfue/eufy-sdk`](https://github.com/mega-yfue/eufy-sdk), which uses the same
+backend as the current eufy app. The spec's first choice, `eufy-security-client`, logged in but returned an
+empty device list, and its maintainers say the API it depends on is being shut down. Both sit behind the
+same adapter contract, and `TIMELAPSE_ADAPTER` selects one. Changing it means rerunning the probe.
+
+Use a separate Eufy account and share the camera to it from the owner account, then accept the invitation
+in the eufy app while logged in as that account. Store its login on the capture host:
 
 ```bash
 scripts/set-credentials.sh
 ```
 
 The files land in `~/.config/eufy-time-lapse/`, readable only by you, and reach the container as Docker
-secrets. Debug output from the Eufy library contains tokens, so the service leaves those logs off and
-redacts what it does log.
+secrets. Library logs are redacted before they reach disk, and login runs drop debug output entirely.
 
 **Why not OneCLI?** The client encrypts the password into the request body with a key it negotiates with
 Eufy, and the newer API encrypts and signs every body. The gateway writes only headers and query
@@ -69,7 +73,7 @@ Each run writes to `data/probe/<run-id>/`:
 | `attempt-N/frame.jpg` | The selected frame |
 | `attempt-N/keyframe-*.jpg` | Every keyframe, for judging quality after a cold start |
 | `attempt-N/stream.bin` | The raw video |
-| `library.log` | Redacted library log, with P2P at debug level |
+| `library.log` | Redacted library log at debug level, including the P2P lookup and relay steps |
 
 Exit code 0 means the probe passed. Anything else means Phase 2 stays blocked: read `verdict` in the report.
 

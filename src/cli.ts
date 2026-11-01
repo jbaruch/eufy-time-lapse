@@ -4,7 +4,9 @@ import { resolve, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { CaptureFailure } from "./adapters/adapter.ts";
+import type { CameraAdapter } from "./adapters/adapter.ts";
 import { createLegacyClient, LegacyAdapter } from "./adapters/legacy.ts";
+import { createMegaClient, MegaAdapter } from "./adapters/mega.ts";
 import { ConfigError, loadConfig } from "./config.ts";
 import type { AppConfig } from "./config.ts";
 import { CameraLockHeldError, withCameraLock } from "./lock.ts";
@@ -37,11 +39,17 @@ function log(message: string): void {
   process.stderr.write(`${new Date().toISOString()} ${message}\n`);
 }
 
-function buildAdapter(config: AppConfig, persistentDir: string, logPath: string): LegacyAdapter {
+function buildAdapter(config: AppConfig, persistentDir: string, logPath: string, debugLogs: boolean): CameraAdapter {
   const redactor = new Redactor([config.password, config.email, ...(config.cameraSerial ? [config.cameraSerial] : [])]);
   const logFile = createWriteStream(logPath, { flags: "a" });
   logFile.on("error", (error) => log(`library log unavailable (${logPath}): ${error.message}`));
   const logger = createRedactingLogger(redactor, (line) => logFile.write(line));
+  if (config.adapter === "mega") {
+    // The SDK has one log level for everything, and login traffic is the wrong place for debug output.
+    const sdkLogger = debugLogs ? logger : { ...logger, debug: () => {} };
+    const client = createMegaClient({ email: config.email, password: config.password, country: config.country, sessionDir: persistentDir, logger: sdkLogger });
+    return new MegaAdapter(client, log, (value) => redactor.addLiteral(value));
+  }
   return new LegacyAdapter(
     () =>
       createLegacyClient({
@@ -64,7 +72,7 @@ function positiveNumber(value: string | undefined, name: string, fallback: numbe
 }
 
 async function commandLogin(config: AppConfig, dataDir: string, sessionDir: string): Promise<number> {
-  const adapter = buildAdapter(config, sessionDir, join(dataDir, "login.log"));
+  const adapter = buildAdapter(config, sessionDir, join(dataDir, "login.log"), false);
   const readline = createInterface({ input: process.stdin, output: process.stderr });
   try {
     const result = await withCameraLock(join(dataDir, "camera.lock"), () =>
@@ -105,7 +113,7 @@ async function commandProbe(config: AppConfig, dataDir: string, sessionDir: stri
   const runId = new Date().toISOString().replace(/[:.]/g, "-");
   const runDir = join(dataDir, "probe", runId);
   mkdirSync(runDir, { recursive: true });
-  const adapter = buildAdapter(config, sessionDir, join(runDir, "library.log"));
+  const adapter = buildAdapter(config, sessionDir, join(runDir, "library.log"), true);
 
   const controller = new AbortController();
   const onSignal = (signal: NodeJS.Signals): void => {

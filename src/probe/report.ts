@@ -78,7 +78,7 @@ function chooseNextExperiment(criteria: ProbeVerdict["criteria"], attempts: Prob
       case "discovery":
         return "Make the camera visible to this account (share it from the owner account, or set EUFY_CAMERA_SERIAL), then rerun the probe.";
       case "connect":
-        return "P2P never connected. Read library.log for lookup and TURN results, then rerun with the @mega-yfue/eufy-sdk 0.5.0 relay as a second adapter.";
+        return "P2P never connected. Read library.log for the lookup and relay steps, then rerun with a newer SDK build or the other TIMELAPSE_ADAPTER.";
       case "stream_start":
       case "first_media":
         return "P2P connected but no video arrived. Read library.log around the stream start, check the camera's battery and signal in the app, then rerun with a longer acquisition timeout.";

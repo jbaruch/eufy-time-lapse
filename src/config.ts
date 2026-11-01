@@ -8,7 +8,10 @@ export class ConfigError extends Error {
   }
 }
 
+export type AdapterName = "mega" | "legacy";
+
 export interface AppConfig {
+  adapter: AdapterName;
   email: string;
   password: string;
   country: string;
@@ -52,6 +55,12 @@ function parseBoolean(env: NodeJS.ProcessEnv, name: string, fallback: boolean): 
   throw new ConfigError(`${name} must be "true" or "false", got "${value}".`);
 }
 
+function parseAdapter(value: string | undefined): AdapterName {
+  if (value === undefined || value === "mega") return "mega";
+  if (value === "legacy") return value;
+  throw new ConfigError(`TIMELAPSE_ADAPTER must be "mega" or "legacy", got "${value}".`);
+}
+
 function parseLink(value: string | undefined): CameraLink | null {
   if (value === undefined) return null;
   if (value === "cellular" || value === "wifi") return value;
@@ -61,6 +70,7 @@ function parseLink(value: string | undefined): CameraLink | null {
 export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
   const cameraSerial = optional(env, "EUFY_CAMERA_SERIAL");
   return {
+    adapter: parseAdapter(optional(env, "TIMELAPSE_ADAPTER")),
     email: secret(env, "EUFY_EMAIL"),
     password: secret(env, "EUFY_PASSWORD"),
     country: optional(env, "EUFY_COUNTRY") ?? "US",
