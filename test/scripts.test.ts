@@ -192,6 +192,16 @@ describe("scripts/deploy.sh", () => {
     assert.equal(await readFile(log, "utf8"), "");
   });
 
+  it("doesn't restart when the host has a stray symlink, and names it", async () => {
+    const { repo, host, log, env } = await world();
+    await writeFile(join(host, "..", "override.yaml"), "services: {}\n");
+    await symlink(join(host, "..", "override.yaml"), join(host, "compose.override.yaml"));
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /compose\.override\.yaml/);
+    assert.equal(await readFile(log, "utf8"), "");
+  });
+
   it("fails, and says where to look, when the host never reports the new revision", async () => {
     const { repo, env } = await world({ reports: false });
     const result = await bash([script, "somehost", "app"], { cwd: repo, env });

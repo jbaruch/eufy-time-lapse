@@ -74,7 +74,8 @@ main() {
   fi
 
   local present extras
-  present="$(on_host "find . -type f -not -path './data/*' -not -name .env -not -name '$MANIFEST' | sed 's|^\./||' | LC_ALL=C sort")"
+  # Everything but directories: a stray symlink such as compose.override.yaml would change the deployment just as well.
+  present="$(on_host "find . \( -path ./data -o -path ./.env -o -path './$MANIFEST' \) -prune -o ! -type d -print | sed 's|^\./||' | LC_ALL=C sort")"
   extras="$(comm -13 <(printf '%s\n' "$tracked") <(printf '%s\n' "$present"))"
   if [[ -n "$extras" ]]; then
     echo "$host has files this commit doesn't, so the service wasn't restarted. Look at them, then remove them:" >&2
