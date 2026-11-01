@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { AlertTracker, createNotifier } from "../src/alerts.ts";
+import { ConfigError } from "../src/config.ts";
 import { State } from "../src/state.ts";
 import { tempDir } from "./helpers/fixtures.ts";
 
@@ -133,6 +134,31 @@ describe("createNotifier", () => {
     assert.ok(logged.some((line) => line.includes("webhook failed")));
     assert.equal(logged.join("\n").includes("secret-token"), false);
   });
+
+  it("logs a webhook that times out", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => {
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    });
+    const logged: string[] = [];
+    await createNotifier(await urlFile("https://example.com/hook"), (message) => logged.push(message))("hello");
+    assert.ok(logged.some((line) => line.includes("webhook failed: TimeoutError")));
+  });
+
+  for (const bug of [new RangeError("a bug"), new TypeError("x is not a function")]) {
+    it(`lets a ${bug.name} that isn't a delivery failure through`, async (t) => {
+      t.mock.method(globalThis, "fetch", async () => {
+        throw bug;
+      });
+      await assert.rejects(createNotifier(await urlFile("https://example.com/hook"), () => {})("hello"), bug);
+    });
+  }
+
+  for (const [name, content] of [["isn't a URL", "secret-token"], ["isn't http", "ftp://example.com/secret-token"], ["is empty", ""]] as const) {
+    it(`refuses at startup a webhook file that ${name}, without quoting it`, async () => {
+      const path = await urlFile(content);
+      assert.throws(() => createNotifier(path, () => {}), (error: Error) => error instanceof ConfigError && /http or https URL/.test(error.message) && !error.message.includes("secret-token"));
+    });
+  }
 
   it("falls back to the log when no webhook is set", async () => {
     const logged: string[] = [];

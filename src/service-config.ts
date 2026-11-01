@@ -199,7 +199,8 @@ export function loadServiceConfig(path: string): ServiceConfig {
   try {
     parsed = JSON.parse(text);
   } catch (error) {
-    throw new ConfigError(`${path} is not valid JSON: ${(error as Error).message}`);
+    if (!(error instanceof SyntaxError)) throw error;
+    throw new ConfigError(`${path} is not valid JSON: ${error.message}`);
   }
   if (!isRecord(parsed)) throw new ConfigError(`${path} must hold a JSON object of settings. Compare it with config.example.json.`);
   const config = merge(DEFAULT_SERVICE_CONFIG, parsed, "");

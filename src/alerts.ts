@@ -1,14 +1,31 @@
 import { readFileSync } from "node:fs";
+import { ConfigError } from "./config.ts";
 import type { State } from "./state.ts";
 
 export type Notify = (text: string) => Promise<void>;
+
+/** Checked at startup, so a typo stops the service now instead of losing every alert later. Never quotes the URL, which holds a credential. */
+function readWebhookUrl(path: string): string {
+  const url = readFileSync(path, "utf8").trim();
+  const protocol = URL.canParse(url) ? new URL(url).protocol : "";
+  if (protocol !== "https:" && protocol !== "http:") {
+    throw new ConfigError(`${path} doesn't hold an http or https URL. Fix that file, or set alerts.webhook_url_file to null.`);
+  }
+  return url;
+}
+
+/** How fetch reports a network that let it down, or the timeout firing. Anything else is a bug, and should be seen. */
+function isDeliveryFailure(error: unknown): error is Error {
+  if (error instanceof TypeError) return error.message === "fetch failed";
+  return error instanceof Error && error.name === "TimeoutError";
+}
 
 /**
  * Posts to one webhook. A delivery failure only logs: it must never wake the camera or stop a capture.
  * Without a webhook, alerts go to the log.
  */
 export function createNotifier(webhookUrlFile: string | null, log: (message: string) => void): Notify {
-  const url = webhookUrlFile === null ? null : readFileSync(webhookUrlFile, "utf8").trim();
+  const url = webhookUrlFile === null ? null : readWebhookUrl(webhookUrlFile);
   return async (text) => {
     log(`ALERT ${text}`);
     if (url === null) return;
@@ -21,7 +38,7 @@ export function createNotifier(webhookUrlFile: string | null, log: (message: str
       });
       if (!response.ok) log(`alert webhook answered HTTP ${response.status}`);
     } catch (error) {
-      if (!(error instanceof Error)) throw error;
+      if (!isDeliveryFailure(error)) throw error;
       log(`alert webhook failed: ${error.name}`); // Only the name: a message can quote the URL, which holds a credential.
     }
   };
