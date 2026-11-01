@@ -76,16 +76,50 @@ function merge<T>(base: T, override: unknown, path: string): T {
   return result as T;
 }
 
+/** Ids become directory names under the data directory, so they have to stay one safe path component. */
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const WEEKDAYS: readonly Weekday[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+const MAX_PERCENT = 100;
+const MAX_PORT = 65_535;
+const MINUTES_PER_DAY = 1_440;
+
+/** Checks every setting's type and range. A config file comes from a person, so its casts prove nothing until this passes. */
 function validate(config: ServiceConfig): void {
   const fail = (message: string): never => {
     throw new ConfigError(`Invalid config: ${message}`);
   };
+  const section = (name: keyof ServiceConfig): void => {
+    if (!isRecord(config[name])) fail(`${name} must be an object.`);
+  };
+  const whole = (path: string, value: unknown, min: number, max = Number.MAX_SAFE_INTEGER): void => {
+    if (!Number.isInteger(value) || (value as number) < min || (value as number) > max) fail(`${path} must be a whole number from ${min}${max === Number.MAX_SAFE_INTEGER ? " up" : ` to ${max}`}, got ${JSON.stringify(value)}.`);
+  };
+  const positive = (path: string, value: unknown): void => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) fail(`${path} must be a number above 0, got ${JSON.stringify(value)}.`);
+  };
+  const percentage = (path: string, value: unknown): void => {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > MAX_PERCENT) fail(`${path} must be between 0 and ${MAX_PERCENT}, got ${JSON.stringify(value)}.`);
+  };
+  const fraction = (path: string, value: unknown): void => {
+    if (typeof value !== "number" || !(value > 0) || value > 1) fail(`${path} must be above 0 and at most 1, got ${JSON.stringify(value)}.`);
+  };
+  const id = (path: string, value: unknown): void => {
+    if (typeof value !== "string" || !SAFE_ID.test(value)) fail(`${path} must start with a letter or digit and hold only letters, digits, dots, dashes and underscores, got ${JSON.stringify(value)}.`);
+  };
+
+  for (const name of ["project", "camera", "schedule", "cadence", "battery", "capture", "traffic", "storage", "alerts", "http", "logging"] as const) section(name);
+
+  id("project.id", config.project.id);
+  id("camera.id", config.camera.id);
   try {
     new Intl.DateTimeFormat("en-US", { timeZone: config.project.site_time_zone });
   } catch (error) {
     if (!(error instanceof RangeError)) throw error;
     fail(`project.site_time_zone "${config.project.site_time_zone}" is not an IANA time zone.`);
   }
+
+  const { grid_minutes: grid, days } = config.schedule;
+  whole("schedule.grid_minutes", grid, 1, MINUTES_PER_DAY);
   let start = 0;
   let end = 0;
   try {
@@ -96,22 +130,56 @@ function validate(config: ServiceConfig): void {
     fail(`schedule window: ${error.message}.`);
   }
   if (start >= end) fail("schedule.window_start must be before window_end_exclusive.");
-  const { grid_minutes: grid } = config.schedule;
-  if (!Number.isInteger(grid) || grid <= 0) fail("schedule.grid_minutes must be a positive whole number.");
-  if (config.cadence.tiers.length === 0) fail("cadence.tiers must not be empty.");
-  const intervals = [...config.cadence.tiers.map((tier) => tier.every_minutes), config.cadence.unknown_battery_every_minutes];
-  for (const every of intervals) {
-    if (!Number.isInteger(every) || every <= 0 || every % grid !== 0) fail(`every interval must be a multiple of schedule.grid_minutes (${grid}), got ${every}.`);
-  }
-  const { pause_at_or_below_percent: pause, resume_at_or_above_percent: resume } = config.battery;
-  if (config.storage.keep_logs_days <= 0) fail("storage.keep_logs_days must be above 0.");
-  const { first_try_warn_percent: warnPercent, first_try_window: tryWindow } = config.alerts;
-  if (warnPercent < 0 || warnPercent > 100) fail("alerts.first_try_warn_percent must be between 0 and 100.");
-  if (!Number.isInteger(tryWindow) || tryWindow <= 0) fail("alerts.first_try_window must be a positive whole number.");
+  if (!Array.isArray(days) || days.length === 0 || days.some((day) => !WEEKDAYS.includes(day))) fail(`schedule.days must list days from ${WEEKDAYS.join(", ")}.`);
+
+  if (!Array.isArray(config.cadence.tiers) || config.cadence.tiers.length === 0) fail("cadence.tiers must not be empty.");
+  const onGrid = (path: string, every: unknown): void => {
+    if (!Number.isInteger(every) || (every as number) <= 0 || (every as number) % grid !== 0) fail(`${path}: every interval must be a multiple of schedule.grid_minutes (${grid}), got ${JSON.stringify(every)}.`);
+  };
+  config.cadence.tiers.forEach((tier, index) => {
+    if (!isRecord(tier)) fail(`cadence.tiers[${index}] must be an object.`);
+    percentage(`cadence.tiers[${index}].battery_at_least`, tier.battery_at_least);
+    onGrid(`cadence.tiers[${index}].every_minutes`, tier.every_minutes);
+  });
+  onGrid("cadence.unknown_battery_every_minutes", config.cadence.unknown_battery_every_minutes);
+
+  const { warn_below_percent: warn, pause_at_or_below_percent: pause, resume_at_or_above_percent: resume, reading_max_age_hours: maxAge } = config.battery;
+  percentage("battery.warn_below_percent", warn);
+  percentage("battery.pause_at_or_below_percent", pause);
+  percentage("battery.resume_at_or_above_percent", resume);
+  positive("battery.reading_max_age_hours", maxAge);
   if (pause >= resume) fail("battery.resume_at_or_above_percent must be above pause_at_or_below_percent, or the service would flap.");
-  const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup, retry_delay_seconds: retry, slot_deadline_seconds: deadline, max_attempts: tries } = config.capture;
-  if (tries < 1) fail("capture.max_attempts must be at least 1.");
+
+  const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup, retry_delay_seconds: retry, slot_deadline_seconds: deadline, max_attempts: tries, target_keyframes: keyframes, max_session_seconds_per_day: session } = config.capture;
+  positive("capture.acquisition_timeout_seconds", acquire);
+  positive("capture.cleanup_timeout_seconds", cleanup);
+  positive("capture.slot_deadline_seconds", deadline);
+  positive("capture.max_session_seconds_per_day", session);
+  if (typeof retry !== "number" || !Number.isFinite(retry) || retry < 0) fail(`capture.retry_delay_seconds must be 0 or more, got ${JSON.stringify(retry)}.`);
+  whole("capture.target_keyframes", keyframes, 1);
+  whole("capture.max_attempts", tries, 1);
   if ((acquire + cleanup) * tries + retry * (tries - 1) > deadline) fail("capture.slot_deadline_seconds is too short for max_attempts to finish.");
+
+  const { monthly_budget_mb: budget, warn_fraction: warnFraction, pause_fraction: pauseFraction } = config.traffic;
+  if (budget !== null) positive("traffic.monthly_budget_mb", budget);
+  fraction("traffic.warn_fraction", warnFraction);
+  fraction("traffic.pause_fraction", pauseFraction);
+  if (warnFraction > pauseFraction) fail("traffic.warn_fraction must not be above pause_fraction, or the pause would come first.");
+
+  if (typeof config.storage.min_free_disk_mb !== "number" || !(config.storage.min_free_disk_mb >= 0)) fail(`storage.min_free_disk_mb must be 0 or more, got ${JSON.stringify(config.storage.min_free_disk_mb)}.`);
+  positive("storage.keep_failed_work_days", config.storage.keep_failed_work_days);
+  positive("storage.keep_logs_days", config.storage.keep_logs_days);
+
+  const { webhook_url_file: webhook, consecutive_failed_slots: failedSlots, reminder_hours: reminder, first_try_warn_percent: warnPercent, first_try_window: tryWindow } = config.alerts;
+  if (webhook !== null && (typeof webhook !== "string" || webhook.length === 0)) fail("alerts.webhook_url_file must be a file path or null.");
+  whole("alerts.consecutive_failed_slots", failedSlots, 1);
+  positive("alerts.reminder_hours", reminder);
+  percentage("alerts.first_try_warn_percent", warnPercent);
+  whole("alerts.first_try_window", tryWindow, 1);
+
+  if (typeof config.http.bind !== "string" || config.http.bind.length === 0) fail("http.bind must be an address.");
+  whole("http.port", config.http.port, 1, MAX_PORT);
+  if (typeof config.logging.sdk_debug !== "boolean") fail(`logging.sdk_debug must be true or false, got ${JSON.stringify(config.logging.sdk_debug)}.`);
 }
 
 export function loadServiceConfig(path: string): ServiceConfig {
