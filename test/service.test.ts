@@ -865,6 +865,20 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("leaves the capture pace alone in status and calibration", async () => {
+      const h = await harness();
+      await runAt(h, [0, 595]);
+      const paceAt = (ms: number): number | null => buildStatus(h.state, serviceConfig(), new Date(ms), 50_000).battery.every_minutes;
+      const pace = paceAt(AT_1800 - MINUTE);
+      assert.ok(pace !== null, "the slots set a pace");
+      await idleAt(h, AT_1800 - 4 * MINUTE);
+      assert.equal(reports(h).length, 1);
+      assert.equal(paceAt(AT_1800), pace, "the report's own reading doesn't blank the pace");
+      const { hours } = buildCalibration(h.state, serviceConfig(), new Date(AT_0800));
+      assert.equal(hours.at(-1)?.every_minutes, pace);
+      h.state.close();
+    });
+
     it("shows charging and temperature in the status report", async () => {
       const h = await harness({ camera: { ...reading(80), telemetry: { charging: true, batteryTemperature: 11 } } });
       await runAt(h, [0]);

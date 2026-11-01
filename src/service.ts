@@ -508,7 +508,8 @@ export class CaptureService {
     if (this.dailyReportReadFor !== local.date) {
       // Cloud only, so it doesn't wake the camera. Without it, a day with no slots would have no reading at all.
       const reading = await this.readCamera();
-      this.recordBatteryReading(now, reading, null);
+      // Readers take the newest row's pace as the current one, and this read doesn't change it.
+      this.recordBatteryReading(now, reading, this.state.latestBattery()?.every_minutes ?? null);
       this.dailyReportReadFor = local.date;
     }
     const readings = this.state.batterySince(new Date(now.getTime() - 2 * DAY_MS).toISOString()).filter((row) => localParts(new Date(row.read_at), this.zone).date === local.date);
