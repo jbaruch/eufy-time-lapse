@@ -295,6 +295,28 @@ describe("the command line", () => {
   });
 });
 
+describe("Redactor, on credential headers", () => {
+  const cases: Array<[string, string, string]> = [
+    ["an authorization header", "Authorization: Bearer TOPSECRET", "TOPSECRET"],
+    ["a proxy authorization header", "Proxy-Authorization: Basic dXNlcjpwYXNz", "dXNlcjpwYXNz"],
+    ["a cookie with several values", "Cookie: session=TOPSECRET; other=ALSOSECRET", "ALSOSECRET"],
+    ["a set-cookie header", "set-cookie: session=TOPSECRET; Path=/", "TOPSECRET"],
+    ["a quoted header in logged JSON", '{"Authorization":"Bearer TOPSECRET"}', "TOPSECRET"],
+  ];
+  for (const [name, text, secret] of cases) {
+    it(`removes the whole value of ${name}`, () => {
+      assert.equal(new Redactor().redact(text).includes(secret), false);
+    });
+  }
+
+  it("removes one in a later line, and keeps the lines around it", () => {
+    const text = new Redactor().redact("GET /path\nAuthorization: Bearer TOPSECRET\nAccept: */*");
+    assert.equal(text.includes("TOPSECRET"), false);
+    assert.match(text, /GET \/path/);
+    assert.match(text, /Accept/);
+  });
+});
+
 describe("Redactor, on packet dumps", () => {
   it("removes the hex of a packet the SDK logs, which holds the device id", () => {
     const dump = "f183001cafcc651441424344454647000000007b414243444500000001000000";

@@ -9,6 +9,8 @@ const REDACTED = "[redacted]";
 const SENSITIVE_KEY =
   /password|passwd|token|secret|auth|cookie|email|dsk|private_?key|public_?key|p2p_?did|p2p_?license|p2p_?conn|app_?conn|iccid|imei|ssid|mac|local_?ip|^ip$|persistentdata|sn$|serial|openudid|user_?id/i;
 const INLINE_SECRET = /("?(?:password|passwd|[a-z_]*token|auth[a-z_]*|dsk_?key)"?\s*[:=]\s*)("[^"]*"|[^\s,}]+)/gi;
+/** A credential header's whole value. A scheme like "Bearer" comes first, so stopping at the first word would leave the token. */
+const SECRET_HEADER = /("?(?:proxy-authorization|authorization|set-cookie|cookie)"?\s*[:=]\s*)(?:"[^"]*"|[^\r\n]*)/gi;
 /** The SDK logs some packets as raw hex, and those carry the camera's device id or the account's lookup key. */
 const PACKET_DUMP = /\b[0-9a-f]{32,}\b/gi;
 
@@ -36,7 +38,7 @@ export class Redactor {
 
   // Runs on raw strings, before JSON encoding escapes their quotes and hides them from these patterns.
   private scrub(text: string): string {
-    let scrubbed = text.replace(INLINE_SECRET, `$1${REDACTED}`).replace(PACKET_DUMP, (hex) => `<${hex.length / 2} bytes of hex>`);
+    let scrubbed = text.replace(SECRET_HEADER, `$1${REDACTED}`).replace(INLINE_SECRET, `$1${REDACTED}`).replace(PACKET_DUMP, (hex) => `<${hex.length / 2} bytes of hex>`);
     for (const literal of this.literals) scrubbed = scrubbed.replaceAll(literal, REDACTED);
     return scrubbed;
   }
