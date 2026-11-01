@@ -5,7 +5,6 @@ import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { CaptureFailure } from "./adapters/adapter.ts";
 import type { CameraAdapter } from "./adapters/adapter.ts";
-import { createLegacyClient, LegacyAdapter } from "./adapters/legacy.ts";
 import { createMegaClient, MegaAdapter } from "./adapters/mega.ts";
 import { ConfigError, loadConfig } from "./config.ts";
 import type { AppConfig } from "./config.ts";
@@ -42,24 +41,10 @@ function buildAdapter(config: AppConfig, persistentDir: string, logPath: string,
   const logFile = createWriteStream(logPath, { flags: "a" });
   logFile.on("error", (error) => log(`library log unavailable (${logPath}): ${error.message}`));
   const logger = createRedactingLogger(redactor, (line) => logFile.write(line));
-  if (config.adapter === "mega") {
-    // The SDK has one log level for everything, and login traffic is the wrong place for debug output.
-    const sdkLogger = debugLogs ? logger : { ...logger, debug: () => {} };
-    const client = createMegaClient({ email: config.email, password: config.password, country: config.country, sessionDir: persistentDir, logger: sdkLogger });
-    return new MegaAdapter(client, log, (value) => redactor.addLiteral(value));
-  }
-  return new LegacyAdapter(
-    () =>
-      createLegacyClient({
-        email: config.email,
-        password: config.password,
-        country: config.country,
-        acceptInvitations: config.acceptInvitations,
-        persistentDir,
-        logger,
-      }),
-    log,
-  );
+  // The SDK has one log level for everything, and login traffic is the wrong place for debug output.
+  const sdkLogger = debugLogs ? logger : { ...logger, debug: () => {} };
+  const client = createMegaClient({ email: config.email, password: config.password, country: config.country, sessionDir: persistentDir, logger: sdkLogger });
+  return new MegaAdapter(client, log, (value) => redactor.addLiteral(value));
 }
 
 function positiveNumber(value: string | undefined, name: string, fallback: number): number {
@@ -170,7 +155,7 @@ async function main(argv: string[]): Promise<number> {
 
 if (import.meta.main) {
   try {
-    // The library keeps push and MQTT sockets open after close, so the exit has to be explicit.
+    // The SDK can leave sockets and timers behind after shutdown, so the exit has to be explicit.
     process.exit(await main(process.argv.slice(2)));
   } catch (error) {
     if (!(error instanceof ConfigError || error instanceof CaptureFailure || error instanceof CameraLockHeldError)) throw error;

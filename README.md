@@ -15,10 +15,10 @@ and libx265.
 
 Eufy has no official API, so this speaks its reverse-engineered protocol and needs a real account login.
 
-The default client is [`@mega-yfue/eufy-sdk`](https://github.com/mega-yfue/eufy-sdk), which uses the same
-backend as the current eufy app. The spec's first choice, `eufy-security-client`, logged in but returned an
-empty device list, and its maintainers say the API it depends on is being shut down. Both sit behind the
-same adapter contract, and `TIMELAPSE_ADAPTER` selects one. Changing it means rerunning the probe.
+The client is [`@mega-yfue/eufy-sdk`](https://github.com/mega-yfue/eufy-sdk), which uses the same backend as
+the current eufy app. The spec's first choice, `eufy-security-client`, logged in but returned an empty device
+list, and its maintainers say the API it depends on is being shut down. The SDK sits behind an adapter contract,
+so a future client means one new adapter and a new probe run.
 
 Use a separate Eufy account and share the camera to it from the owner account, then accept the invitation
 in the eufy app while logged in as that account. Store its login on the capture host:
@@ -28,7 +28,7 @@ scripts/set-credentials.sh
 ```
 
 The files land in `~/.config/eufy-time-lapse/`, readable only by you, and reach the container as Docker
-secrets. Library logs are redacted before they reach disk, and login runs drop debug output entirely.
+secrets. SDK logs are redacted before they reach disk, and login runs drop debug output entirely.
 
 **Why not OneCLI?** The client encrypts the password into the request body with a key it negotiates with
 Eufy, and the newer API encrypts and signs every body. The gateway writes only headers and query

@@ -1,4 +1,9 @@
-import type { Logger } from "eufy-security-client";
+export interface Logger {
+  debug(message: unknown, ...args: unknown[]): void;
+  info(message: unknown, ...args: unknown[]): void;
+  warn(message: unknown, ...args: unknown[]): void;
+  error(message: unknown, ...args: unknown[]): void;
+}
 
 const REDACTED = "[redacted]";
 const SENSITIVE_KEY =
@@ -14,7 +19,7 @@ function isSerializedBuffer(value: object): value is SerializedBuffer {
   return "type" in value && value.type === "Buffer" && "data" in value && Array.isArray(value.data);
 }
 
-/** Removes secrets from library log output. The library's own debug logging carries tokens. */
+/** Removes secrets from SDK log output, which goes to disk and can end up in a bug report. */
 export class Redactor {
   private readonly literals = new Set<string>();
 
@@ -60,11 +65,9 @@ export function createRedactingLogger(redactor: Redactor, write: (line: string) 
       write(`${redactor.redact({ ts: now().toISOString(), level, message, args })}\n`);
     };
   return {
-    trace: emit("trace"),
     debug: emit("debug"),
     info: emit("info"),
     warn: emit("warn"),
     error: emit("error"),
-    fatal: emit("fatal"),
   };
 }

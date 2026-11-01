@@ -22,10 +22,8 @@ describe("loadConfig", () => {
 
   it("applies defaults", () => {
     const config = loadConfig(base);
-    assert.equal(config.adapter, "mega");
     assert.deepEqual([config.minWidth, config.minHeight], [3840, 2160], "the owner requires native 4K");
     assert.equal(config.country, "US");
-    assert.equal(config.acceptInvitations, false);
     assert.equal(config.link, null);
     assert.equal(config.operator, null);
     assert.equal(config.dataDir, "./data");
@@ -55,11 +53,9 @@ describe("loadConfig", () => {
   });
 
   it("rejects values it doesn't understand", () => {
-    assert.throws(() => loadConfig({ ...base, TIMELAPSE_ADAPTER: "bridge" }), /mega/);
     assert.throws(() => loadConfig({ ...base, TIMELAPSE_MIN_WIDTH: "4k" }), /TIMELAPSE_MIN_WIDTH/);
     assert.throws(() => loadConfig({ ...base, TIMELAPSE_MIN_HEIGHT: "-1" }), /TIMELAPSE_MIN_HEIGHT/);
     assert.throws(() => loadConfig({ ...base, TIMELAPSE_CAMERA_LINK: "ethernet" }), /cellular/);
-    assert.throws(() => loadConfig({ ...base, EUFY_ACCEPT_INVITATIONS: "yes" }), /true/);
   });
 
   it("treats blank optional values as unset", () => {
@@ -150,13 +146,12 @@ describe("createRedactingLogger", () => {
   it("writes one redacted JSON line per call, at every level", () => {
     const lines: string[] = [];
     const logger = createRedactingLogger(new Redactor(["hunter2"]), (line) => lines.push(line), () => new Date("2026-01-01T00:00:00.000Z"));
-    logger.trace("t");
     logger.debug("d");
     logger.info("login hunter2", { token: "abc" });
     logger.warn("w");
     logger.error("e");
-    assert.equal(lines.length, 5);
-    const parsed = JSON.parse(lines[2] ?? "") as { ts: string; level: string; message: string; args: Array<{ token: string }> };
+    assert.equal(lines.length, 4);
+    const parsed = JSON.parse(lines[1] ?? "") as { ts: string; level: string; message: string; args: Array<{ token: string }> };
     assert.equal(parsed.level, "info");
     assert.equal(parsed.ts, "2026-01-01T00:00:00.000Z");
     assert.equal(parsed.message, "login [redacted]");

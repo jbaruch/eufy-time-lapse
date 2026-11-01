@@ -17,8 +17,7 @@
     "verify": "npm run typecheck && npm test"
   },
   "dependencies": {
-    "@mega-yfue/eufy-sdk": "0.5.0",
-    "eufy-security-client": "4.1.1-1"
+    "@mega-yfue/eufy-sdk": "0.5.0"
   },
   "devDependencies": {
     "@types/node": "26.6.6",

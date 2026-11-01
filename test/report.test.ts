@@ -104,7 +104,7 @@ describe("evaluateProbe", () => {
     const expectations = [
       ["auth", /login command/],
       ["discovery", /visible to this account/],
-      ["connect", /TIMELAPSE_ADAPTER/],
+      ["connect", /newer SDK/],
       ["stream_start", /no video arrived/],
       ["first_media", /no video arrived/],
       ["decode", /stream\.bin/],
