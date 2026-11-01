@@ -2,6 +2,9 @@ services:
   timelapse:
     build: .
     image: eufy-time-lapse:local
+    # `docker compose up -d` runs the service. `docker compose run --rm timelapse <command>` runs anything else.
+    command: ["run"]
+    restart: unless-stopped
     # The camera sits behind carrier NAT. Docker's bridge would put a second NAT in front of P2P setup.
     network_mode: host
     # Must own the secret files and the data directory.
@@ -15,6 +18,7 @@ services:
       TIMELAPSE_CELLULAR_OPERATOR: ${TIMELAPSE_CELLULAR_OPERATOR:-}
       TIMELAPSE_MIN_WIDTH: ${TIMELAPSE_MIN_WIDTH:-}
       TIMELAPSE_MIN_HEIGHT: ${TIMELAPSE_MIN_HEIGHT:-}
+      TIMELAPSE_CONFIG: /data/config.json
     volumes:
       - ${TIMELAPSE_DATA_PATH:-./data}:/data
     secrets:

@@ -75,12 +75,7 @@ export async function render(options: RenderOptions): Promise<RenderManifest> {
     throw new RenderError(`No frames to render between ${options.from} and ${options.to} (${exclusions.length} excluded). Check the dates, or use --include-degraded.`);
   }
   const { width, height } = outputSize(selected);
-  const secondsPerFrame = 1 / options.fps;
-
-  const lines = selected.flatMap((frame) => [`file ${concatQuote(join(options.dataDir, frame.relative_dir, "frame.jpg"))}`, `duration ${secondsPerFrame}`]);
-  // The concat demuxer ignores the last entry's duration unless that file is repeated.
-  const last = selected[selected.length - 1] as CaptureRow;
-  lines.push(`file ${concatQuote(join(options.dataDir, last.relative_dir, "frame.jpg"))}`);
+  const lines = selected.map((frame) => `file ${concatQuote(join(options.dataDir, frame.relative_dir, "frame.jpg"))}`);
 
   await mkdir(dirname(options.outputPath), { recursive: true });
   const listPath = `${options.outputPath}.frames.txt`;
@@ -93,7 +88,8 @@ export async function render(options: RenderOptions): Promise<RenderManifest> {
   try {
     await run(
       "ffmpeg",
-      ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", listPath, "-vf", filters.join(","), "-fps_mode", "cfr", "-r", String(options.fps), "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-an", "-movflags", "+faststart", options.outputPath],
+      // One input frame is exactly one video frame: a constant input rate, with nothing resampled afterwards.
+      ["-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-r", String(options.fps), "-f", "concat", "-safe", "0", "-i", listPath, "-vf", filters.join(","), "-fps_mode", "passthrough", "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-an", "-movflags", "+faststart", options.outputPath],
       { timeout, killSignal: "SIGKILL", maxBuffer: 4 * 1024 * 1024 },
     );
   } catch (error) {
