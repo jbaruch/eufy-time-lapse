@@ -62,6 +62,12 @@ describe("loadServiceConfig", () => {
     ["a log retention of zero", { storage: { keep_logs_days: 0 } }, /keep_logs_days/],
     ["a first-try threshold above 100", { alerts: { first_try_warn_percent: 101 } }, /first_try_warn_percent/],
     ["a first-try window of zero", { alerts: { first_try_window: 0 } }, /first_try_window/],
+    ["a Telegram setting that isn't an object", { alerts: { telegram: "yes" } }, /alerts\.telegram must be/],
+    ["a bot id that looks like a token", { alerts: { telegram: { bot_id: "123:abc", chat_id: "-100", proxy_url_file: "a", ca_file: "b" } } }, /bot_id/],
+    ["a chat id that isn't numeric", { alerts: { telegram: { bot_id: "123", chat_id: "swarm", proxy_url_file: "a", ca_file: "b" } } }, /chat_id/],
+    ["a Telegram route with no proxy file", { alerts: { telegram: { bot_id: "123", chat_id: "-100", ca_file: "b" } } }, /proxy_url_file/],
+    ["a Telegram route with no CA file", { alerts: { telegram: { bot_id: "123", chat_id: "-100", proxy_url_file: "a" } } }, /ca_file/],
+    ["a misspelled Telegram setting", { alerts: { telegram: { bot_id: "123", chat_id: "-100", proxy_url_file: "a", ca_file: "b", token: "c" } } }, /alerts\.telegram\.token/],
     ["a time zone in an array", { project: { site_time_zone: ["America/Chicago"] } }, /site_time_zone must be text/],
     ["a window start in an array", { schedule: { window_start: ["08:00"] } }, /window_start must be text/],
     ["a window end in an array", { schedule: { window_end_exclusive: ["18:00"] } }, /window_end_exclusive must be text/],
@@ -105,6 +111,11 @@ describe("loadServiceConfig", () => {
 
   it("lets a bug through as itself, not as a bad config", () => {
     assert.throws(() => loadServiceConfig("a\0b"), (error: Error) => error instanceof TypeError && !(error instanceof ConfigError));
+  });
+
+  it("accepts a complete Telegram route", async () => {
+    const telegram = { bot_id: "123", chat_id: "-100", proxy_url_file: "/run/a", ca_file: "/run/b" };
+    assert.deepEqual((await load({ alerts: { telegram } })).alerts.telegram, telegram);
   });
 
   it("explains a file that isn't JSON", async () => {

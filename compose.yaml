@@ -30,6 +30,8 @@ services:
       TIMELAPSE_CONFIG: /data/config.json
     volumes:
       - ${TIMELAPSE_DATA_PATH:-./data}:/data
+      # The way to the OneCLI gateway for alerts. Not the bot token, which only the gateway holds.
+      - ${TIMELAPSE_SECRETS_DIR:-${HOME}/.config/eufy-time-lapse}:/run/timelapse-secrets:ro
     secrets:
       - eufy_email
       - eufy_password

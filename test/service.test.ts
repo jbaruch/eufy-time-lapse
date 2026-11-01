@@ -94,6 +94,7 @@ describe("CaptureService", () => {
         log: () => {},
         notify: async (text) => {
           notices.push(text);
+          return true;
         },
         now,
         sleep: options.sleep ?? (async () => {}),

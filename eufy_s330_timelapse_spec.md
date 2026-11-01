@@ -307,7 +307,7 @@ Capture completeness for a period equals **scheduled slots with accepted frames 
 
 `/healthz` reports **process liveness only**. Account authentication, camera reachability, and archive health must have separate statuses. An HTTP 200 from the service does not mean frames are being captured successfully.
 
-Send notifications through a single configurable webhook for:
+Send notifications to one configured Telegram chat, through the credential gateway, for:
 
 - Three consecutive scheduled slots without a captured frame.
 - Required 2FA, CAPTCHA, or other manual authentication step.
@@ -315,7 +315,7 @@ Send notifications through a single configurable webhook for:
 - The oldest unarchived frame waiting more than six hours, or local disk space approaching exhaustion.
 - Recovery from one of the above conditions.
 
-Send one notification when an issue begins, at most one reminder per day, and one recovery notification. A failed notification delivery must not trigger additional camera captures. Do not include photos or credentials in notifications by default. The owner configures the destination before continuous operation begins.
+Send one notification when an issue begins, at most one reminder per day, and one recovery notification. A failed notification delivery must not trigger additional camera captures, and is tried again at the next slot. Do not include photos or credentials in notifications by default. The owner configures the destination before continuous operation begins.
 
 # 10. Authentication and Deployment
 
@@ -329,7 +329,7 @@ A token lasts 30 days, so a run this long replaces one about every month, and th
 
 If authentication requires 2FA or CAPTCHA, pause new camera operations and expose the specific manual step needed. Do not retry logins indefinitely. Supply credentials via Docker secret files or protected environment variables; never write them to the repository, logs, manifests, or HTTP responses. Session files must be readable only by the service account.
 
-A credential gateway such as OneCLI can't hold the Eufy login: the password is ECDH-encrypted into the request body, v6 bodies are encrypted and signed, the camera traffic is UDP, and a gateway writes only headers, query, and path. Credentials sent in a plain header, such as a webhook's, can use the gateway.
+A credential gateway such as OneCLI can't hold the Eufy login: the password is ECDH-encrypted into the request body, v6 bodies are encrypted and signed, the camera traffic is UDP, and a gateway writes only headers, query, and path. A credential the gateway can place, such as the Telegram bot token in a request path, belongs there: this service holds only its route to the gateway, never the token.
 
 Deploy as one Docker Compose project with persistent volumes and a restart policy. FFmpeg must decode the camera's **actual** H.264/H.265 stream. Bind HTTP to loopback by default; use an existing secure tunnel or an authenticated reverse proxy for remote access.
 
@@ -407,7 +407,7 @@ render:
   missing_frames: skip
 
 alerts:
-  webhook_url_file: null
+  telegram: null
   consecutive_failed_slots: 3
   upload_backlog_hours: 6
   reminder_hours: 24
@@ -464,7 +464,6 @@ Before enabling year-long operation, fill in project dates, site time zone, Eufy
 
 - The S3 offsite archiver. Frames are spooled on the host, whose storage is durable, but there is no offsite copy; the destination is not chosen.
 - The monthly preview render.
-- A notification destination. Alerts go to the service log until a webhook is configured.
 - Battery and solar calibration, which needs the camera on its panel.
 
 # 14. Post-MVP Ideas

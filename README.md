@@ -35,7 +35,7 @@ secrets. SDK logs are redacted before they reach disk, and login runs drop debug
 **Why not OneCLI?** The client encrypts the password into the request body with a key it negotiates with
 Eufy, and the newer API encrypts and signs every body. The gateway writes only headers and query
 parameters, and P2P is UDP. Nothing in that traffic can carry a placeholder. Credentials that do fit the
-gateway, such as the alert webhook, belong in OneCLI.
+gateway belong in OneCLI, and the Telegram bot token for alerts lives there.
 
 ## Run the probe
 
@@ -103,6 +103,7 @@ Run anything else alongside it with `docker compose run --rm timelapse <command>
 | `pause` / `resume` | Stop and restart new captures. `resume --battery-checked` overrides a low-battery pause |
 | `render --from YYYY-MM-DD --to YYYY-MM-DD` | Builds an MP4 from stored frames, with a manifest. Never touches the camera |
 | `export-manifest` | Every capture, one JSON object per line |
+| `notify-test` | Sends one test message to the alert destination |
 | `login` | Log in again when the service reports `auth_required` or `login_renewal`, or to make this device trusted. A running service picks it up |
 
 The service also answers on `127.0.0.1:8787`. `/status` has the full report. `/healthz` means only that the
@@ -123,9 +124,30 @@ than `reading_max_age_hours`. After that the rate drops to `unknown_battery_ever
 **Rendering** leaves out frames below the required size and lists them in the manifest, because one 720p frame
 would otherwise pull a whole 4K video down to 720p. `--include-degraded` puts them back.
 
-**Alerts** post to the webhook in `alerts.webhook_url_file`. Without one they only reach the service log. Besides
-repeated misses, they cover first-try success falling below `first_try_warn_percent`, since retries get the frame
-but spend battery where no slot count would show it.
+**Alerts** go to the service log, and to Telegram when `alerts.telegram` is set. Besides repeated misses, they cover
+first-try success falling below `first_try_warn_percent`, since retries get the frame but spend battery where no slot
+count would show it. An alert that can't be delivered, as is likely during an outage, is tried again at the next slot.
+
+This service never holds the bot token. The OneCLI gateway does, and swaps it in for the placeholder on the way to
+Telegram, so the setup is an identity on the gateway plus two files:
+
+1. Create a OneCLI identity for the service, remove the grants it inherits, and attach only the bot's secret. The
+   secret's path injection follows `^(/file)?/bot<ID>:onecli-managed/`, as in nanoclaw's `docs/TELEGRAM-VAULT.md`.
+2. Store its route where the container can read it, without printing it:
+
+   ```bash
+   onecli run --agent eufy-time-lapse --gateway <gateway-host> -- bash -c 'umask 077
+     printf "%s\n" "$HTTPS_PROXY" > ~/.config/eufy-time-lapse/onecli_proxy_url
+     cat "$NODE_EXTRA_CA_CERTS" > ~/.config/eufy-time-lapse/onecli_ca.pem'
+   ```
+
+3. Name the destination in `data/config.json`. The bot id is the part of its token before the colon, and isn't secret:
+
+   ```json
+   "alerts": { "telegram": { "bot_id": "<digits>", "chat_id": "<chat id>", "proxy_url_file": "/run/timelapse-secrets/onecli_proxy_url", "ca_file": "/run/timelapse-secrets/onecli_ca.pem" } }
+   ```
+
+4. Restart the service, then run `docker compose run --rm timelapse notify-test`, which sends one message.
 
 ### Deploy
 

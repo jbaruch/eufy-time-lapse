@@ -9,6 +9,14 @@ export interface CadenceTier {
   every_minutes: number;
 }
 
+/** Where alerts go. The token isn't here: the OneCLI gateway holds it, and these files hold only the way to the gateway. */
+export interface TelegramConfig {
+  bot_id: string;
+  chat_id: string;
+  proxy_url_file: string;
+  ca_file: string;
+}
+
 export interface ServiceConfig {
   project: { id: string; site_time_zone: string };
   camera: { id: string };
@@ -26,7 +34,7 @@ export interface ServiceConfig {
   };
   traffic: { monthly_budget_mb: number | null; warn_fraction: number; pause_fraction: number };
   storage: { min_free_disk_mb: number; keep_failed_work_days: number; keep_logs_days: number };
-  alerts: { webhook_url_file: string | null; consecutive_failed_slots: number; reminder_hours: number; first_try_warn_percent: number; first_try_window: number };
+  alerts: { telegram: TelegramConfig | null; consecutive_failed_slots: number; reminder_hours: number; first_try_warn_percent: number; first_try_window: number };
   http: { bind: string; port: number };
   logging: { sdk_debug: boolean };
 }
@@ -56,7 +64,7 @@ export const DEFAULT_SERVICE_CONFIG: ServiceConfig = {
   },
   traffic: { monthly_budget_mb: null, warn_fraction: 0.8, pause_fraction: 1 },
   storage: { min_free_disk_mb: 1024, keep_failed_work_days: 3, keep_logs_days: 30 },
-  alerts: { webhook_url_file: null, consecutive_failed_slots: 3, reminder_hours: 24, first_try_warn_percent: 80, first_try_window: 50 },
+  alerts: { telegram: null, consecutive_failed_slots: 3, reminder_hours: 24, first_try_warn_percent: 80, first_try_window: 50 },
   http: { bind: "127.0.0.1", port: 8787 },
   logging: { sdk_debug: false },
 };
@@ -176,8 +184,17 @@ function validate(config: ServiceConfig): void {
   positive("storage.keep_failed_work_days", config.storage.keep_failed_work_days);
   positive("storage.keep_logs_days", config.storage.keep_logs_days);
 
-  const { webhook_url_file: webhook, consecutive_failed_slots: failedSlots, reminder_hours: reminder, first_try_warn_percent: warnPercent, first_try_window: tryWindow } = config.alerts;
-  if (webhook !== null && (typeof webhook !== "string" || webhook.length === 0)) fail("alerts.webhook_url_file must be a file path or null.");
+  const { telegram, consecutive_failed_slots: failedSlots, reminder_hours: reminder, first_try_warn_percent: warnPercent, first_try_window: tryWindow } = config.alerts;
+  if (telegram !== null) {
+    if (!isRecord(telegram)) fail("alerts.telegram must be an object or null.");
+    for (const key of Object.keys(telegram)) {
+      if (!["bot_id", "chat_id", "proxy_url_file", "ca_file"].includes(key)) fail(`Unknown setting "alerts.telegram.${key}".`);
+    }
+    if (typeof telegram.bot_id !== "string" || !/^\d+$/.test(telegram.bot_id)) fail("alerts.telegram.bot_id must be the bot's numeric id, as text. It's the part of the token before the colon, and not secret.");
+    if (typeof telegram.chat_id !== "string" || !/^-?\d+$/.test(telegram.chat_id)) fail("alerts.telegram.chat_id must be the chat's numeric id, as text.");
+    if (typeof telegram.proxy_url_file !== "string" || telegram.proxy_url_file.length === 0) fail("alerts.telegram.proxy_url_file must be a file path.");
+    if (typeof telegram.ca_file !== "string" || telegram.ca_file.length === 0) fail("alerts.telegram.ca_file must be a file path.");
+  }
   whole("alerts.consecutive_failed_slots", failedSlots, 1);
   positive("alerts.reminder_hours", reminder);
   percentage("alerts.first_try_warn_percent", warnPercent);
