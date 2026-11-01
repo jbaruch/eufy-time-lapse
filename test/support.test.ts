@@ -357,6 +357,31 @@ describe("withCameraLock", () => {
     assert.equal(await withCameraLock(path, async () => "after it went stale", at(NOW + 60_000)), "after it went stale");
   });
 
+  it("says so when the lock is too busy to release, and keeps the work's result", async () => {
+    const path = lockPath();
+    const warnings: string[] = [];
+    let blocker: DatabaseSync | undefined;
+    const result = await withCameraLock(
+      path,
+      async () => {
+        blocker = new DatabaseSync(path);
+        blocker.exec("BEGIN EXCLUSIVE");
+        return "finished";
+      },
+      { warn: (message) => warnings.push(message) },
+    );
+    assert.equal(result, "finished");
+    assert.ok(warnings.some((warning) => warning.includes("too busy to release")), warnings.join("; "));
+    blocker?.exec("ROLLBACK");
+    blocker?.close();
+  });
+
+  it("says nothing when the release goes through", async () => {
+    const warnings: string[] = [];
+    await withCameraLock(lockPath(), async () => "finished", { warn: (message) => warnings.push(message) });
+    assert.deepEqual(warnings, []);
+  });
+
   it("reports a lost lock over whatever the aborted work threw", async (t) => {
     t.mock.timers.enable({ apis: ["setInterval"] });
     const path = lockPath();

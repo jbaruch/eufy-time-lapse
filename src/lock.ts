@@ -36,6 +36,8 @@ class LockFileError extends Error {
 export interface LockOptions {
   /** The current time, for judging a holder stale and for its heartbeat. */
   now?: () => number;
+  /** Where a problem that doesn't stop the work gets said. By default, stderr. */
+  warn?: (message: string) => void;
 }
 
 function isBusy(error: unknown): boolean {
@@ -94,12 +96,13 @@ function heartbeat(lockPath: string, token: string, now: () => number): void {
 }
 
 /** Removes only this holder's claim. A stale holder must not delete its successor's. */
-function release(lockPath: string, token: string): void {
+function release(lockPath: string, token: string, warn: (message: string) => void): void {
   try {
     step(lockPath, (db) => db.prepare("DELETE FROM holder WHERE id = 1 AND token = ?").run(token));
   } catch (error) {
-    // Too busy to answer. The claim goes stale by itself, so the work's result stands.
     if (!isBusy(error)) throw error;
+    // The claim goes stale by itself, so the work's result stands. The camera just stays locked a little longer.
+    warn(`The camera lock at ${lockPath} was too busy to release, so its claim stays until it goes stale in ${STALE_AFTER_MS / 1000} s. Anything refused until then can simply run again.`);
   }
 }
 
@@ -144,6 +147,6 @@ export async function withCameraLock<T>(lockPath: string, work: (lost: AbortSign
   } finally {
     clearInterval(beating);
     // A claim this holder can't prove has nothing to give back, and goes stale by itself. What stopped the heartbeat would only stop this too, and hide why.
-    if (lostBecause === undefined && bug === undefined) release(lockPath, token);
+    if (lostBecause === undefined && bug === undefined) release(lockPath, token, options.warn ?? ((message) => process.stderr.write(`${message}\n`)));
   }
 }
