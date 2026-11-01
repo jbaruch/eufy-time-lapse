@@ -51,6 +51,8 @@ export interface CameraInfo {
 
 export type VideoCodecName = "h264" | "h265" | "unknown";
 
+export type ConnectionPath = "direct" | "relay";
+
 export interface FrameSize {
   width: number;
   height: number;
@@ -67,6 +69,8 @@ export interface LiveSession {
   connectRetries: number;
   /** True when no P2P connection to the camera existed before this attempt. */
   coldConnection: boolean;
+  /** Whether video reached us directly or through a relay. The two behave very differently on cellular. */
+  connectionPath: ConnectionPath;
   /** Reports each keyframe's coded size, after its bytes have gone to `video`. */
   onKeyframe(listener: (size: FrameSize) => void): void;
 }

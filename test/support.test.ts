@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, readFile, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
@@ -98,11 +98,18 @@ describe("withCameraLock", () => {
     assert.equal(await withCameraLock(path, async () => "again"), "again");
   });
 
-  it("replaces a lock left by a dead process", async () => {
+  it("replaces a lock whose holder stopped its heartbeat, as a crashed container does", async () => {
     const path = lockPath();
-    // Past the highest PID any supported OS hands out, so no process can hold it.
-    await writeFile(path, "99999999");
+    await writeFile(path, "");
+    const longAgo = new Date(Date.now() - 60_000);
+    await utimes(path, longAgo, longAgo);
     assert.equal(await withCameraLock(path, async () => "recovered"), "recovered");
+  });
+
+  it("respects a lock with a live heartbeat, whatever process wrote it", async () => {
+    const path = lockPath();
+    await writeFile(path, "");
+    await assert.rejects(withCameraLock(path, async () => "second"), CameraLockHeldError);
   });
 });
 

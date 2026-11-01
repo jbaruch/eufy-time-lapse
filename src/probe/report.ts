@@ -5,7 +5,7 @@ import type { AttemptRecord } from "../capture/acquire.ts";
  * Probe report schema. Owner and sole writer: src/probe/probe.ts. Readers are humans and the Phase 1
  * sign-off. Bump REPORT_SCHEMA_VERSION on any shape change.
  */
-export const REPORT_SCHEMA_VERSION = 4;
+export const REPORT_SCHEMA_VERSION = 5;
 
 export type CameraLink = "cellular" | "wifi";
 

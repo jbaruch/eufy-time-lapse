@@ -64,6 +64,7 @@ export interface MegaClient {
   getDevice(serial: string): Promise<MegaDevice>;
   connectStation(serial: string, signal?: AbortSignal): Promise<void>;
   getP2pSessions(): Map<string, unknown>;
+  deviceState(serial: string): { lastSeenMs?: number };
   disconnect(): Promise<void>;
 }
 
@@ -92,6 +93,8 @@ export function createMegaClient(options: MegaClientOptions): MegaClient {
     // The camera is on cellular, so a LAN broadcast can't find it and only adds noise to the NAS's network.
     noBroadcast: true,
   });
+  // With no listener, EventEmitter throws an "error" event and takes the whole process down.
+  client.on("error", (error) => options.logger.error("SDK error", error));
   // Device's capability accessors are generated at runtime, which TypeScript can't relate to this shape.
   return client as unknown as MegaClient;
 }
@@ -110,13 +113,14 @@ function codecName(codec: string): VideoCodecName {
   return "unknown";
 }
 
-function readBattery(device: MegaDevice): BatteryReading {
+function readBattery(device: MegaDevice, lastSeenMs: number | undefined): BatteryReading {
   const value = device.getProperty("battery")?.value;
   if (typeof value !== "number") {
     return { percent: null, observedAt: null, note: "cloud returned no battery value" };
   }
-  // The SDK stamps a value when it reads the cloud, not when the camera reported it, so it says nothing about age.
-  return { percent: value, observedAt: null, note: "the SDK does not expose when the camera reported this" };
+  if (lastSeenMs === undefined) return { percent: value, observedAt: null, note: "the cloud gave no report time for this camera" };
+  // The newest time on any of the camera's values. The battery's own time isn't exposed, so it may be older than this.
+  return { percent: value, observedAt: new Date(lastSeenMs).toISOString(), note: "newest report from the camera; the battery value is at least this old" };
 }
 
 function readTelemetry(device: MegaDevice): Record<string, string | number | boolean> {
@@ -138,7 +142,10 @@ function isCameraError(error: unknown): error is Error {
     error instanceof StationUnreachableError ||
     error instanceof LiveStreamStartError ||
     error instanceof StationKeyUnavailableError ||
-    error instanceof CameraDisabledError
+    error instanceof CameraDisabledError ||
+    error instanceof MegaApiError ||
+    // How fetch reports the network being down. The cause varies, the message doesn't.
+    (error instanceof TypeError && error.message === "fetch failed")
   );
 }
 
@@ -152,6 +159,7 @@ export class MegaAdapter implements CameraAdapter {
   private readonly sweepTimer: NodeJS.Timeout;
   private stream: MegaLiveStream | undefined;
   private attemptActive = false;
+  private relayUsed = false;
   private loginNeeded = false;
   private unexpectedConnections = 0;
 
@@ -161,6 +169,11 @@ export class MegaAdapter implements CameraAdapter {
     this.registerSecret = registerSecret;
     this.sweepTimer = setInterval(() => void this.sweepConnections(), SWEEP_INTERVAL_MS);
     this.sweepTimer.unref();
+  }
+
+  /** The SDK reports its relay handshake only in its logs, so the logger passes that along. */
+  noteRelayUsed(): void {
+    this.relayUsed = true;
   }
 
   /** The SDK shouldn't open a session on its own here. If it ever does, that's a battery wake: close and count it. */
@@ -229,7 +242,7 @@ export class MegaAdapter implements CameraAdapter {
       firmware: device.info?.()?.firmwareVersion ?? null,
       // A standalone battery camera, by the SDK's own account of its power tiers.
       energySaving: true,
-      battery: readBattery(device),
+      battery: readBattery(device, this.client.deviceState(match.sn).lastSeenMs),
       telemetry: readTelemetry(device),
     };
   }
@@ -247,6 +260,7 @@ export class MegaAdapter implements CameraAdapter {
 
   async openLiveSession(cameraKey: string, signal: AbortSignal): Promise<LiveSession> {
     this.attemptActive = true;
+    this.relayUsed = false;
     await this.restoreLogin();
 
     const device = await this.client.getDevice(cameraKey);
@@ -287,6 +301,7 @@ export class MegaAdapter implements CameraAdapter {
       connectMs,
       connectRetries: 0,
       coldConnection,
+      connectionPath: this.relayUsed ? "relay" : "direct",
       onKeyframe: (listener) => {
         keyframeListeners.push(listener);
       },

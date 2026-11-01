@@ -77,7 +77,7 @@ describe("runProbe", () => {
     assert.deepEqual(JSON.parse(text), JSON.parse(JSON.stringify(report)));
     assert.equal(text.includes(CAMERA.key), false);
     assert.equal(report.camera.serial_masked.endsWith("1234"), true);
-    assert.equal(report.schema_version, 4);
+    assert.equal(report.schema_version, 5);
   });
 
   it("passes when a retry rescues a capture, and keeps the failed try on the record", async () => {

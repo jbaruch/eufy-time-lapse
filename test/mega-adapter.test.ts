@@ -50,6 +50,7 @@ class FakeClient implements MegaClient {
     this.sessions.set(SERIAL, {});
   };
   listError: Error | undefined;
+  lastSeenMs: number | undefined;
 
   async login(): Promise<MegaLoginResult> {
     this.logins += 1;
@@ -75,6 +76,9 @@ class FakeClient implements MegaClient {
   }
   getP2pSessions(): Map<string, unknown> {
     return this.sessions;
+  }
+  deviceState(): { lastSeenMs?: number } {
+    return this.lastSeenMs === undefined ? {} : { lastSeenMs: this.lastSeenMs };
   }
   async disconnect(): Promise<void> {
     this.disconnects += 1;
@@ -143,7 +147,17 @@ describe("MegaAdapter discovery", () => {
     await adapter.shutdown();
   });
 
-  it("doesn't claim to know how old a battery reading is", async () => {
+  it("reports the camera's newest report time as the battery's freshest possible age", async () => {
+    const { client, adapter } = setup();
+    client.lastSeenMs = Date.parse("2026-01-02T03:04:05.000Z");
+    const { battery } = await adapter.discoverCamera();
+    assert.equal(battery.percent, 66);
+    assert.equal(battery.observedAt, "2026-01-02T03:04:05.000Z");
+    assert.match(battery.note ?? "", /at least this old/);
+    await adapter.shutdown();
+  });
+
+  it("doesn't invent an age when the cloud gives no report time", async () => {
     const { adapter } = setup();
     const { battery } = await adapter.discoverCamera();
     assert.equal(battery.percent, 66);
@@ -240,6 +254,25 @@ describe("MegaAdapter live sessions", () => {
       { width: 3840, height: 2160 },
     ]);
     await adapter.shutdown();
+  });
+
+  it("records whether the SDK had to use its relay", async () => {
+    const direct = setup();
+    assert.equal((await direct.adapter.openLiveSession(SERIAL, openSignal())).connectionPath, "direct");
+    await direct.adapter.teardown(SERIAL, 50);
+
+    direct.client.connect = async () => {
+      direct.adapter.noteRelayUsed();
+      direct.client.sessions.set(SERIAL, {});
+    };
+    assert.equal((await direct.adapter.openLiveSession(SERIAL, openSignal())).connectionPath, "relay");
+    await direct.adapter.teardown(SERIAL, 50);
+
+    direct.client.connect = async () => {
+      direct.client.sessions.set(SERIAL, {});
+    };
+    assert.equal((await direct.adapter.openLiveSession(SERIAL, openSignal())).connectionPath, "direct", "each attempt starts fresh");
+    await direct.adapter.shutdown();
   });
 
   it("flags a session that reused an open connection as not cold", async () => {
@@ -424,7 +457,7 @@ describe("MegaAdapter connection guard", () => {
 
 describe("the pinned SDK still has what the adapter calls", () => {
   it("EufyMega", () => {
-    for (const method of ["login", "submitVerifyCode", "solveCaptcha", "getDevices", "getDevice", "connectStation", "getP2pSessions", "disconnect"]) {
+    for (const method of ["login", "submitVerifyCode", "solveCaptcha", "getDevices", "getDevice", "connectStation", "getP2pSessions", "deviceState", "disconnect", "on"]) {
       assert.equal(typeof (EufyMega.prototype as unknown as Record<string, unknown>)[method], "function", method);
     }
   });

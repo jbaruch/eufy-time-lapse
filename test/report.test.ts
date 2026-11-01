@@ -22,6 +22,7 @@ function captured(overrides: Partial<ProbeAttempt> = {}): ProbeAttempt {
     traffic: { video_bytes: 1000, audio_bytes: 10, basis: "test" },
     cleanup: { status: "ok", detail: null },
     connect_retries: 0,
+    connection_path: "relay",
     stream_stop: "target_reached",
     audio_error: null,
     frame: { file: "frame.jpg", width: 1920, height: 1080, bytes: 500, sha256: "abc" },

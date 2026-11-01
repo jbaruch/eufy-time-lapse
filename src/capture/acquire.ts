@@ -3,7 +3,7 @@ import { createWriteStream } from "node:fs";
 import { copyFile, mkdir, readFile, rename, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { CaptureFailure } from "../adapters/adapter.ts";
-import type { AbortCause, CameraAdapter, CleanupResult, FailurePhase, FailureReason, LiveSession } from "../adapters/adapter.ts";
+import type { AbortCause, CameraAdapter, CleanupResult, ConnectionPath, FailurePhase, FailureReason, LiveSession } from "../adapters/adapter.ts";
 import { extractKeyframes, identifyStream, probeImage } from "../media/ffmpeg.ts";
 
 export const TRAFFIC_BASIS = "media_payload_only: excludes P2P framing, encryption overhead, retransmits and connection setup";
@@ -66,6 +66,7 @@ export interface AttemptRecord {
   traffic: { video_bytes: number; audio_bytes: number; basis: string };
   cleanup: CleanupResult;
   connect_retries: number | null;
+  connection_path: ConnectionPath | null;
   /** Why the stream stopped: what was wanted arrived, time ran out, or the camera ended it. */
   stream_stop: StreamStop | null;
   audio_error: string | null;
@@ -238,6 +239,7 @@ export async function acquireFrame(options: AcquireOptions): Promise<AttemptReco
     traffic: { video_bytes: stats?.videoBytes ?? 0, audio_bytes: stats?.audioBytes ?? 0, basis: TRAFFIC_BASIS },
     cleanup,
     connect_retries: session?.connectRetries ?? null,
+    connection_path: session?.connectionPath ?? null,
     stream_stop: stats?.stop ?? null,
     audio_error: stats?.audioError ?? null,
     frame: null,

@@ -12,9 +12,7 @@ export class ConfigError extends Error {
 const DEFAULT_MIN_WIDTH = 3840;
 const DEFAULT_MIN_HEIGHT = 2160;
 
-export interface AppConfig {
-  email: string;
-  password: string;
+export interface AppSettings {
   country: string;
   cameraSerial?: string;
   link: CameraLink | null;
@@ -22,6 +20,12 @@ export interface AppConfig {
   dataDir: string;
   minWidth: number;
   minHeight: number;
+  configPath: string | undefined;
+}
+
+export interface AppConfig extends AppSettings {
+  email: string;
+  password: string;
 }
 
 function optional(env: NodeJS.ProcessEnv, name: string): string | undefined {
@@ -64,10 +68,12 @@ function parseLink(value: string | undefined): CameraLink | null {
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
+  return { ...loadSettings(env), email: secret(env, "EUFY_EMAIL"), password: secret(env, "EUFY_PASSWORD") };
+}
+
+export function loadSettings(env: NodeJS.ProcessEnv): AppSettings {
   const cameraSerial = optional(env, "EUFY_CAMERA_SERIAL");
   return {
-    email: secret(env, "EUFY_EMAIL"),
-    password: secret(env, "EUFY_PASSWORD"),
     country: optional(env, "EUFY_COUNTRY") ?? "US",
     ...(cameraSerial === undefined ? {} : { cameraSerial }),
     link: parseLink(optional(env, "TIMELAPSE_CAMERA_LINK")),
@@ -75,5 +81,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): AppConfig {
     dataDir: optional(env, "TIMELAPSE_DATA_DIR") ?? "./data",
     minWidth: parsePixels(env, "TIMELAPSE_MIN_WIDTH", DEFAULT_MIN_WIDTH),
     minHeight: parsePixels(env, "TIMELAPSE_MIN_HEIGHT", DEFAULT_MIN_HEIGHT),
+    configPath: optional(env, "TIMELAPSE_CONFIG"),
   };
 }
