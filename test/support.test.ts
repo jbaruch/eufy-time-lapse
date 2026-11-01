@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { access, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, it } from "node:test";
@@ -209,6 +209,21 @@ describe("withCameraLock", () => {
         });
       },
     ],
+    [
+      "can no longer be opened",
+      async (path: string): Promise<void> => {
+        await rm(path);
+        await mkdir(path);
+      },
+    ],
+    [
+      "is replaced by a version this build doesn't know",
+      async (path: string): Promise<void> => {
+        const db = new DatabaseSync(path);
+        db.exec("PRAGMA user_version = 99");
+        db.close();
+      },
+    ],
   ] as const) {
     it(`stops the camera work, and says so, when the lock ${name}`, async (t) => {
       t.mock.timers.enable({ apis: ["setInterval"] });
@@ -230,6 +245,70 @@ describe("withCameraLock", () => {
       assert.equal(sawAbort, true);
     });
   }
+
+  for (const [name, finish] of [
+    ["finishes anyway", async (): Promise<string> => "finished anyway"],
+    [
+      "fails because it was stopped",
+      async (): Promise<string> => {
+        throw new Error("aborted");
+      },
+    ],
+  ] as const) {
+    it(`reports a bug in the heartbeat as that bug, when the work ${name}`, async (t) => {
+      t.mock.timers.enable({ apis: ["setInterval"] });
+      const path = lockPath();
+      const bug = new TypeError("x is not a function");
+      let broken = false;
+      let sawAbort = false;
+      await assert.rejects(
+        withCameraLock(
+          path,
+          async (lost) => {
+            broken = true;
+            t.mock.timers.tick(5_000);
+            sawAbort = lost.aborted;
+            broken = false;
+            return await finish();
+          },
+          {
+            now: () => {
+              if (broken) throw bug;
+              return NOW;
+            },
+          },
+        ),
+        (error: Error) => error === bug,
+      );
+      assert.equal(sawAbort, true);
+    });
+  }
+
+  it("leaves a claim it can't prove to go stale, rather than touching it", async (t) => {
+    t.mock.timers.enable({ apis: ["setInterval"] });
+    const path = lockPath();
+    let broken = false;
+    await assert.rejects(
+      withCameraLock(
+        path,
+        async () => {
+          broken = true;
+          t.mock.timers.tick(5_000);
+          broken = false;
+          return "finished anyway";
+        },
+        {
+          now: () => {
+            if (broken) throw new RangeError("a bug");
+            return NOW;
+          },
+        },
+      ),
+      RangeError,
+    );
+    await assert.rejects(withCameraLock(path, async () => "too soon", at(NOW)), CameraLockHeldError);
+    assert.equal(await withCameraLock(path, async () => "after it went stale", at(NOW + 60_000)), "after it went stale");
+  });
 
   it("reports a lost lock over whatever the aborted work threw", async (t) => {
     t.mock.timers.enable({ apis: ["setInterval"] });
