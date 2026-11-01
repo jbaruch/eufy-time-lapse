@@ -2,6 +2,7 @@
   "name": "eufy-time-lapse",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Construction time-lapse service for a eufy 4G LTE Cam S330 (T86P2).",
   "type": "module",
   "engines": {
