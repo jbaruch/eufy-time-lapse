@@ -145,6 +145,8 @@ function validate(config: ServiceConfig): void {
     percentage(`cadence.tiers[${index}].battery_at_least`, tier.battery_at_least);
     onGrid(`cadence.tiers[${index}].every_minutes`, tier.every_minutes);
   });
+  // Below every tier's floor there'd be no rule for the rate, only whichever tier happened to come last.
+  if (!config.cadence.tiers.some((tier) => tier.battery_at_least === 0)) fail("cadence.tiers needs a tier with battery_at_least 0, so every battery level has a rate.");
   onGrid("cadence.unknown_battery_every_minutes", config.cadence.unknown_battery_every_minutes);
 
   const { warn_below_percent: warn, pause_at_or_below_percent: pause, resume_at_or_above_percent: resume, reading_max_age_hours: maxAge } = config.battery;

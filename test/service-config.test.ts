@@ -41,8 +41,8 @@ describe("loadServiceConfig", () => {
   });
 
   it("replaces the tier list whole, and sorts it highest first", async () => {
-    const config = await load({ cadence: { tiers: [{ battery_at_least: 10, every_minutes: 60 }, { battery_at_least: 80, every_minutes: 10 }] } });
-    assert.deepEqual(config.cadence.tiers.map((tier) => tier.battery_at_least), [80, 10]);
+    const config = await load({ cadence: { tiers: [{ battery_at_least: 0, every_minutes: 60 }, { battery_at_least: 80, every_minutes: 10 }] } });
+    assert.deepEqual(config.cadence.tiers.map((tier) => tier.battery_at_least), [80, 0]);
   });
 
   it("rejects a misspelled setting instead of ignoring it", async () => {
@@ -56,6 +56,7 @@ describe("loadServiceConfig", () => {
     ["a malformed time", { schedule: { window_start: "8am" } }, /HH:MM/],
     ["a tier off the grid", { cadence: { tiers: [{ battery_at_least: 0, every_minutes: 7 }] } }, /multiple/],
     ["no tiers", { cadence: { tiers: [] } }, /empty/],
+    ["tiers that leave low batteries with no rate", { cadence: { tiers: [{ battery_at_least: 60, every_minutes: 5 }] } }, /battery_at_least 0/],
     ["resume at or below pause", { battery: { resume_at_or_above_percent: 25 } }, /flap/],
     ["a slot deadline too short for its retries", { capture: { slot_deadline_seconds: 100 } }, /too short/],
     ["a log retention of zero", { storage: { keep_logs_days: 0 } }, /keep_logs_days/],
