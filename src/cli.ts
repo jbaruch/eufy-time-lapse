@@ -37,7 +37,7 @@ Commands:
   pause            Stop new captures until resumed
   resume           Clear an operator pause (--battery-checked also overrides a low-battery pause)
   render           Build a video: --from YYYY-MM-DD --to YYYY-MM-DD [--output <file>] [--fps <n>]
-                   [--include-manual] [--include-degraded]
+                   [--include-manual] [--include-degraded] [--include-off-target]
   export-manifest  Print every capture as one JSON object per line
   notify-test      Send one test message to the alert destination
 
@@ -345,6 +345,7 @@ async function commandRender(settings: AppSettings, paths: Paths, args: string[]
       fps: { type: "string" },
       "include-manual": { type: "boolean" },
       "include-degraded": { type: "boolean" },
+      "include-off-target": { type: "boolean" },
     },
   });
   if (values.from === undefined || values.to === undefined) throw new ConfigError("render needs --from YYYY-MM-DD and --to YYYY-MM-DD.");
@@ -360,6 +361,7 @@ async function commandRender(settings: AppSettings, paths: Paths, args: string[]
     fps: positiveNumber(values.fps, "fps", 30),
     includeManual: values["include-manual"] === true,
     includeDegraded: values["include-degraded"] === true,
+    includeOffTarget: values["include-off-target"] === true,
     now: () => new Date(),
   });
   state.close();

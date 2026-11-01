@@ -182,3 +182,33 @@ export function judgeFraming(comparison: FrameComparison, context: { referenceAg
   if (enoughDetail && sameLight && matchingInPlace === 0) return { status: "off_target", dx: null, dy: null, detail: "nothing in this frame matches the last good one, taken in similar light" };
   return { status: "unsure", dx: null, dy: null, detail: `only ${agreeing} areas agree, and ${matchingInPlace} match in place, which isn't enough to say` };
 }
+
+const MINUTES_PER_DAY = 1440;
+
+function minutesApartOnTheClock(a: Date, b: Date): number {
+  const minutes = (date: Date): number => date.getUTCHours() * 60 + date.getUTCMinutes();
+  const apart = Math.abs(minutes(a) - minutes(b));
+  return Math.min(apart, MINUTES_PER_DAY - apart);
+}
+
+/**
+ * What to compare a frame with: the last good frame if it's recent, since that's the closest in light and in what's been
+ * built. Otherwise the good frame nearest this time of day, so the first frame of a morning isn't judged against the last,
+ * dark one of the evening before.
+ */
+export function chooseReference<T extends { frame_received_at: string }>(candidates: readonly T[], at: Date): T | undefined {
+  const earlier = candidates.filter((candidate) => Date.parse(candidate.frame_received_at) < at.getTime());
+  const newestFirst = [...earlier].sort((a, b) => Date.parse(b.frame_received_at) - Date.parse(a.frame_received_at));
+  const newest = newestFirst[0];
+  if (newest === undefined || at.getTime() - Date.parse(newest.frame_received_at) <= MISMATCH_MAX_REFERENCE_AGE_MS) return newest;
+  let closest = newest;
+  let closestApart = Number.POSITIVE_INFINITY;
+  for (const candidate of newestFirst) {
+    const apart = minutesApartOnTheClock(new Date(candidate.frame_received_at), at);
+    if (apart < closestApart) {
+      closest = candidate;
+      closestApart = apart;
+    }
+  }
+  return closest;
+}

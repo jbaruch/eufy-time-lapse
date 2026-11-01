@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { compareFrames, GRAY_HEIGHT, GRAY_WIDTH, judgeFraming } from "../src/framing.ts";
+import { chooseReference, compareFrames, GRAY_HEIGHT, GRAY_WIDTH, judgeFraming } from "../src/framing.ts";
 import type { FrameComparison } from "../src/framing.ts";
 
 const FOUR_K_PIXELS_PER_GRAY_PIXEL = 8;
@@ -146,5 +146,38 @@ describe("judgeFraming", () => {
   it("is unsure about a frame with too little in it, like fog or a dark night", () => {
     assert.equal(judgeFraming({ ...noMatch, frameTexturedPatches: 5 }, recent).status, "unsure");
     assert.equal(judgeFraming({ ...noMatch, texturedPatches: 5 }, recent).status, "unsure");
+  });
+});
+
+describe("chooseReference", () => {
+  const frame = (at: string): { frame_received_at: string } => ({ frame_received_at: at });
+
+  it("takes the last good frame when it's recent", () => {
+    const chosen = chooseReference([frame("2026-11-03T14:00:00.000Z"), frame("2026-11-03T14:55:00.000Z"), frame("2026-11-03T14:50:00.000Z")], new Date("2026-11-03T15:00:00.000Z"));
+    assert.equal(chosen?.frame_received_at, "2026-11-03T14:55:00.000Z");
+  });
+
+  it("goes by the time of day across a night, so morning isn't judged against dusk", () => {
+    const yesterday = [frame("2026-11-02T13:05:00.000Z"), frame("2026-11-02T18:00:00.000Z"), frame("2026-11-02T23:55:00.000Z")];
+    assert.equal(chooseReference(yesterday, new Date("2026-11-03T13:00:00.000Z"))?.frame_received_at, "2026-11-02T13:05:00.000Z");
+  });
+
+  it("prefers the newest of two days at the same time of day", () => {
+    const days = [frame("2026-11-01T13:00:00.000Z"), frame("2026-11-02T13:00:00.000Z")];
+    assert.equal(chooseReference(days, new Date("2026-11-03T13:00:00.000Z"))?.frame_received_at, "2026-11-02T13:00:00.000Z");
+  });
+
+  it("treats the clock as a circle", () => {
+    const days = [frame("2026-11-02T23:58:00.000Z"), frame("2026-11-02T12:00:00.000Z")];
+    assert.equal(chooseReference(days, new Date("2026-11-03T00:05:00.000Z"))?.frame_received_at, "2026-11-02T23:58:00.000Z");
+  });
+
+  it("never compares a frame with itself or anything later", () => {
+    const at = "2026-11-03T15:00:00.000Z";
+    assert.equal(chooseReference([frame(at), frame("2026-11-03T15:05:00.000Z")], new Date(at)), undefined);
+  });
+
+  it("has nothing to offer with no good frames", () => {
+    assert.equal(chooseReference([], new Date("2026-11-03T15:00:00.000Z")), undefined);
   });
 });

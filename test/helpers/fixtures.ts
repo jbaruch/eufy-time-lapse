@@ -119,6 +119,8 @@ export interface MockBehavior {
   renewal?: () => LoginRenewal;
   trusted?: boolean | null;
   trustOutcome?: boolean;
+  /** What a return to a saved position does, by default answering "returned". */
+  positionReturn?: () => "returned" | "gone";
 }
 
 export class MockAdapter implements CameraAdapter {
@@ -129,6 +131,9 @@ export class MockAdapter implements CameraAdapter {
   shutdowns = 0;
   renewals = 0;
   trustCodes: string[] = [];
+  savedPositions: number[] = [];
+  positionReturns: number[] = [];
+  forgottenPositions: number[] = [];
   private readonly behavior: MockBehavior;
 
   constructor(behavior: MockBehavior = {}) {
@@ -177,6 +182,25 @@ export class MockAdapter implements CameraAdapter {
     const input = await answer({ status: "tfa_required" });
     if ("verifyCode" in input) this.trustCodes.push(input.verifyCode);
     return this.behavior.trustOutcome ?? true;
+  }
+
+  setPositionReturn(behavior: () => "returned" | "gone"): void {
+    this.behavior.positionReturn = behavior;
+  }
+
+  async savePosition(): Promise<number> {
+    const slot = 3 + this.savedPositions.length;
+    this.savedPositions.push(slot);
+    return slot;
+  }
+
+  async returnToPosition(_cameraKey: string, positionId: number): Promise<"returned" | "gone"> {
+    this.positionReturns.push(positionId);
+    return this.behavior.positionReturn?.() ?? "returned";
+  }
+
+  async forgetPosition(_cameraKey: string, positionId: number): Promise<void> {
+    this.forgottenPositions.push(positionId);
   }
 
   /** Discoveries wait on this, for tests of a call that never answers. */

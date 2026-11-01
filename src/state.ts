@@ -78,6 +78,18 @@ const MIGRATIONS: readonly string[] = [
   CREATE TABLE events (at TEXT NOT NULL, kind TEXT NOT NULL, detail TEXT NOT NULL);
   `,
   `ALTER TABLE alerts ADD COLUMN recovery_owed_since TEXT;`,
+  `
+  CREATE TABLE framing_checks (
+    capture_id TEXT PRIMARY KEY,
+    checked_at TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('on_target', 'off_target', 'unsure')),
+    reference_capture_id TEXT,
+    dx INTEGER,
+    dy INTEGER,
+    detail TEXT NOT NULL
+  );
+  CREATE INDEX framing_checks_by_time ON framing_checks (checked_at);
+  `,
 ];
 
 export type SlotState = "pending" | "running" | "captured" | "captured_degraded" | "missed" | "skipped_policy";
@@ -155,7 +167,26 @@ export interface BatteryRow {
   telemetry_json: string;
 }
 
-export type FlagName = "operator_paused" | "battery_paused" | "battery_override" | "auth_required" | "first_started_at" | "camera_read_failures" | "login_renewal_tried_at";
+export type FlagName = "operator_paused" | "battery_paused" | "battery_override" | "auth_required" | "first_started_at" | "camera_read_failures" | "login_renewal_tried_at" | "framing_position_id" | "framing_returned_at";
+
+export type FramingCheckStatus = "on_target" | "off_target" | "unsure";
+
+export interface FramingCheckRow {
+  capture_id: string;
+  checked_at: string;
+  status: FramingCheckStatus;
+  reference_capture_id: string | null;
+  dx: number | null;
+  dy: number | null;
+  detail: string;
+}
+
+/** A frame the framing check found on target, and so can be compared against. */
+export interface FramingReference {
+  capture_id: string;
+  relative_dir: string;
+  frame_received_at: string;
+}
 
 export class State {
   private readonly db: DatabaseSync;
@@ -402,6 +433,39 @@ export class State {
       return;
     }
     this.db.prepare("INSERT INTO flags (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(name, value, this.stamp());
+  }
+
+  /** Later checks of the same frame are ignored, so a retried publish can't rewrite a verdict. */
+  recordFramingCheck(row: FramingCheckRow): void {
+    this.db
+      .prepare("INSERT INTO framing_checks (capture_id, checked_at, status, reference_capture_id, dx, dy, detail) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (capture_id) DO NOTHING")
+      .run(row.capture_id, row.checked_at, row.status, row.reference_capture_id, row.dx, row.dy, row.detail);
+  }
+
+  latestFramingCheck(): FramingCheckRow | undefined {
+    return this.one<FramingCheckRow>("SELECT * FROM framing_checks ORDER BY checked_at DESC, rowid DESC LIMIT 1");
+  }
+
+  /** Good frames since a time, or else the newest one of any age, so a long stop doesn't leave nothing to compare with. */
+  framingReferences(since: string): FramingReference[] {
+    const query = "SELECT c.capture_id, c.relative_dir, c.frame_received_at FROM framing_checks f JOIN captures c ON c.capture_id = f.capture_id WHERE f.status = 'on_target'";
+    const recent = this.all<FramingReference>(`${query} AND c.frame_received_at >= ? ORDER BY c.frame_received_at`, since);
+    return recent.length > 0 ? recent : this.all<FramingReference>(`${query} ORDER BY c.frame_received_at DESC LIMIT 1`);
+  }
+
+  /** Off-target verdicts since the last on-target one. Unsure neither adds to them nor ends them. */
+  offTargetSlotsInARow(): number {
+    const lastGood = this.one<{ at: string }>("SELECT checked_at AS at FROM framing_checks WHERE status = 'on_target' ORDER BY checked_at DESC, rowid DESC LIMIT 1")?.at ?? "";
+    return this.one<{ count: number }>("SELECT COUNT(*) AS count FROM framing_checks WHERE status = 'off_target' AND checked_at > ?", lastGood)?.count ?? 0;
+  }
+
+  offTargetCaptureIds(from: string, to: string): Set<string> {
+    const rows = this.all<{ capture_id: string }>("SELECT c.capture_id FROM framing_checks f JOIN captures c ON c.capture_id = f.capture_id WHERE f.status = 'off_target' AND c.local_date >= ? AND c.local_date <= ?", from, to);
+    return new Set(rows.map((row) => row.capture_id));
+  }
+
+  countEventsSince(kind: string, since: string): number {
+    return this.one<{ count: number }>("SELECT COUNT(*) AS count FROM events WHERE kind = ? AND at >= ?", kind, since)?.count ?? 0;
   }
 
   addEvent(kind: string, detail: string): void {

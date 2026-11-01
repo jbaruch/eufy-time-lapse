@@ -8,7 +8,7 @@ import { EufyMega, FileSessionStore, LoginStatus, MegaApiError, SessionExpiredEr
 import { CaptureFailure } from "../src/adapters/adapter.ts";
 import type { AuthChallenge, AuthInput } from "../src/adapters/adapter.ts";
 import { createMegaClient, isProgrammingError, isTrustedDevice, MegaAdapter } from "../src/adapters/mega.ts";
-import type { MegaClient, MegaDevice, MegaLiveStream, MegaLoginResult, SecurityApi } from "../src/adapters/mega.ts";
+import type { MegaClient, MegaDevice, MegaLiveStream, MegaLoginResult, MegaPositions, SecurityApi } from "../src/adapters/mega.ts";
 
 const SERIAL = "T86P2FULLSERIAL1234";
 
@@ -388,6 +388,146 @@ describe("MegaAdapter login renewal", () => {
   it("knows nothing about expiry without a login store", async () => {
     const { adapter } = setup();
     assert.equal(adapter.loginExpiresAt(), null);
+    await adapter.shutdown();
+  });
+});
+
+describe("MegaAdapter saved positions", () => {
+  type Slot = { id: number; raw: Record<string, unknown> };
+  const slots = (used: number[]): Slot[] => Array.from({ length: 10 }, (_, id) => ({ id, raw: { index: id, enable: used.includes(id) ? 1 : 0, zoom: 1, isdefault: id === 0 ? 1 : 0 } }));
+
+  function camera(start: number[] = [0, 1, 2]): { calls: string[]; used: number[]; positions: MegaPositions } {
+    const used = [...start];
+    const calls: string[] = [];
+    return {
+      calls,
+      used,
+      positions: {
+        list: async () => {
+          calls.push("list");
+          return slots(used);
+        },
+        save: async (id) => {
+          calls.push(`save ${id}`);
+          used.push(id);
+        },
+        goto: async (id) => {
+          calls.push(`goto ${id}`);
+        },
+        delete: async (id) => {
+          calls.push(`delete ${id}`);
+          used.splice(used.indexOf(id), 1);
+        },
+      },
+    };
+  }
+
+  /** No settling time, or these tests would wait out a camera that isn't there. */
+  function withPositions(positions: MegaPositions | undefined): { adapter: MegaAdapter; client: FakeClient; warnings: string[] } {
+    const client = new FakeClient();
+    const warnings: string[] = [];
+    const adapter = new MegaAdapter(client, (message) => warnings.push(message), () => {}, undefined, undefined, { saveMs: 0, moveMs: 0 });
+    client.device = fakeDevice(positions === undefined ? {} : { ptz: () => ({ preset: () => positions }) });
+    return { adapter, client, warnings };
+  }
+
+  it("saves in the first empty slot, leaves the others alone, and checks the camera kept it", async () => {
+    const c = camera();
+    const { adapter } = withPositions(c.positions);
+    assert.equal(await adapter.savePosition(SERIAL), 3);
+    assert.deepEqual(c.calls, ["list", "save 3", "list"]);
+    await adapter.shutdown();
+  });
+
+  it("calls a save the camera didn't keep a failure", async () => {
+    const c = camera();
+    c.positions.save = async () => {};
+    const { adapter } = withPositions(c.positions);
+    await assert.rejects(adapter.savePosition(SERIAL), (error: CaptureFailure) => error instanceof CaptureFailure && /didn't keep/.test(error.message));
+    await adapter.shutdown();
+  });
+
+  it("says what to do when every slot is in use, and saves nothing", async () => {
+    const c = camera([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    const { adapter } = withPositions(c.positions);
+    await assert.rejects(adapter.savePosition(SERIAL), /Delete one in the Eufy app/);
+    assert.deepEqual(c.calls, ["list"]);
+    await adapter.shutdown();
+  });
+
+  it("returns to a position that exists", async () => {
+    const c = camera([0, 3]);
+    const { adapter } = withPositions(c.positions);
+    assert.equal(await adapter.returnToPosition(SERIAL, 3), "returned");
+    assert.deepEqual(c.calls, ["list", "goto 3"]);
+    await adapter.shutdown();
+  });
+
+  it("won't send a go-to to an empty slot, because that same command would save the current view there", async () => {
+    const c = camera([0]);
+    const { adapter } = withPositions(c.positions);
+    assert.equal(await adapter.returnToPosition(SERIAL, 3), "gone");
+    assert.deepEqual(c.calls, ["list"]);
+    await adapter.shutdown();
+  });
+
+  it("deletes only a position that's still there", async () => {
+    const c = camera([0, 3]);
+    const { adapter } = withPositions(c.positions);
+    await adapter.forgetPosition(SERIAL, 3);
+    await adapter.forgetPosition(SERIAL, 3);
+    assert.deepEqual(c.calls, ["list", "delete 3", "list"]);
+    await adapter.shutdown();
+  });
+
+  it("closes the connection afterwards, and doesn't count it as an unexpected wake", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    const before = client.disconnects;
+    client.sessions.set(SERIAL, {});
+    await adapter.returnToPosition(SERIAL, 3);
+    assert.ok(client.disconnects > before);
+    assert.equal(adapter.unexpectedConnectionCount(), 0);
+    await adapter.shutdown();
+  });
+
+  it("logs in again before using the camera if it's been closed", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    await adapter.returnToPosition(SERIAL, 3);
+    const logins = client.logins;
+    await adapter.returnToPosition(SERIAL, 3);
+    assert.ok(client.logins > logins);
+    await adapter.shutdown();
+  });
+
+  it("calls an unreachable camera a capture failure, and still closes up", async () => {
+    const c = camera([0, 3]);
+    c.positions.list = async () => {
+      throw new StationUnreachableError("SN", 45000);
+    };
+    const { adapter, client } = withPositions(c.positions);
+    const before = client.disconnects;
+    await assert.rejects(adapter.returnToPosition(SERIAL, 3), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "camera_unreachable" && error.phase === "position");
+    assert.ok(client.disconnects > before);
+    await adapter.shutdown();
+  });
+
+  it("lets a bug through as itself, and still closes up", async () => {
+    const c = camera([0, 3]);
+    c.positions.goto = async () => {
+      throw new TypeError("not a function");
+    };
+    const { adapter, client } = withPositions(c.positions);
+    const before = client.disconnects;
+    await assert.rejects(adapter.returnToPosition(SERIAL, 3), TypeError);
+    assert.ok(client.disconnects > before);
+    await adapter.shutdown();
+  });
+
+  it("says so when the SDK offers no saved positions", async () => {
+    const { adapter } = withPositions(undefined);
+    await assert.rejects(adapter.returnToPosition(SERIAL, 3), /offers no saved positions/);
     await adapter.shutdown();
   });
 });

@@ -75,7 +75,7 @@ describe("ffmpegVersionLine", () => {
 
 describe("selectFrames", () => {
   it("takes scheduled frames at quality, and lists everything it leaves out", () => {
-    const { selected, exclusions } = selectFrames([capture("1"), capture("2", { kind: "manual" }), capture("3", { quality_status: "degraded", width: 320, height: 180 })], { includeManual: false, includeDegraded: false });
+    const { selected, exclusions } = selectFrames([capture("1"), capture("2", { kind: "manual" }), capture("3", { quality_status: "degraded", width: 320, height: 180 })], { includeManual: false, includeDegraded: false, includeOffTarget: false, offTarget: new Set() });
     assert.deepEqual(selected.map((frame) => frame.capture_id), ["1"]);
     assert.deepEqual(exclusions, [
       { capture_id: "2", reason: "manual capture" },
@@ -83,8 +83,20 @@ describe("selectFrames", () => {
     ]);
   });
 
+  it("leaves out frames the framing check found off target, and says why", () => {
+    const { selected, exclusions } = selectFrames([capture("1"), capture("2")], { includeManual: false, includeDegraded: false, includeOffTarget: false, offTarget: new Set(["2"]) });
+    assert.deepEqual(selected.map((frame) => frame.capture_id), ["1"]);
+    assert.deepEqual(exclusions, [{ capture_id: "2", reason: "the camera was pointing away from its saved position" }]);
+  });
+
+  it("takes off-target frames when asked", () => {
+    const { selected, exclusions } = selectFrames([capture("2")], { includeManual: false, includeDegraded: false, includeOffTarget: true, offTarget: new Set(["2"]) });
+    assert.equal(selected.length, 1);
+    assert.deepEqual(exclusions, []);
+  });
+
   it("takes them when asked", () => {
-    const { selected, exclusions } = selectFrames([capture("2", { kind: "manual" }), capture("3", { quality_status: "degraded" })], { includeManual: true, includeDegraded: true });
+    const { selected, exclusions } = selectFrames([capture("2", { kind: "manual" }), capture("3", { quality_status: "degraded" })], { includeManual: true, includeDegraded: true, includeOffTarget: false, offTarget: new Set() });
     assert.equal(selected.length, 2);
     assert.deepEqual(exclusions, []);
   });
@@ -143,7 +155,7 @@ describe("render", () => {
     await dir.remove();
   });
 
-  const base = { dataDir: "", owner: OWNER, from: "2026-07-01", to: "2026-07-01", fps: 30, includeManual: false, includeDegraded: false, now: () => new Date("2026-07-03T00:00:00Z") };
+  const base = { dataDir: "", owner: OWNER, from: "2026-07-01", to: "2026-07-01", fps: 30, includeManual: false, includeDegraded: false, includeOffTarget: false, now: () => new Date("2026-07-03T00:00:00Z") };
 
   it("builds a silent H.264 video at the frames' own size, and the duration the spec defines", async () => {
     const outputPath = join(dir.path, "renders", "plain.mp4");

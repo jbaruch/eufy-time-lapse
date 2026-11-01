@@ -50,6 +50,10 @@ export type MegaLoginResult = { status: "ok" } | { status: "captcha"; image: str
 const SESSION_FILE = "eufy-sdk-session.json";
 const RENEWAL_DIR_PREFIX = "renewal-";
 const TRUST_LIST_TIMEOUT_MS = 20_000;
+const POSITION_TIMEOUT_MS = 90_000;
+const POSITION_CLOSE_TIMEOUT_MS = 10_000;
+/** A save showed on the camera's own list after 5 seconds, not after 2. The move is what was tested with a 6-second wait. */
+const POSITION_SETTLE: PositionSettle = { saveMs: 5_000, moveMs: 6_000 };
 
 /** The SDK's HTTP client, for the trusted-device calls it doesn't wrap. test/mega-adapter.test.ts checks these against the real class. */
 export interface SecurityApi {
@@ -84,8 +88,22 @@ export interface MegaLiveStream {
   stop(): void;
 }
 
+export interface PositionSettle {
+  saveMs: number;
+  moveMs: number;
+}
+
+/** The camera's saved positions. `enable` is 1 on a slot in use and 0 on an empty one. */
+export interface MegaPositions {
+  list?(): Promise<Array<{ id: number; raw: Record<string, unknown> }>>;
+  save(id: number): Promise<unknown>;
+  goto(id: number): Promise<unknown>;
+  delete(id: number): Promise<unknown>;
+}
+
 export interface MegaDevice {
   stationSn: string;
+  ptz?(): { preset?(): MegaPositions } | undefined;
   camera?(): { live?(options: { signal: AbortSignal }): Promise<MegaLiveStream> } | undefined;
   info?(): { firmwareVersion?: string } | undefined;
   getProperty(name: string): { value: unknown } | undefined;
@@ -266,6 +284,7 @@ export class MegaAdapter implements CameraAdapter {
   private readonly sweepTimer: NodeJS.Timeout;
   private stream: MegaLiveStream | undefined;
   private attemptActive = false;
+  private readonly settle: PositionSettle;
   private relayUsed = false;
   private loginNeeded = false;
   private unexpectedConnections = 0;
@@ -274,7 +293,8 @@ export class MegaAdapter implements CameraAdapter {
   private readonly loginStore: LoginStore | undefined;
 
   /** `onFatal` gets a failure on a background timer, which nothing can catch. By default it ends the process, as any bug should. */
-  constructor(client: MegaClient, warn: (message: string) => void, registerSecret: (value: string) => void, onFatal?: (error: Error) => void, loginStore?: LoginStore) {
+  constructor(client: MegaClient, warn: (message: string) => void, registerSecret: (value: string) => void, onFatal?: (error: Error) => void, loginStore?: LoginStore, settle: PositionSettle = POSITION_SETTLE) {
+    this.settle = settle;
     this.client = client;
     this.loginStore = loginStore;
     this.onFatal = onFatal ?? crash;
@@ -598,6 +618,59 @@ export class MegaAdapter implements CameraAdapter {
       return { status: "timeout", detail: problems.join("; ") };
     }
     return problems.length > 0 ? { status: "error", detail: problems.join("; ") } : { status: "ok", detail: null };
+  }
+
+  /** Holds the connection open like an attempt does, so the sweep doesn't close it, and shuts it the same way afterwards. */
+  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>) => Promise<T>): Promise<T> {
+    this.attemptActive = true;
+    let deadline: NodeJS.Timeout | undefined;
+    try {
+      await this.restoreLogin();
+      const positions = (await this.deviceFor(cameraKey)).ptz?.()?.preset?.();
+      const list = positions?.list?.bind(positions);
+      if (positions === undefined || list === undefined) throw new CaptureFailure("camera_unreachable", "position", "The SDK offers no saved positions for this camera.");
+      const expired = new Promise<never>((_resolve, reject) => {
+        deadline = setTimeout(() => reject(new CaptureFailure("camera_unreachable", "position", `The camera didn't finish with its saved positions within ${POSITION_TIMEOUT_MS / 1000} seconds.`)), POSITION_TIMEOUT_MS);
+      });
+      return await Promise.race([work(positions, list), expired]);
+    } catch (error) {
+      if (error instanceof CaptureFailure) throw error;
+      throw await this.failureFrom(error, "position", new AbortController().signal);
+    } finally {
+      clearTimeout(deadline);
+      const closed = await this.teardown(cameraKey, POSITION_CLOSE_TIMEOUT_MS);
+      if (closed.status !== "ok") this.warn(`the camera connection may not have closed after using its saved positions: ${closed.detail ?? "no detail"}`);
+    }
+  }
+
+  async savePosition(cameraKey: string): Promise<number> {
+    return this.withPositions(cameraKey, async (positions, list) => {
+      const slot = (await list()).find((position) => position.raw.enable === 0);
+      if (slot === undefined) throw new CaptureFailure("camera_unreachable", "position", "Every saved-position slot on the camera is in use. Delete one in the Eufy app and try again.");
+      await positions.save(slot.id);
+      // The camera answers before it has stored the position, and only its own list can say that it did.
+      await delay(this.settle.saveMs);
+      const kept = (await list()).find((position) => position.id === slot.id)?.raw.enable === 1;
+      if (!kept) throw new CaptureFailure("camera_unreachable", "position", `The camera didn't keep the position saved in slot ${slot.id}. Try again, or save one in the Eufy app.`);
+      return slot.id;
+    });
+  }
+
+  async returnToPosition(cameraKey: string, positionId: number): Promise<"returned" | "gone"> {
+    return this.withPositions(cameraKey, async (positions, list) => {
+      // On an empty slot this same command saves the current view instead, so a position deleted in the app must be caught first.
+      if ((await list()).find((position) => position.id === positionId)?.raw.enable !== 1) return "gone";
+      await positions.goto(positionId);
+      // Closing the connection straight away could stop the camera on its way.
+      await delay(this.settle.moveMs);
+      return "returned";
+    });
+  }
+
+  async forgetPosition(cameraKey: string, positionId: number): Promise<void> {
+    await this.withPositions(cameraKey, async (positions, list) => {
+      if ((await list()).find((position) => position.id === positionId)?.raw.enable === 1) await positions.delete(positionId);
+    });
   }
 
   unexpectedConnectionCount(): number {
