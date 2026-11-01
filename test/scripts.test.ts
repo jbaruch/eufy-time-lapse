@@ -531,6 +531,27 @@ describe("scripts/deploy.sh", () => {
     assert.deepEqual((await readdir(host)).sort(), [".deployed-files", "CHANGELOG.md", "Dockerfile", "compose.yaml", "src"]);
   });
 
+  for (const [name, directory] of [["spaces", "my app"], ["a quote", "it's mine"], ["shell metacharacters", "app$(touch ran-a); touch ran-b; 'x"], ["a leading dash", "-app"]] as const) {
+    it(`ships into a directory with ${name}, and runs none of it`, async () => {
+      const { repo, host, env } = await world();
+      const home = join(host, "..");
+      await mkdir(join(home, directory));
+      const result = await bash([script, "somehost", directory], { cwd: repo, env });
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(await readFile(join(home, directory, "compose.yaml"), "utf8"), "services: {}\n");
+      assert.deepEqual((await readdir(home)).sort(), [directory, "app"].sort(), "nothing ran, so nothing else turned up");
+    });
+  }
+
+  it("refuses a host ssh would read as an option", async () => {
+    const { repo, host, log, env } = await world();
+    const result = await bash([script, "-oProxyCommand=touch ran", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /can't start with a dash/);
+    assert.deepEqual(await readdir(host), []);
+    assert.equal(await readFile(log, "utf8"), "");
+  });
+
   it("does nothing when only sourced", async () => {
     const { repo, host, env } = await world();
     const result = await bash(["-c", `source '${script}'; echo sourced`], { cwd: repo, env });

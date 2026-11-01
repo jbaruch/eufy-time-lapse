@@ -14,7 +14,7 @@ readonly MANIFEST_HEADER="# eufy-time-lapse deployed files, schema_version=2"
 
 on_host() {
   # shellcheck disable=SC2029 # The directory is meant to expand here, on this side of the connection.
-  ssh "$host" "cd '$directory' && $1"
+  ssh "$host" "cd -- $remote_directory && $1"
 }
 
 # The lines of the first list that aren't in the second. comm needs input sorted in its own locale, so both use one.
@@ -47,6 +47,12 @@ main() {
   host="${1:-nas}"
   directory="${2:-eufy-time-lapse}"
   local wait_seconds="${DEPLOY_WAIT_SECONDS:-60}"
+  if [[ "$host" == -* ]]; then
+    echo "The host can't start with a dash, because ssh would read it as an option: $host. Nothing was deployed." >&2
+    exit 1
+  fi
+  # Quoted for the host's shell: this is a value, and nothing in it should run there.
+  printf -v remote_directory '%q' "$directory"
 
   if [[ -n "$(git status --porcelain)" ]]; then
     echo "Uncommitted changes wouldn't ship, so nothing was deployed. Commit or stash them first." >&2
