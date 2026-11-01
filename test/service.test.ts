@@ -12,7 +12,7 @@ import { CameraLockHeldError, withCameraLock } from "../src/lock.ts";
 import { CaptureService, parseCaptureMetadata, scheduleRevision } from "../src/service.ts";
 import type { CaptureMetadata } from "../src/service.ts";
 import { State } from "../src/state.ts";
-import type { AttemptRow } from "../src/state.ts";
+import type { AttemptRow, SlotState } from "../src/state.ts";
 import { buildCalibration, buildStatus } from "../src/status.ts";
 import { CAMERA, liveSession, MockAdapter, rawVideo, tempDir } from "./helpers/fixtures.ts";
 import type { MockBehavior } from "./helpers/fixtures.ts";
@@ -709,9 +709,10 @@ describe("CaptureService", () => {
     const HASH = createHash("sha256").update(FRAME).digest("hex");
     const SCHEDULED_AT = "2026-05-01T13:00:00.000Z";
     const STORED_SLOT = `construction/site-overview/${SCHEDULED_AT}`;
-    const metadataFor = (captureId: string, overrides: Record<string, unknown> = {}) => ({ schema_version: 1, capture_id: captureId, project_id: "construction", camera_id: "site-overview", slot_id: null, scheduled_at_utc: null, kind: "manual", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: FRAME.length, sha256: HASH, quality_status: "ok", ...overrides });
+    const STORED_REVISION = "revision-one";
+    const metadataFor = (captureId: string, overrides: Record<string, unknown> = {}) => ({ schema_version: 1, capture_id: captureId, project_id: "construction", camera_id: "site-overview", slot_id: null, schedule_revision: null, scheduled_at_utc: null, kind: "manual", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: FRAME.length, sha256: HASH, quality_status: "ok", ...overrides });
 
-    const scheduledFor = (captureId: string, overrides: Record<string, unknown> = {}) => metadataFor(captureId, { kind: "scheduled", slot_id: STORED_SLOT, scheduled_at_utc: SCHEDULED_AT, frame_received_at: "2026-05-01T13:00:12.000Z", ...overrides });
+    const scheduledFor = (captureId: string, overrides: Record<string, unknown> = {}) => metadataFor(captureId, { kind: "scheduled", slot_id: STORED_SLOT, schedule_revision: STORED_REVISION, scheduled_at_utc: SCHEDULED_AT, frame_received_at: "2026-05-01T13:00:12.000Z", ...overrides });
 
     async function spooled(h: { dataDir: string }, captureId: string, metadata: string, frame: Buffer | null = FRAME): Promise<void> {
       const directory = join(h.dataDir, "spool", "construction", "site-overview", "2026", "05", "01", captureId);
@@ -737,6 +738,8 @@ describe("CaptureService", () => {
       ["metadata copied from another camera", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { camera_id: "other-camera" })))],
       ["a manual frame claiming a slot", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { slot_id: STORED_SLOT })))],
       ["a manual frame with a scheduled time", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { scheduled_at_utc: SCHEDULED_AT })))],
+      ["a manual frame with a schedule revision", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { schedule_revision: STORED_REVISION })))],
+      ["a scheduled frame with no schedule revision", async (h) => spooled(h, "bad", JSON.stringify(scheduledFor("bad", { schedule_revision: null })))],
       ["a scheduled frame with no slot", async (h) => spooled(h, "bad", JSON.stringify(scheduledFor("bad", { slot_id: null })))],
       ["a scheduled frame with no time", async (h) => spooled(h, "bad", JSON.stringify(scheduledFor("bad", { scheduled_at_utc: null })))],
       ["a slot for a different time", async (h) => spooled(h, "bad", JSON.stringify(scheduledFor("bad", { slot_id: "construction/site-overview/2026-05-01T14:00:00.000Z" })))],
@@ -766,6 +769,44 @@ describe("CaptureService", () => {
       await h.service.reconcile();
       assert.equal(h.state.allCaptures()[0]?.slot_id, STORED_SLOT);
       assert.equal(h.notices.some((notice) => notice.includes("unreadable metadata")), false, h.notices.join("; "));
+      h.state.close();
+    });
+
+    /** The slot a stored frame claims, as a row in the given state. */
+    function storedSlot(h: { state: State }, state: SlotState, revision = STORED_REVISION): void {
+      h.state.materialize([{ scheduledAt: new Date(SCHEDULED_AT), localDate: "2026-05-01", localTime: "08:00", localMinutes: 480, nonexistent: false }], "construction/site-overview", revision);
+      h.state.setSlot(STORED_SLOT, state);
+    }
+
+    it("adopts a frame whose slot is running, as the writer leaves it when it dies, and finishes the slot", async () => {
+      const h = await harness();
+      storedSlot(h, "running");
+      await spooled(h, "orphan", JSON.stringify(scheduledFor("orphan")));
+      await h.service.reconcile();
+      assert.equal(h.state.hasCapture("orphan"), true);
+      assert.equal(h.state.getSlot(STORED_SLOT)?.state, "captured");
+      h.state.close();
+    });
+
+    for (const slotState of ["pending", "missed", "skipped_policy", "captured", "captured_degraded"] as const) {
+      it(`leaves a frame claiming a ${slotState} slot alone, alerts about it, and leaves the slot as it was`, async () => {
+        const h = await harness();
+        storedSlot(h, slotState);
+        await spooled(h, "bad", JSON.stringify(scheduledFor("bad")));
+        await h.service.reconcile();
+        assert.equal(h.state.hasCapture("bad"), false);
+        assert.equal(h.state.getSlot(STORED_SLOT)?.state, slotState);
+        assert.ok(h.notices.some((notice) => notice.includes("1 frame(s) in the spool have unreadable metadata")), h.notices.join("; "));
+        h.state.close();
+      });
+    }
+
+    it("leaves a frame from another schedule revision alone, even on a running slot", async () => {
+      const h = await harness();
+      storedSlot(h, "running", "a-later-revision");
+      await spooled(h, "bad", JSON.stringify(scheduledFor("bad")));
+      await h.service.reconcile();
+      assert.equal(h.state.hasCapture("bad"), false);
       h.state.close();
     });
 
@@ -858,7 +899,7 @@ describe("CaptureService", () => {
   });
 
   describe("parseCaptureMetadata", () => {
-    const good = { schema_version: 1, capture_id: "id", project_id: "construction", camera_id: "site-overview", slot_id: "slot", scheduled_at_utc: "2026-05-01T13:00:00.000Z", kind: "scheduled", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 10, sha256: "a".repeat(64), quality_status: "ok" };
+    const good = { schema_version: 1, capture_id: "id", project_id: "construction", camera_id: "site-overview", slot_id: "slot", schedule_revision: "revision-one", scheduled_at_utc: "2026-05-01T13:00:00.000Z", kind: "scheduled", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 10, sha256: "a".repeat(64), quality_status: "ok" };
 
     it("accepts what this build wrote", () => {
       assert.equal(parseCaptureMetadata(JSON.stringify(good))?.capture_id, "id");
@@ -871,6 +912,8 @@ describe("CaptureService", () => {
       ["an unknown quality", JSON.stringify({ ...good, quality_status: "great" })],
       ["a slot id of the wrong type", JSON.stringify({ ...good, slot_id: 5 })],
       ["an empty capture id", JSON.stringify({ ...good, capture_id: "" })],
+      ["no schedule revision", JSON.stringify({ ...good, schedule_revision: undefined })],
+      ["a schedule revision of the wrong type", JSON.stringify({ ...good, schedule_revision: 5 })],
       ["no scheduled time", JSON.stringify({ ...good, scheduled_at_utc: undefined })],
       ["a scheduled time that isn't a time", JSON.stringify({ ...good, scheduled_at_utc: "soon" })],
       ["no project id", JSON.stringify({ ...good, project_id: undefined })],

@@ -89,7 +89,7 @@ export interface CaptureMetadata {
 }
 
 /** The part of a capture's stored metadata that recovery reads, which is all this code vouches for. */
-export type AdoptableCapture = Pick<CaptureMetadata, "capture_id" | "project_id" | "camera_id" | "slot_id" | "scheduled_at_utc" | "kind" | "local_date" | "frame_received_at" | "width" | "height" | "jpeg_bytes" | "sha256" | "quality_status">;
+export type AdoptableCapture = Pick<CaptureMetadata, "capture_id" | "project_id" | "camera_id" | "slot_id" | "schedule_revision" | "scheduled_at_utc" | "kind" | "local_date" | "frame_received_at" | "width" | "height" | "jpeg_bytes" | "sha256" | "quality_status">;
 
 /** Reads what recovery needs from stored metadata, or null if it isn't a version and shape this build understands. */
 export function parseCaptureMetadata(text: string): AdoptableCapture | null {
@@ -114,6 +114,7 @@ export function parseCaptureMetadata(text: string): AdoptableCapture | null {
     /^[0-9a-f]{64}$/.test(field("sha256")) &&
     counts &&
     (record.slot_id === null || typeof record.slot_id === "string") &&
+    (record.schedule_revision === null || typeof record.schedule_revision === "string") &&
     (record.scheduled_at_utc === null || !Number.isNaN(Date.parse(field("scheduled_at_utc")))) &&
     (record.kind === "scheduled" || record.kind === "manual") &&
     (record.quality_status === "ok" || record.quality_status === "degraded");
@@ -248,20 +249,22 @@ export class CaptureService {
   }
 
   /**
-   * A claim on a slot counts only if the writer could have made it: a manual frame has no slot, and a scheduled one holds the
-   * slot for its own time, taken after that time, that nothing else holds. A database lost whole has no slot rows to compare
-   * with, so a missing row doesn't count against a frame, and the frame is what a render needs.
+   * A claim on a slot counts only if the writer could have made it. A manual frame has no slot. A scheduled one holds the slot
+   * for its own time, taken after that time, and the writer only leaves one unrecorded by dying while that slot is running.
+   * A database lost whole has no slot rows to compare with, so a missing row doesn't count against a frame, and the frame is
+   * what a render needs.
    */
   private slotClaimHolds(metadata: AdoptableCapture): boolean {
-    const { slot_id: slotId, scheduled_at_utc: scheduledAt } = metadata;
-    if (metadata.kind === "manual") return slotId === null && scheduledAt === null;
-    if (slotId === null || scheduledAt === null) return false;
+    const { slot_id: slotId, schedule_revision: revision, scheduled_at_utc: scheduledAt } = metadata;
+    if (metadata.kind === "manual") return slotId === null && revision === null && scheduledAt === null;
+    if (slotId === null || revision === null || scheduledAt === null) return false;
     if (slotId !== `${this.config.project.id}/${this.config.camera.id}/${scheduledAt}`) return false;
     const receivedAt = Date.parse(metadata.frame_received_at);
     if (receivedAt < Date.parse(scheduledAt) || receivedAt > this.now().getTime()) return false;
     if (this.state.slotHasCapture(slotId)) return false;
     const slot = this.state.getSlot(slotId);
-    return slot === undefined || (slot.scheduled_at_utc === scheduledAt && (slot.capture_id === null || slot.capture_id === metadata.capture_id));
+    if (slot === undefined) return true;
+    return slot.state === "running" && slot.schedule_revision === revision && slot.scheduled_at_utc === scheduledAt && (slot.capture_id === null || slot.capture_id === metadata.capture_id);
   }
 
   private spoolDay(localDate: string): string {

@@ -230,6 +230,8 @@ Persist counters, budget reservations, and attempt counts in SQLite; a restart m
 
 Keep SQLite and the local image spool on durable storage in a persistent Docker volume. Write JPEG and JSON metadata into a temporary directory, then atomically rename the complete directory. Enforce a unique database constraint on the scheduled slot. Following cleanup, atomically replace provisional metadata with the final JSON, then allow upload. After crashes, reconcile completed local directories against DB rows without recapturing an already saved slot. Mark unfinished cleanup as `unknown_after_crash`, not as successfully completed.
 
+Reconciling adopts a stored frame only if its metadata, its place in the spool and its bytes all agree, and it belongs to the configured project and camera. A scheduled frame must also hold its own slot: the writer only leaves one unrecorded by dying while that slot is `running`, so a slot row in any other state, or from another schedule revision, refuses it. A frame with no slot row at all is still adopted, because that's what a database lost whole looks like, and those frames are what a render needs. A refused frame is left in place and raises an alert.
+
 An independent worker uploads artifacts to S3-compatible storage. Example object layout:
 
 ```text
