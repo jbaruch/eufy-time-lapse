@@ -149,6 +149,19 @@ describe("Redactor", () => {
   });
 });
 
+describe("Redactor, on packet dumps", () => {
+  it("removes the hex of a packet the SDK logs, which holds the device id", () => {
+    const dump = "f183001cafcc651441424344454647000000007b414243444500000001000000";
+    const text = new Redactor().redact(`[p2p] UNHANDLED payload hex: ${dump}`);
+    assert.equal(text.includes(dump), false);
+    assert.match(text, /UNHANDLED payload hex: <32 bytes of hex>/);
+  });
+
+  it("keeps short hex, such as a packet header", () => {
+    assert.match(new Redactor().redact("<<< 192.0.2.1:32100 header=f121 len=8"), /header=f121/);
+  });
+});
+
 describe("createRedactingLogger", () => {
   it("writes one redacted JSON line per call, at every level", () => {
     const lines: string[] = [];
