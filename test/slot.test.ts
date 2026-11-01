@@ -3,10 +3,11 @@ import { access } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
-import type { LiveSession } from "../src/adapters/adapter.ts";
+import type { CleanupResult, LiveSession } from "../src/adapters/adapter.ts";
 import { captureSlot } from "../src/capture/slot.ts";
 import type { SlotOptions } from "../src/capture/slot.ts";
 import { liveSession, MockAdapter, rawVideo, tempDir } from "./helpers/fixtures.ts";
+import type { MockBehavior } from "./helpers/fixtures.ts";
 
 describe("captureSlot", () => {
   let dir: { path: string; remove: () => Promise<void> };
@@ -29,7 +30,7 @@ describe("captureSlot", () => {
   const good = async (): Promise<LiveSession> => liveSession(high, { codec: "h264" });
   const small = async (): Promise<LiveSession> => liveSession(low, { codec: "h264" });
 
-  function slot(script: Array<() => Promise<LiveSession>>, overrides: Partial<SlotOptions> = {}) {
+  function slot(script: Array<() => Promise<LiveSession>>, overrides: Partial<SlotOptions> = {}, teardown?: MockBehavior["teardown"]) {
     run += 1;
     const queue = [...script];
     const adapter = new MockAdapter({
@@ -38,6 +39,7 @@ describe("captureSlot", () => {
         if (next === undefined) throw new Error("this test did not expect another try");
         return await next();
       },
+      ...(teardown === undefined ? {} : { teardown }),
     });
     const sleeps: number[] = [];
     const logged: string[] = [];
@@ -120,6 +122,27 @@ describe("captureSlot", () => {
       assert.equal((await result).chosen.failure?.reason, reason);
       assert.equal(adapter.opens, 1);
       assert.deepEqual(sleeps, []);
+    });
+  }
+
+  for (const status of ["error", "timeout"] as const) {
+    const unclosed = async (): Promise<CleanupResult> => ({ status, detail: "the connection may still be open" });
+
+    it(`doesn't wake the camera again after a failed try whose cleanup reports ${status}`, async () => {
+      const { adapter, result, logged } = slot([unreachable, good], {}, unclosed);
+      const { chosen, otherTries } = await result;
+      assert.equal(adapter.opens, 1);
+      assert.equal(chosen.status, "failed");
+      assert.equal(otherTries.length, 0);
+      assert.ok(logged.some((line) => line.includes("may not have closed") && line.includes(status)), logged.join("; "));
+    });
+
+    it(`keeps a degraded frame, and doesn't try to better it, after cleanup reports ${status}`, async () => {
+      const { adapter, result } = slot([small, good], {}, unclosed);
+      const { chosen } = await result;
+      assert.equal(adapter.opens, 1);
+      assert.equal(chosen.status, "captured_degraded");
+      assert.equal(chosen.cleanup.status, status, "and the fault stays on the record");
     });
   }
 

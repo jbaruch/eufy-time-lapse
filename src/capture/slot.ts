@@ -72,8 +72,8 @@ export async function captureSlot(options: SlotOptions): Promise<SlotResult> {
     tries.push(record);
 
     if (!shouldRetry(record) || index + 1 === options.maxTries || signal.aborted) break;
-    if (record.cleanup.status === "timeout") {
-      options.log("not retrying: the last try's teardown is still running, and could cut off another try on this connection");
+    if (record.cleanup.status !== "ok") {
+      options.log(`not retrying: the last try's connection may not have closed (${record.cleanup.status}), and another try would wake the camera on top of it`);
       break;
     }
 
