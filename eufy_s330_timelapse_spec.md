@@ -469,7 +469,7 @@ Before enabling year-long operation, fill in project dates, site time zone, Eufy
 
 - The S3 offsite archiver. Frames are spooled on the host, whose storage is durable, but there is no offsite copy; the destination is not chosen.
 - The monthly preview render.
-- Battery and solar calibration, which needs the camera on its panel.
+- Calibration of battery, solar and reception, which needs the camera mounted at the site on its panel. Signal there sets connect times and how hard the radio works, so a number measured on the bench, session cap included, doesn't carry over. Taking it off cable earlier only calls for a gentler config, with a real daylight window and no debug logs.
 
 # 14. Post-MVP Ideas
 
