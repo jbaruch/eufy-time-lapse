@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import { join, sep } from "node:path";
+import { FRESHNESS_BASIS, TRAFFIC_BASIS } from "./capture/acquire.ts";
 import { isFileSystemError } from "./config.ts";
 import type { CameraLink } from "./probe/report.ts";
 import type { CaptureRow } from "./state.ts";
 
 const LOCAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export const EXPOSURE_TIME_NOTE = "the stream carries no trustworthy exposure time; the camera's burned-in clock, if enabled, is in the image";
 
 /** Whose frames these are. A file copied in from elsewhere can be perfectly well formed. */
 export interface CaptureOwner {
@@ -66,8 +68,14 @@ type Check = (value: unknown) => boolean;
 
 const text: Check = (value) => typeof value === "string" && value.length > 0;
 const anyText: Check = (value) => typeof value === "string";
-const time: Check = (value) => typeof value === "string" && !Number.isNaN(Date.parse(value));
-const amount: Check = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
+/** The form the writer uses, which is also what lets two of them compare correctly as text. */
+const time: Check = (value) => typeof value === "string" && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value;
+const amount: Check = (value) => Number.isInteger(value) && (value as number) >= 0;
+const calendarDate: Check = (value) => {
+  if (typeof value !== "string" || !LOCAL_DATE.test(value)) return false;
+  const parsed = Date.parse(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(parsed) && new Date(parsed).toISOString().slice(0, 10) === value;
+};
 const positiveWhole: Check = (value) => Number.isInteger(value) && (value as number) > 0;
 const percentage: Check = (value) => typeof value === "number" && value >= 0 && value <= 100;
 const orNull = (check: Check): Check => (value) => value === null || check(value);
@@ -88,12 +96,12 @@ const METADATA_SHAPE: Record<keyof CaptureMetadata, Check> = {
   stream_started_at: orNull(time),
   frame_received_at: time,
   camera_captured_at: oneOf(null),
-  camera_captured_at_note: text,
+  camera_captured_at_note: oneOf(EXPOSURE_TIME_NOTE),
   site_time_zone: text,
-  local_date: (value) => typeof value === "string" && LOCAL_DATE.test(value),
+  local_date: calendarDate,
   source: oneOf("live_p2p"),
   capture_session_id: text,
-  freshness_basis: text,
+  freshness_basis: oneOf(FRESHNESS_BASIS),
   cold_connection: oneOf(true, false, null),
   retained: oneOf(false),
   adapter: text,
@@ -119,7 +127,7 @@ const METADATA_SHAPE: Record<keyof CaptureMetadata, Check> = {
   every_minutes: orNull(positiveWhole),
   media_video_bytes: amount,
   media_audio_bytes: amount,
-  traffic_measurement_basis: text,
+  traffic_measurement_basis: oneOf(TRAFFIC_BASIS),
 };
 
 /** What holds between fields: a manual frame has no schedule and a scheduled one has all of it, and nothing arrives before it was asked for. */
@@ -127,8 +135,9 @@ function fieldsAgree(record: CaptureMetadata): boolean {
   const schedule = [record.slot_id, record.schedule_revision, record.scheduled_at_utc, record.every_minutes];
   const consistentKind = record.kind === "manual" ? schedule.every((value) => value === null) : schedule.every((value) => value !== null);
   const requestedAt = Date.parse(record.request_started_at);
-  const streamInOrder = record.stream_started_at === null || Date.parse(record.stream_started_at) >= requestedAt;
-  return consistentKind && streamInOrder && Date.parse(record.frame_received_at) >= requestedAt;
+  const receivedAt = Date.parse(record.frame_received_at);
+  const streamedAt = record.stream_started_at === null ? requestedAt : Date.parse(record.stream_started_at);
+  return consistentKind && requestedAt <= streamedAt && streamedAt <= receivedAt;
 }
 
 /** The stored record, or null if it isn't a version, complete shape and set of values this build writes. */

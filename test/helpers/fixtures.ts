@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
 import type { CameraAdapter, AuthState, CameraInfo, CleanupResult, LiveSession } from "../../src/adapters/adapter.ts";
+import { FRESHNESS_BASIS, TRAFFIC_BASIS } from "../../src/capture/acquire.ts";
+import { EXPOSURE_TIME_NOTE } from "../../src/stored-capture.ts";
 
 const run = promisify(execFile);
 
@@ -67,12 +69,12 @@ export function storedMetadata(overrides: Record<string, unknown> = {}): Record<
     stream_started_at: "2026-05-01T12:59:55.000Z",
     frame_received_at: "2026-05-01T13:00:00.000Z",
     camera_captured_at: null,
-    camera_captured_at_note: "no trustworthy exposure time",
+    camera_captured_at_note: EXPOSURE_TIME_NOTE,
     site_time_zone: "America/Chicago",
     local_date: "2026-05-01",
     source: "live_p2p",
     capture_session_id: "session",
-    freshness_basis: "live stream",
+    freshness_basis: FRESHNESS_BASIS,
     cold_connection: true,
     retained: false,
     adapter: "mock",
@@ -98,7 +100,7 @@ export function storedMetadata(overrides: Record<string, unknown> = {}): Record<
     every_minutes: 5,
     media_video_bytes: 450000,
     media_audio_bytes: 0,
-    traffic_measurement_basis: "media payload only",
+    traffic_measurement_basis: TRAFFIC_BASIS,
     ...overrides,
   };
 }

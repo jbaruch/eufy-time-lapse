@@ -14,7 +14,7 @@ import { dataBudgetSpent, decide, nextBatteryPaused, reservedSessionMs, sessionB
 import type { PolicyInput } from "./policy.ts";
 import type { CameraLink } from "./probe/report.ts";
 import { addDays, formatClock, isActiveForInterval, localParts, planDay } from "./schedule.ts";
-import { readStoredCapture, spoolDirectory, storedCaptureProblem } from "./stored-capture.ts";
+import { EXPOSURE_TIME_NOTE, readStoredCapture, spoolDirectory, storedCaptureProblem } from "./stored-capture.ts";
 import type { CaptureMetadata, CaptureOwner } from "./stored-capture.ts";
 import type { ScheduleConfig } from "./schedule.ts";
 import type { ServiceConfig } from "./service-config.ts";
@@ -709,7 +709,7 @@ export class CaptureService {
       stream_started_at: record.timing.stream_started_at,
       frame_received_at: receivedAt,
       camera_captured_at: null,
-      camera_captured_at_note: "the stream carries no trustworthy exposure time; the camera's burned-in clock, if enabled, is in the image",
+      camera_captured_at_note: EXPOSURE_TIME_NOTE,
       site_time_zone: this.zone,
       local_date: localDate,
       source: "live_p2p",
