@@ -12,8 +12,7 @@
     "noFallthroughCasesInSwitch": true,
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
-    "allowImportingTsExtensions": true,
-    "skipLibCheck": true
+    "allowImportingTsExtensions": true
   },
   "include": ["src", "test", "lab"]
 }
