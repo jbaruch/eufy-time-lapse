@@ -2,7 +2,7 @@
 
 **Version:** 1.1\
 **Date:** October 31, 2026\
-**Status:** Native LTE feasibility shown on the actual camera, at 98% of first tries in a back-to-back run (section 3.1). Battery behavior on solar is not yet measured. The capture service runs on the target host. The offsite archiver and monthly preview are not built.
+**Status:** Native LTE feasibility shown on the actual camera: 98% of first tries in a back-to-back run, 46 of 47 slots at 4K at the real pace, and a passed formal probe (section 3.1). Battery behavior on solar is not yet measured. The capture service runs on the target host. The offsite archiver and monthly preview are not built.
 
 **Changes in 1.1**, from running the real camera and from the owner's decisions:
 
@@ -106,7 +106,23 @@ Answering the camera's relay packets, and switching to another relay on a stall 
 
 **What's left:** about 2% of tries. A session closes about 2 seconds in with no visible cause, or the camera never completes the key exchange and closes at about 6 seconds. Neither has a root cause. The next try, 5 seconds later, handles both, at a cost of under 10 seconds.
 
-**At the real pace:** the first 6 slots at 5 minutes were all 4K on the first try. A longer run is in progress.
+**The formal probe** passed on November 1, 2026: 3 of 3 attempts at 4K on the first try, 15 minutes apart, connecting in 6.2 to 7.5 seconds, with sessions of 11.3 to 18.3 seconds and no connection left open.
+
+**At the real pace:** 47 slots at 5 minutes over one night, on cable. 46 came out at 4K and one at 1280×720. 43 of 46 first tries reached 4K, and a retry fixed 2 of the other 3. Sessions took 13.8 seconds at the median and 28.7 at the 90th percentile, for about 0.42 MB of video per frame.
+
+**The run slowed down with no change to the connect.** Until about 03:30 local, connects took 7.3 seconds at the median and 10.4 at most. After that they took 13.0 and 22.8, and median sessions went from 12.7 to 19.3 seconds. Most of that is the wait for the lookup servers to learn the camera's address, which moved from a steady 4 seconds to steps of about 4, 10 and 16 to 19. Some sessions also go silent for about 6 seconds mid-stream. Our lookups were acknowledged within 20 ms throughout, so the steps are on the camera's or the carrier's side. A lost wake being retried would fit, but that's inferred. A retry seconds later found the camera in 3.8 seconds. The attempt deadline is 30 seconds, and 4 sessions reached it with a frame already in hand, so calibration has to allow for this when it sets the session cap.
+
+**Broken on purpose, on the real camera:**
+
+| What happened | What the service did |
+|---|---|
+| `SIGKILL` mid-decode, with the stream on disk and no frame yet | The restart published the 4K frame 1.5 seconds later, marked `unknown_after_crash` |
+| The fall-back hour on November 1 | No slots in the repeated hour, and no duplicate local times |
+| The month changing at local midnight | The data budget restarted from the new month's sessions |
+| The service stopped for 31 minutes | 5 slots marked missed, one alert on restart, and its recovery 19 seconds later with the next frame |
+| A second full login from the service's device identity | Eufy asked for a 2FA code, which is how the trusted-device gap was found. The held token kept working, and the next slot came out at 4K |
+
+**Not proven yet:** that a trusted device renews with no code, and the renewal itself on the real account. Both need one real code from the account holder, through `login`. On the real account so far: the trusted list answers, and lists 3 devices and not this one, and a wrong code on the add comes back as `26050`, Eufy's own verify-code error.
 
 **Not ruled out:** what the camera does on its side is only visible through the relay. Battery cost has not been measured, because the camera has only run on cable. It's the main open question for the 5-minute target.
 
