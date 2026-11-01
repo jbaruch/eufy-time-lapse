@@ -67,7 +67,7 @@ describe("CaptureService", () => {
     restart: () => { service: CaptureService; state: State };
   }
 
-  async function harness(options: { open?: (signal: AbortSignal) => Promise<LiveSession>; teardown?: MockBehavior["teardown"]; authFailure?: MockBehavior["authFailure"]; shutdownFailure?: MockBehavior["shutdownFailure"]; camera?: CameraInfo; auth?: AuthState[]; config?: ServiceConfig; startMs?: number } = {}): Promise<Harness> {
+  async function harness(options: { sleep?: () => Promise<void>; open?: (signal: AbortSignal) => Promise<LiveSession>; teardown?: MockBehavior["teardown"]; authFailure?: MockBehavior["authFailure"]; shutdownFailure?: MockBehavior["shutdownFailure"]; camera?: CameraInfo; auth?: AuthState[]; config?: ServiceConfig; startMs?: number } = {}): Promise<Harness> {
     run += 1;
     const dataDir = join(root.path, `data-${run}`);
     await mkdir(dataDir, { recursive: true });
@@ -95,7 +95,7 @@ describe("CaptureService", () => {
           notices.push(text);
         },
         now,
-        sleep: async () => {},
+        sleep: options.sleep ?? (async () => {}),
         diskFreeMb: async () => disk.mb,
       });
     const state = new State(join(dataDir, "state.sqlite"), now);
@@ -845,6 +845,39 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("rebuilds a lost slot row from the frame, so the camera isn't sent after it again", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      const [capture] = h.state.allCaptures();
+      assert.ok(capture !== undefined);
+      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"));
+      raw.prepare("DELETE FROM captures WHERE capture_id = ?").run(capture.capture_id);
+      raw.prepare("DELETE FROM slots WHERE slot_id = ?").run(SLOT_0800);
+      raw.close();
+      await h.service.reconcile();
+      assert.equal(h.state.hasCapture(capture.capture_id), true);
+      const slot = h.state.getSlot(SLOT_0800);
+      assert.deepEqual([slot?.state, slot?.capture_id, slot?.local_date, slot?.local_time, slot?.local_minutes], ["captured", capture.capture_id, "2026-07-01", "08:00", 480]);
+      const opens = h.adapter.opens;
+      await h.service.tick(h.signal);
+      assert.equal(h.adapter.opens, opens);
+      h.state.close();
+    });
+
+    it("doesn't send the camera after a slot whose row was lost while its frame's row survived", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"));
+      raw.prepare("DELETE FROM slots WHERE slot_id = ?").run(SLOT_0800);
+      raw.close();
+      await h.service.reconcile();
+      const opens = h.adapter.opens;
+      await h.service.tick(h.signal);
+      assert.equal(h.state.getSlot(SLOT_0800)?.state, "pending", "planned again, and not due");
+      assert.equal(h.adapter.opens, opens);
+      h.state.close();
+    });
+
     it("repairs a slot when the crash came after saving its frame's row", async () => {
       const h = await harness();
       await runAt(h, [0]);
@@ -856,6 +889,152 @@ describe("CaptureService", () => {
       assert.equal(state.getSlot(SLOT_0800)?.state, "captured");
       assert.equal(state.getSlot(SLOT_0800)?.capture_id, captureId);
       state.close();
+    });
+  });
+
+  describe("a frame's row whose slot doesn't name it back", () => {
+    /** A saved frame, with its slot then changed behind its back. */
+    async function withSlot(state: SlotState, captureId: string | null): Promise<Awaited<ReturnType<typeof harness>>> {
+      const h = await harness();
+      await runAt(h, [0]);
+      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"));
+      raw.prepare("UPDATE slots SET state = ?, capture_id = ? WHERE slot_id = ?").run(state, captureId, SLOT_0800);
+      raw.close();
+      return h;
+    }
+
+    for (const slotState of ["pending", "missed", "skipped_policy", "captured"] as const) {
+      it(`leaves a ${slotState} slot as it is, and alerts`, async () => {
+        const h = await withSlot(slotState, null);
+        await h.service.reconcile();
+        const slot = h.state.getSlot(SLOT_0800);
+        assert.deepEqual([slot?.state, slot?.capture_id], [slotState, null]);
+        assert.ok(h.notices.some((notice) => notice.includes("disagree about each other")), h.notices.join("; "));
+        h.state.close();
+      });
+    }
+
+    it("doesn't overwrite a link to a different capture, and alerts", async () => {
+      const h = await withSlot("captured", "some-other-capture");
+      await h.service.reconcile();
+      assert.equal(h.state.getSlot(SLOT_0800)?.capture_id, "some-other-capture");
+      assert.ok(h.notices.some((notice) => notice.includes("disagree about each other")), h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("doesn't finish a running slot when the stored frame no longer matches, and alerts", async () => {
+      const h = await withSlot("running", null);
+      const [capture] = h.state.allCaptures();
+      assert.ok(capture !== undefined);
+      await writeFile(join(h.dataDir, capture.relative_dir, "frame.jpg"), "damaged");
+      await h.service.reconcile();
+      assert.equal(h.state.getSlot(SLOT_0800)?.capture_id, null);
+      assert.ok(h.notices.some((notice) => notice.includes("disagree about each other")), h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("clears the alert once they agree again", async () => {
+      const h = await withSlot("missed", null);
+      await h.service.reconcile();
+      const [capture] = h.state.allCaptures();
+      h.state.setSlot(SLOT_0800, "captured", { captureId: capture?.capture_id ?? null });
+      await h.service.reconcile();
+      assert.ok(h.notices.some((notice) => notice.includes("recovered") && notice.includes("disagree about each other")), h.notices.join("; "));
+      h.state.close();
+    });
+  });
+
+  describe("the audit of stored frames", () => {
+    const DAMAGE = "no longer match their records";
+
+    async function saved(): Promise<{ h: Awaited<ReturnType<typeof harness>>; directory: string }> {
+      const h = await harness();
+      await runAt(h, [0]);
+      const [capture] = h.state.allCaptures();
+      assert.ok(capture !== undefined);
+      return { h, directory: join(h.dataDir, capture.relative_dir) };
+    }
+
+    async function editMetadata(directory: string, change: Record<string, unknown>): Promise<void> {
+      const path = join(directory, "metadata.json");
+      await writeFile(path, JSON.stringify({ ...(JSON.parse(await readFile(path, "utf8")) as object), ...change }));
+    }
+
+    it("says nothing when every frame matches", async () => {
+      const { h } = await saved();
+      await h.service.auditStoredFrames(h.signal);
+      assert.equal(h.notices.some((notice) => notice.includes(DAMAGE)), false, h.notices.join("; "));
+      h.state.close();
+    });
+
+    const damage: Array<[string, (directory: string) => Promise<void>]> = [
+      ["a frame directory that's gone", async (directory) => rm(directory, { recursive: true })],
+      ["a frame file that's gone", async (directory) => rm(join(directory, "frame.jpg"))],
+      ["metadata that's gone", async (directory) => rm(join(directory, "metadata.json"))],
+      ["a frame with different bytes", async (directory) => writeFile(join(directory, "frame.jpg"), "damaged")],
+      ["metadata from another project", async (directory) => editMetadata(directory, { project_id: "other-site" })],
+      ["metadata from another camera", async (directory) => editMetadata(directory, { camera_id: "other-camera" })],
+      ["metadata naming another slot", async (directory) => editMetadata(directory, { slot_id: "construction/site-overview/2026-07-01T14:00:00.000Z" })],
+      ["metadata with another receive time", async (directory) => editMetadata(directory, { frame_received_at: "2026-07-01T13:00:09.000Z" })],
+      ["metadata that isn't JSON", async (directory) => writeFile(join(directory, "metadata.json"), "{ nope")],
+    ];
+    for (const [name, arrange] of damage) {
+      it(`alerts about ${name}, and keeps the row`, async () => {
+        const { h, directory } = await saved();
+        await arrange(directory);
+        await h.service.auditStoredFrames(h.signal);
+        assert.ok(h.notices.some((notice) => notice.includes(`1 stored frame(s) ${DAMAGE}`)), h.notices.join("; "));
+        assert.equal(h.state.allCaptures().length, 1);
+        h.state.close();
+      });
+    }
+
+    it("leaves what it found in place", async () => {
+      const { h, directory } = await saved();
+      await writeFile(join(directory, "frame.jpg"), "damaged");
+      await h.service.auditStoredFrames(h.signal);
+      assert.equal(await readFile(join(directory, "frame.jpg"), "utf8"), "damaged");
+      h.state.close();
+    });
+
+    it("says when the damage is gone", async () => {
+      const { h, directory } = await saved();
+      const frame = await readFile(join(directory, "frame.jpg"));
+      await writeFile(join(directory, "frame.jpg"), "damaged");
+      await h.service.auditStoredFrames(h.signal);
+      await writeFile(join(directory, "frame.jpg"), frame);
+      await h.service.auditStoredFrames(h.signal);
+      assert.ok(h.notices.some((notice) => notice.includes("recovered") && notice.includes(DAMAGE)), h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("stops when the service does, and judges nothing from half a pass", async () => {
+      const { h, directory } = await saved();
+      await rm(directory, { recursive: true });
+      const controller = new AbortController();
+      controller.abort("terminated");
+      await h.service.auditStoredFrames(controller.signal);
+      assert.equal(h.notices.some((notice) => notice.includes(DAMAGE)), false, h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("runs while the service does, without holding up its loop", async () => {
+      const controller = new AbortController();
+      let spins = 0;
+      const h = await harness({
+        sleep: async () => {
+          await new Promise((resolve) => setImmediate(resolve));
+          spins += 1;
+          if (spins > 10_000 || h.notices.some((notice) => notice.includes(DAMAGE))) controller.abort("terminated");
+        },
+      });
+      await runAt(h, [0]);
+      const [capture] = h.state.allCaptures();
+      assert.ok(capture !== undefined);
+      await rm(join(h.dataDir, capture.relative_dir), { recursive: true });
+      await h.service.run(controller.signal);
+      assert.ok(h.notices.some((notice) => notice.includes(DAMAGE)), h.notices.join("; "));
+      h.state.close();
     });
   });
 

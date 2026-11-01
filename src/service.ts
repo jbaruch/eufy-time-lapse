@@ -13,7 +13,7 @@ import type { LockOptions } from "./lock.ts";
 import { dataBudgetSpent, decide, nextBatteryPaused, reservedSessionMs, sessionBudgetSpent } from "./policy.ts";
 import type { PolicyInput } from "./policy.ts";
 import type { CameraLink } from "./probe/report.ts";
-import { addDays, isActiveForInterval, localParts, planDay } from "./schedule.ts";
+import { addDays, formatClock, isActiveForInterval, localParts, planDay } from "./schedule.ts";
 import type { ScheduleConfig } from "./schedule.ts";
 import type { ServiceConfig } from "./service-config.ts";
 import type { AttemptRow, CaptureRow, SlotRow, State } from "./state.ts";
@@ -184,7 +184,7 @@ export class CaptureService {
   async reconcile(): Promise<void> {
     await rm(join(this.options.dataDir, "spool-tmp"), { recursive: true, force: true });
     await this.adoptPublishedFrames();
-    for (const captureId of this.state.repairSlotLinks()) this.state.addEvent("slot_link_repaired", captureId);
+    await this.repairSlotLinks();
     for (const slot of this.state.markInterruptedSlots()) {
       this.state.addEvent("slot_interrupted", slot.slot_id);
       this.options.log(`slot ${slot.local_date} ${slot.local_time} was interrupted by a restart; marked missed`);
@@ -203,13 +203,16 @@ export class CaptureService {
           for (const captureId of await this.subdirectories(relativeDay)) {
             if (this.state.hasCapture(captureId)) continue;
             const relativeDir = join(relativeDay, captureId);
-            const metadata = await this.verifiedCapture(relativeDir, captureId, `${year}-${month}-${day}`);
-            if (metadata === null) {
+            const metadata = await this.storedCapture(relativeDir, captureId, `${year}-${month}-${day}`);
+            if (metadata === null || !this.slotClaimHolds(metadata)) {
               unreadable.push(relativeDir);
               continue;
             }
             this.insertCaptureRow(metadata, relativeDir);
-            if (metadata.slot_id !== null) {
+            if (metadata.slot_id !== null && metadata.schedule_revision !== null && metadata.scheduled_at_utc !== null) {
+              const scheduledAt = new Date(metadata.scheduled_at_utc);
+              const { date, minutes } = localParts(scheduledAt, this.zone);
+              this.state.restoreSlot(metadata.slot_id, { scheduledAt, localDate: date, localTime: formatClock(minutes), localMinutes: minutes, nonexistent: false }, metadata.schedule_revision);
               this.state.setSlot(metadata.slot_id, metadata.quality_status === "ok" ? "captured" : "captured_degraded", { captureId });
             }
             this.state.addEvent("capture_adopted", captureId);
@@ -232,8 +235,8 @@ export class CaptureService {
     }
   }
 
-  /** A capture the database has never heard of counts only if its record, its place in the spool and its frame all agree. */
-  private async verifiedCapture(relativeDir: string, captureId: string, localDate: string): Promise<AdoptableCapture | null> {
+  /** What's stored at a place in the spool, if its record, that place and its frame all agree, and it's this camera's. */
+  private async storedCapture(relativeDir: string, captureId: string, localDate: string): Promise<AdoptableCapture | null> {
     const directory = join(this.options.dataDir, relativeDir);
     try {
       const metadata = parseCaptureMetadata(await readFile(join(directory, "metadata.json"), "utf8"));
@@ -241,7 +244,7 @@ export class CaptureService {
       if (metadata.project_id !== this.config.project.id || metadata.camera_id !== this.config.camera.id) return null;
       const frame = await readFile(join(directory, "frame.jpg"));
       const matches = frame.length === metadata.jpeg_bytes && createHash("sha256").update(frame).digest("hex") === metadata.sha256;
-      return matches && this.slotClaimHolds(metadata) ? metadata : null;
+      return matches ? metadata : null;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
@@ -251,8 +254,8 @@ export class CaptureService {
   /**
    * A claim on a slot counts only if the writer could have made it. A manual frame has no slot. A scheduled one holds the slot
    * for its own time, taken after that time, and the writer only leaves one unrecorded by dying while that slot is running.
-   * A database lost whole has no slot rows to compare with, so a missing row doesn't count against a frame, and the frame is
-   * what a render needs.
+   * A slot with no row at all has nothing to compare with: its row is rebuilt from the frame, so a lost row can't send the
+   * camera after a slot that already has one.
    */
   private slotClaimHolds(metadata: AdoptableCapture): boolean {
     const { slot_id: slotId, schedule_revision: revision, scheduled_at_utc: scheduledAt } = metadata;
@@ -265,6 +268,54 @@ export class CaptureService {
     const slot = this.state.getSlot(slotId);
     if (slot === undefined) return true;
     return slot.state === "running" && slot.schedule_revision === revision && slot.scheduled_at_utc === scheduledAt && (slot.capture_id === null || slot.capture_id === metadata.capture_id);
+  }
+
+  /** Whether what's stored for a row is still what the row says. */
+  private async matchesItsRow(row: CaptureRow): Promise<boolean> {
+    const stored = await this.storedCapture(row.relative_dir, row.capture_id, row.local_date);
+    return (
+      stored !== null &&
+      stored.slot_id === row.slot_id &&
+      stored.kind === row.kind &&
+      stored.frame_received_at === row.frame_received_at &&
+      stored.width === row.width &&
+      stored.height === row.height &&
+      stored.jpeg_bytes === row.jpeg_bytes &&
+      stored.sha256 === row.sha256 &&
+      stored.quality_status === row.quality_status
+    );
+  }
+
+  /**
+   * The writer saves a frame's row, then finishes its slot, so a crash between them leaves a stored frame on a running slot
+   * that names no capture. That's the only shape to finish here. Any other disagreement isn't this code's to settle.
+   */
+  private async repairSlotLinks(): Promise<void> {
+    const disputed: string[] = [];
+    for (const row of this.state.unlinkedCaptures()) {
+      if (row.slot_state === "running" && row.slot_capture_id === null && (await this.matchesItsRow(row))) {
+        this.state.setSlot(row.slot_id, row.quality_status === "ok" ? "captured" : "captured_degraded", { captureId: row.capture_id });
+        this.state.addEvent("slot_link_repaired", row.capture_id);
+      } else {
+        disputed.push(row.capture_id);
+        this.state.addEvent("slot_link_disputed", row.capture_id);
+      }
+    }
+    await this.alerts.set("slot_links_disputed", disputed.length > 0, `${disputed.length} stored frame(s) and their slots disagree about each other, starting with capture ${disputed[0] ?? ""}. Both are left as they are for a person to look at`);
+  }
+
+  /**
+   * Frames are the whole project, and otherwise nothing notices one going missing until a render. Run once per start, in the
+   * background: a year of frames takes minutes to read, and no slot should be missed waiting for that. Damage is left in place.
+   */
+  async auditStoredFrames(signal: AbortSignal): Promise<void> {
+    const damaged: string[] = [];
+    for (const row of this.state.allCaptures()) {
+      if (signal.aborted) return;
+      if (!(await this.matchesItsRow(row))) damaged.push(row.relative_dir);
+    }
+    for (const relativeDir of damaged) this.state.addEvent("capture_damaged", relativeDir);
+    await this.alerts.set("spool_damaged", damaged.length > 0, `${damaged.length} stored frame(s) no longer match their records, starting with ${damaged[0] ?? ""}. They're left as they are for a person to look at, and renders leave them out`);
   }
 
   private spoolDay(localDate: string): string {
@@ -331,8 +382,10 @@ export class CaptureService {
   }
 
   async run(signal: AbortSignal): Promise<void> {
+    let audit: Promise<void> = Promise.resolve();
     try {
       await this.reconcile();
+      audit = this.auditStoredFrames(signal).catch(this.onBackgroundFailure);
       while (!signal.aborted) {
         // No swallowing here: an unexpected error should crash this process. The restart policy brings it back,
         // and reconcile records the interrupted slot, which beats limping on in an unknown state.
@@ -344,6 +397,7 @@ export class CaptureService {
       await this.alerts.raise("service_crashed", `the service stopped on an unexpected ${error instanceof Error ? error.name : "error"} and restarts by itself. If this repeats, read the container log`);
       throw error;
     }
+    await audit;
     await this.adapter?.shutdown();
     // Background work's last chance to report. There's no next tick to raise it.
     if (this.backgroundFailure !== undefined) throw this.backgroundFailure;

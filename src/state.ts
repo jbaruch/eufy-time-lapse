@@ -131,6 +131,12 @@ export interface CaptureRow {
   created_at: string;
 }
 
+export interface UnlinkedCapture extends CaptureRow {
+  slot_id: string;
+  slot_state: SlotState;
+  slot_capture_id: string | null;
+}
+
 export interface BatteryRow {
   read_at: string;
   percent: number | null;
@@ -215,8 +221,9 @@ export class State {
     return Number(result.changes);
   }
 
+  /** A slot that already has a frame is never due, whatever its row says: capturing it again would wake the camera for nothing. */
   duePending(now: Date): SlotRow | undefined {
-    return this.one<SlotRow>("SELECT * FROM slots WHERE state = 'pending' AND scheduled_at_utc <= ? ORDER BY scheduled_at_utc LIMIT 1", now.toISOString());
+    return this.one<SlotRow>("SELECT s.* FROM slots s WHERE s.state = 'pending' AND s.scheduled_at_utc <= ? AND NOT EXISTS (SELECT 1 FROM captures c WHERE c.slot_id = s.slot_id) ORDER BY s.scheduled_at_utc LIMIT 1", now.toISOString());
   }
 
   nextPending(after: Date): SlotRow | undefined {
@@ -233,13 +240,20 @@ export class State {
       .run(state, fields.reason ?? null, fields.captureId ?? null, fields.everyMinutes ?? null, this.stamp(), slotId);
   }
 
-  /** A crash between saving a frame's row and finishing its slot leaves a real frame on a slot that looks unfinished. */
-  repairSlotLinks(): string[] {
-    const rows = this.all<{ capture_id: string; slot_id: string; quality_status: string }>(`
-      SELECT c.capture_id, c.slot_id, c.quality_status FROM captures c JOIN slots s ON s.slot_id = c.slot_id
+  /** Puts back the row of a slot whose frame outlived it. The row starts as the writer left it, and an existing one is kept. */
+  restoreSlot(slotId: string, slot: PlannedSlot, scheduleRevision: string): void {
+    this.db
+      .prepare(`
+        INSERT OR IGNORE INTO slots (slot_id, scheduled_at_utc, local_date, local_time, local_minutes, schedule_revision, state, reason, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'running', NULL, ?)`)
+      .run(slotId, slot.scheduledAt.toISOString(), slot.localDate, slot.localTime, slot.localMinutes, scheduleRevision, this.stamp());
+  }
+
+  /** Frames whose slot doesn't name them back. */
+  unlinkedCaptures(): UnlinkedCapture[] {
+    return this.all<UnlinkedCapture>(`
+      SELECT c.*, s.state AS slot_state, s.capture_id AS slot_capture_id FROM captures c JOIN slots s ON s.slot_id = c.slot_id
       WHERE s.capture_id IS NULL OR s.capture_id != c.capture_id`);
-    for (const row of rows) this.setSlot(row.slot_id, row.quality_status === "ok" ? "captured" : "captured_degraded", { captureId: row.capture_id });
-    return rows.map((row) => row.capture_id);
   }
 
   /** A slot left running means the process died mid-capture. Whether the camera connection closed is unknowable. */
