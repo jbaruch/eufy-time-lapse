@@ -5,19 +5,26 @@ import type { TelegramRoute } from "./telegram.ts";
 /** Answers whether the message reached its destination, so one that didn't can be tried again. */
 export type Notify = (text: string) => Promise<boolean>;
 
+/** Long enough for one slot's alerts to share a failure, short enough that the next slot tries again. */
+const QUIET_AFTER_FAILURE_MS = 120_000;
+
 /**
  * Sends alerts to Telegram, and always to the log. A delivery failure only logs: it must never wake the camera or
- * stop a capture. Without a route, the log is the destination.
+ * stop a capture. Alerts wait in front of a capture, so after one failure the others skip waiting out the same timeouts.
+ * Without a route, the log is the destination.
  */
-export function createNotifier(route: TelegramRoute | null, log: (message: string) => void, send: typeof sendTelegram = sendTelegram): Notify {
+export function createNotifier(route: TelegramRoute | null, log: (message: string) => void, send: typeof sendTelegram = sendTelegram, now: () => number = Date.now): Notify {
+  let failedAt: number | undefined;
   return async (text) => {
     log(`ALERT ${text}`);
     if (route === null) return true;
+    if (failedAt !== undefined && now() - failedAt < QUIET_AFTER_FAILURE_MS) return false;
     try {
       await send(route, text);
       return true;
     } catch (error) {
       if (!(error instanceof TelegramDeliveryError)) throw error;
+      failedAt = now();
       log(`that alert didn't reach Telegram, and the next slot tries again. ${error.message}`);
       return false;
     }

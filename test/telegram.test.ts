@@ -158,7 +158,7 @@ describe("checkRoute", () => {
     checkRoute(good);
   });
 
-  for (const [name, proxyUrl] of [["isn't a URL", "proxy-secret"], ["has no credential", "http://172.17.0.1:10255"], ["is empty", ""], ["isn't http", "ftp://x:proxy-secret@172.17.0.1:10255"]] as const) {
+  for (const [name, proxyUrl] of [["isn't a URL", "proxy-secret"], ["has a bad escape in its password", "http://x:proxy%zzsecret@172.17.0.1:10255"], ["has a bad escape in its user", "http://x%zz:proxy-secret@172.17.0.1:10255"], ["has no credential", "http://172.17.0.1:10255"], ["is empty", ""], ["isn't http", "ftp://x:proxy-secret@172.17.0.1:10255"]] as const) {
     it(`refuses a proxy URL that ${name}, without quoting it`, () => {
       assert.throws(() => checkRoute({ ...good, proxyUrl }), (error: Error) => error instanceof ConfigError && /proxy_url_file/.test(error.message) && !error.message.includes("proxy-secret"));
     });

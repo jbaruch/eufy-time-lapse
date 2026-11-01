@@ -262,6 +262,29 @@ describe("createNotifier", () => {
     assert.deepEqual(logged, ["ALERT hello"]);
   });
 
+  it("doesn't make the next alert wait out the same failure in front of a capture", async () => {
+    const clock = { ms: 1_000_000 };
+    const attempts: string[] = [];
+    const delivering = { now: false };
+    const notify = createNotifier(route, () => {}, async (_to, text) => {
+      attempts.push(text);
+      if (!delivering.now) throw new TelegramDeliveryError("the gateway didn't answer in time");
+    }, () => clock.ms);
+    assert.equal(await notify("first"), false);
+    assert.equal(await notify("second"), false);
+    assert.deepEqual(attempts, ["first"], "the second alert owes a retry, but doesn't wait");
+    clock.ms += 119_000;
+    assert.equal(await notify("third"), false);
+    assert.equal(attempts.length, 1, "still the same slot's failure");
+    clock.ms += 1_000;
+    assert.equal(await notify("fourth"), false);
+    assert.deepEqual(attempts, ["first", "fourth"], "the next slot tries again");
+    clock.ms += 120_000;
+    delivering.now = true;
+    assert.equal(await notify("fifth"), true);
+    assert.deepEqual(attempts, ["first", "fourth", "fifth"]);
+  });
+
   it("logs a failed delivery, says it wasn't delivered, and doesn't throw", async () => {
     const logged: string[] = [];
     const notify = createNotifier(route, (message) => logged.push(message), async () => {

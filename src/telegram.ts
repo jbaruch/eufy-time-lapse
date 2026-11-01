@@ -28,10 +28,20 @@ export interface TelegramRoute {
   ca: string;
 }
 
+function decodes(text: string): boolean {
+  try {
+    decodeURIComponent(text);
+    return true;
+  } catch (error) {
+    if (!(error instanceof URIError)) throw error;
+    return false;
+  }
+}
+
 /** Checked at startup, so a bad file stops the service now instead of losing the first alert. Never quotes the URL. */
 export function checkRoute(route: TelegramRoute): void {
   const proxy = URL.canParse(route.proxyUrl) ? new URL(route.proxyUrl) : null;
-  if (proxy === null || proxy.protocol !== "http:" || proxy.hostname === "" || proxy.password === "") {
+  if (proxy === null || proxy.protocol !== "http:" || proxy.hostname === "" || proxy.password === "" || !decodes(proxy.username) || !decodes(proxy.password)) {
     throw new ConfigError(`alerts.telegram.proxy_url_file doesn't hold the gateway's http URL with its credential. See "Alerts" in the README.`);
   }
   if (!route.ca.includes("BEGIN CERTIFICATE")) {
