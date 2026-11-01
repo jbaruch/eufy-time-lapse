@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import fs from "node:fs";
 import { access, readFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import { after, before, describe, it } from "node:test";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
 import { acquireFrame, chooseKeyframe } from "../src/capture/acquire.ts";
@@ -77,6 +79,24 @@ describe("acquireFrame", () => {
     });
     return { adapter, outputDir, result };
   }
+
+  it("doesn't call a stream collected when its final write failed, and still tears down", async (t) => {
+    const flushFailure = new Error("no space left for the last of it");
+    t.mock.method(fs, "createWriteStream", () =>
+      new Writable({
+        write: (_chunk, _encoding, done) => done(),
+        final: (done) => done(flushFailure),
+      }),
+    );
+    syncBuiltinESMExports();
+    t.after(() => {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    });
+    const { adapter, result } = attempt({ open: async () => liveSession(h265) });
+    await assert.rejects(result, flushFailure);
+    assert.equal(adapter.teardowns, 1);
+  });
 
   it("saves a frame at the stream's real resolution and records its hash", async () => {
     const { adapter, outputDir, result } = attempt({ open: async () => liveSession(h265) });

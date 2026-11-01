@@ -112,7 +112,12 @@ function collectStream(
       stats.stop = stop;
       clearTimeout(flushTimer);
       signal.removeEventListener("abort", onAbort);
-      sink.end(() => (failure === undefined ? resolve() : reject(failure)));
+      // The last write can fail too, and by then the error listener below is too late to change the outcome.
+      sink.end((flushFailure?: Error | null) => {
+        const outcome = failure ?? flushFailure;
+        if (outcome === undefined || outcome === null) resolve();
+        else reject(outcome);
+      });
     };
     const onAbort = (): void => {
       const cause = signal.reason as AbortCause;
