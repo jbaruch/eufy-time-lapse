@@ -24,7 +24,7 @@ export interface ConnectPolicy {
 
 export const SDK_POLICY: ConnectPolicy = { relayAfterRounds: null, probeSockets: true, holePunch: true, stopLookupsOnRelay: false, relayStallMs: null, singleStart: false };
 
-/** What this camera needs on carrier NAT: 98 of 100 back-to-back tries at 4K, against 3 of 10 with the SDK's own. lab/ measures it. */
+/** What this camera needs on carrier NAT: 98 of 100 back-to-back tries at 4K, against 3 of 13 with the SDK's own. lab/ measures it. */
 export const CELLULAR_POLICY: ConnectPolicy = { relayAfterRounds: 1, probeSockets: false, holePunch: false, stopLookupsOnRelay: true, relayStallMs: 2000, singleStart: true };
 
 /** Goes in each frame's adapter version, because this policy changes how the SDK reaches the camera. */

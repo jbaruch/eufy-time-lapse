@@ -2,11 +2,11 @@
 
 **Version:** 1.1  
 **Date:** October 31, 2026  
-**Status:** Native LTE feasibility shown on the actual camera; reliability is not yet at the pilot threshold (section 3.1). The capture service runs on the target host. The offsite archiver and monthly preview are not built.
+**Status:** Native LTE feasibility shown on the actual camera, at 98% of first tries in a back-to-back run (section 3.1). Battery behavior on solar is not yet measured. The capture service runs on the target host. The offsite archiver and monthly preview are not built.
 
 **Changes in 1.1**, from running the real camera and from the owner's decisions:
 
-- The adapter is `@mega-yfue/eufy-sdk`; the legacy library failed on this account (section 2).
+- The adapter is `@mega-yfue/eufy-sdk` with this project's own connect on top; the legacy library failed on this account, and the SDK's connect wasn't reliable (sections 2, 3.1).
 - The minimum frame size is **3840×2160**, and renders exclude smaller frames by default (sections 3, 8).
 - The target cadence is **every 5 minutes**, thinned by battery tiers, with more frames kept than any one render uses (section 6.1).
 - The session budget default rises to **6,000 seconds per day** to fit that cadence (section 6.3).
@@ -44,7 +44,7 @@ Out of scope for the MVP: a web dashboard, multi-user or multi-camera support, c
 | `eufy-security-client` returned an empty device list for this account, and its maintainer describes the API it uses as one Eufy is shutting down. | The legacy adapter is removed; it failed the probe's first step. |
 | The SDK and HTTP bridge may return retained imagery if a live request fails. [S6, S7] | Verify frame provenance explicitly; never silently substitute a cached frame. |
 
-**Adapter selection:** `@mega-yfue/eufy-sdk`, pinned at exactly `0.5.0`, after the legacy option failed. Supporting both adapters simultaneously is not an MVP requirement. If this SDK later breaks or proves unreliable, the fallback is taking the verified protocol into this project's own client, not going back to the legacy library.
+**Adapter selection:** `@mega-yfue/eufy-sdk`, pinned at exactly `0.5.0`, after the legacy option failed. Supporting both adapters simultaneously is not an MVP requirement. This project already replaces the SDK's connect behavior (section 3.1). If the SDK's data path later breaks too, the next step is taking the rest of the verified protocol into this project's own client, not going back to the legacy library.
 
 Before installation, inspect available releases, select an exact version, and pin it in the lockfile. Version `4.2.0` in [S3] is the version reported by that user, **not** a dependency already verified for this project. Pin a fork by commit SHA. Avoid floating `latest` tags and unpinned branches.
 
@@ -77,27 +77,38 @@ If the probe fails, its deliverable is a diagnostic report identifying the failu
 
 ## 3.1 Findings on the actual camera
 
-Measured on a T86P2 (firmware 1.2.4.4) on cable power, on its built-in SIM, from the production host. Numbers are as of the first 21 attempts of the service's 5-minute run on October 31, 2026, and are a small sample.
+Measured on a T86P2 (firmware 1.2.4.4) on cable power, on its built-in SIM, from the production host, on the night of October 31, 2026.
 
 **What works:**
 
 - The SDK reaches the camera over the built-in SIM and receives real **3840×2160** H.265 keyframes.
 - The camera sits behind symmetric carrier NAT, so every 4K frame has come through the **relay**. A direct path won occasionally in early tests, stayed at 720p and carried little data.
-- Each stream starts at 1280×720 for the first keyframe and steps up to 3840×2160 from the next. The service holds the session until it has two keyframes at the required size, then stops. One FFmpeg run decodes each keyframe, because a single FFmpeg output locks to the first frame's size.
-- A capture takes about **36 seconds** of camera contact and about **0.4 MB** of media, which is about 1.5 GB per month at the target cadence. That counts media bytes only; compare it with the carrier's figure.
-- About **28 seconds** of that 36 is waiting: the SDK spends about 25 seconds on a hole punch before trying the relay, with the camera awake. `capture.relay_after_seconds` shortens the wait; whether that's safe is being measured.
+- Each stream starts at 1280×720 for the first keyframe and steps up to 3840×2160 from the next, about 2 seconds later. The service holds the session until it has two keyframes at the required size, then stops. One FFmpeg run decodes each keyframe, because a single FFmpeg output locks to the first frame's size.
+- A capture takes about **13 seconds** of camera contact when the camera has to wake, and about **0.5 MB** of media, which is about 1.8 GB per month at the target cadence. That counts media bytes only; compare it with the carrier's figure.
 
-**What doesn't work yet:** 12 of 14 slots captured at 4K (86%), and only 7 of 14 on the first try. The pilot threshold in section 12 is 69 of 70 (98.6%). The failed tries fall into three groups:
+**The connect is this project's, not the SDK's.** The SDK's own connect was unreliable on this camera, so `src/adapters/p2p-policy.ts` changes it by wrapping private methods of the pinned SDK, tested against the real class. `lab/hammer.ts` fires captures back to back and traces the packets:
 
-| Failure | Tries | What happens |
-| --- | --- | --- |
-| Camera never joins the relay | 6 of 21 | The relay handshake stalls, usually after the lookup servers accept the request, until the SDK's fixed 45-second connect timeout. In every success the relay answered within a second, so a longer timeout isn't expected to help. |
-| Hang-up | 4 of 21 | The relay closes the session 2 to 3.4 seconds after connecting. Two of these still got a 4K frame in time; two stopped at 720p. |
-| Connected, then silence | 1 of 21 | The camera never acknowledges the stream start, and the SDK's replacement session doesn't connect in time. |
+| Connect | Tries | 4K | Camera never joined | Hang-ups or no video | Median session |
+| --- | --- | --- | --- | --- | --- |
+| SDK's own | 13 | 23% | 7 | 5 | 33 s |
+| One socket, relay after 7 s, no lookups once on the relay | 24 | 71% | 7 | 1 | 17 s |
+| Also: no hole punch, and ask again on a stall | 40 | 98% | 0 | 3 | 17 s |
+| Also: relay from about 2 s, and one stream start | 100 | 98% | 0 | 2 | 9.4 s |
 
-The second try rescues most of these, at the cost of another session's worth of battery. No root cause is established. So far the data does **not** support: too short a gap between sessions (failures and successes overlap from 3 to 6 minutes), one bad relay, the SDK re-sending its start command (two of the four hang-ups came before its first re-send), or the host's UDP buffer (no receive errors).
+The first two rows were rotated together, the last two ran as their own blocks. What each change does:
 
-Battery cost has not been measured, because the camera has only run on cable. It's the main open question for the 5-minute target.
+- **Asking again.** The SDK asks the lookup servers for the relay list once. A try that stalled stayed stalled until the SDK's 45-second timeout, though the relay answered within a second whenever it answered at all. Asking again after 2 seconds took "camera never joined" from 7 of 24 to 0 of 140, with stalled tries recovering in the same session. A relay doesn't answer a bare hello from an unregistered socket, which fits relays depending on what the lookup servers have arranged, but the mechanism on the camera's side is inferred, not observed.
+- **One stream start.** The SDK started a running stream a second time once the level-2 key arrived, and the camera often closed the session right after acknowledging it. Hang-ups 3 to 3.6 seconds in went from about 4 in 100 tries to none in 100. 4K arrives without that second start.
+- **Asking for the relay early.** The lookup servers hold the list until the camera is ready, so waiting first added only time.
+- **Hole punching.** Carrier NAT defeats it. Removing it removed traffic, with no measured harm.
+
+Answering the camera's relay packets, and switching to another relay on a stall without asking for the list again, were tried and did nothing.
+
+**What's left:** about 2% of tries. A session closes about 2 seconds in with no visible cause, or the camera never completes the key exchange and closes at about 6 seconds. Neither has a root cause. The next try, 5 seconds later, handles both, at a cost of under 10 seconds.
+
+**At the real pace:** the first 6 slots at 5 minutes were all 4K on the first try. A longer run is in progress.
+
+**Not ruled out:** what the camera does on its side is only visible through the relay. Battery cost has not been measured, because the camera has only run on cable. It's the main open question for the 5-minute target.
 
 # 4. Architecture
 
@@ -143,7 +154,7 @@ On a cold start, wait for keyframes at the required size. The observed policy: h
 6. In `finally`, stop the live stream, decoder, and camera connection.
 7. Atomically finalize the capture metadata with the cleanup outcome; complete the attempt record and enqueue archive upload.
 
-The frame-acquisition timeout is **60 seconds per attempt**. Allow up to **10 additional seconds** for cleanup. The SDK may impose tighter internal timeouts; extending the service-level timeout does not automatically change them.
+The frame-acquisition timeout is **30 seconds per attempt**, twice the slowest 4K session measured. Allow up to **10 additional seconds** for cleanup. The SDK may impose tighter internal timeouts; extending the service-level timeout does not automatically change them.
 
 Release the connection immediately after success. The newer SDK's default five-minute idle disconnect is unsuitable for a standalone battery camera if it continues heartbeats beyond capture. Use explicit teardown or a verified short idle interval, such as up to five seconds. Disable event-driven pre-warming. [S8]
 
@@ -185,7 +196,7 @@ For daylight saving time changes, mark nonexistent local instants as skipped wit
 
 Uniquely identify a scheduled slot by `(project_id, camera_id, scheduled_at_utc)`. Accept **at most one frame per slot**. Manual snapshots use separate IDs and do not improve scheduled-capture completeness.
 
-Allow **two attempts total** per slot, with a **30-second** delay after the first failure. The overall slot deadline is **180 seconds after its scheduled time**. Do not start an attempt unless enough time remains for both acquisition and cleanup limits. Retry only transient connectivity or media-acquisition errors.
+Allow **three attempts total** per slot, **5 seconds** apart: a failed try now costs seconds, and a long wait only keeps the camera awake for longer. The overall slot deadline is **180 seconds after its scheduled time**. Do not start an attempt unless enough time remains for both acquisition and cleanup limits. Retry only transient connectivity or media-acquisition errors.
 
 Authentication failures, unsupported protocols, invalid image provenance, and insufficient disk space must not enter a retry loop. After a restart, the service may resume only a still-valid slot. Mark expired past slots as missed; never take a burst of present-day photos to impersonate missing historical captures.
 
@@ -205,7 +216,7 @@ Use battery readings available without waking the camera. Treat readings older t
 
 While paused for low battery, continue receiving passive updates. If battery status updates only when the camera is contacted, notify the owner to check the charge in the Eufy app and run `resume --battery-checked`. Log this explicit manual override; it does not turn an old reading into a fresh one. Periodically waking the camera just to check the battery is not required in the MVP.
 
-The additional budget defaults to **6,000 seconds of camera-contact time per day**, which covers 120 slots at about 50 seconds each. Set it from measured use. Count all attempts from the first camera-facing command through teardown, including failed attempts. This is a conservative software counter—not a measurement of actual awake time or energy consumption. Reserve time before starting an attempt; always allow cleanup commands even if the budget is exhausted.
+The additional budget defaults to **6,000 seconds of camera-contact time per day**, generous against the roughly 1,600 seconds that 120 slots at about 13 seconds each would use. Set it from measured use. Count all attempts from the first camera-facing command through teardown, including failed attempts. This is a conservative software counter—not a measurement of actual awake time or energy consumption. Reserve time before starting an attempt; always allow cleanup commands even if the budget is exhausted.
 
 Configure the **monthly data budget** after selecting the SIM plan and measuring a pilot. **JPEG file size is not LTE traffic consumption.** Track media-stream bytes and available network-byte counters separately, along with each measurement's coverage. If the library cannot observe the entire transport, label totals as estimates and compare them with the SIM provider's statistics.
 
@@ -332,11 +343,11 @@ cadence:
   unknown_battery_every_minutes: 60
 
 capture:
-  acquisition_timeout_seconds: 60
+  acquisition_timeout_seconds: 30
   cleanup_timeout_seconds: 10
   target_keyframes: 2
-  max_attempts: 2
-  retry_delay_seconds: 30
+  max_attempts: 3
+  retry_delay_seconds: 5
   slot_deadline_seconds: 180
   max_session_seconds_per_day: 6000
 
