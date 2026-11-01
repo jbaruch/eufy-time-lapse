@@ -508,6 +508,52 @@ describe("runLogin", () => {
     await dir.remove();
   });
 
+  it("spends a login's own code on making the device trusted", async () => {
+    const adapter = new MockAdapter({ auth: [{ status: "tfa_required" }, { status: "authenticated" }], trusted: false });
+    const result = await runLogin({ adapter, dataDir: dir.path, prompt: async () => "123456", log: () => {} });
+    assert.deepEqual(adapter.trustCodes, ["123456"]);
+    assert.equal(adapter.renewals, 0, "the code is already spent on the login it came with");
+    assert.equal(result.device_trusted, true);
+  });
+
+  it("asks nothing of a restored login on a trusted device", async () => {
+    const adapter = new MockAdapter({ trusted: true });
+    const result = await runLogin({
+      adapter,
+      dataDir: dir.path,
+      prompt: async () => {
+        throw new Error("a trusted device shouldn't need a code");
+      },
+      log: () => {},
+    });
+    assert.equal(adapter.renewals, 0);
+    assert.equal(result.device_trusted, true);
+  });
+
+  it("logs in afresh to earn trust when a restored login never used a code", async () => {
+    const adapter = new MockAdapter({ trusted: false });
+    const prompts: string[] = [];
+    const result = await runLogin({
+      adapter,
+      dataDir: dir.path,
+      prompt: async (question) => {
+        prompts.push(question);
+        return "654321";
+      },
+      log: () => {},
+    });
+    assert.equal(adapter.renewals, 1);
+    assert.equal(prompts.length, 1);
+    assert.equal(result.device_trusted, true);
+  });
+
+  it("carries on without trust when Eufy can't say", async () => {
+    const adapter = new MockAdapter({ trusted: null });
+    const result = await runLogin({ adapter, dataDir: dir.path, prompt: async () => "", log: () => {} });
+    assert.equal(adapter.renewals, 0);
+    assert.equal(result.device_trusted, null);
+  });
+
   it("walks through 2FA and proves the account can see the camera", async () => {
     const prompts: string[] = [];
     const result = await runLogin({
@@ -521,6 +567,7 @@ describe("runLogin", () => {
     });
     assert.equal(prompts.length, 1);
     assert.equal(result.status, "authenticated");
+    assert.equal(result.device_trusted, true);
     assert.equal(result.camera.model, "T86P2");
     assert.equal(result.camera.serial_masked.endsWith("1234"), true);
     assert.equal(JSON.stringify(result).includes("T86P2FULLSERIAL1234"), false);

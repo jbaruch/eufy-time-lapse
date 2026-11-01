@@ -21,6 +21,10 @@ import type { ServiceConfig } from "./service-config.ts";
 import type { AttemptRow, CaptureRow, SlotRow, State } from "./state.ts";
 
 const IDLE_WAKE_MS = 60_000;
+/** Eufy's tokens last 30 days. A week leaves room for a person, if Eufy asks for one. */
+const RENEW_LOGIN_WITHIN_MS = 7 * 24 * 60 * 60 * 1000;
+/** Each try that Eufy challenges sends the account an email. */
+const RENEW_LOGIN_EVERY_MS = 24 * 60 * 60 * 1000;
 const SPOOL_TMP_KEEP_DAYS = 1;
 /** Everything that says what a frame is. When a row was written, and its archive state, don't. */
 const CAPTURE_ROW_IDENTITY = ["slot_id", "kind", "local_date", "frame_received_at", "width", "height", "jpeg_bytes", "sha256", "quality_status", "relative_dir"] as const;
@@ -387,6 +391,7 @@ export class CaptureService {
       await this.alerts.clear("service_crashed");
       return 0;
     }
+    await this.renewLoginIfDue();
     const next = this.state.nextPending(now);
     return next === undefined ? IDLE_WAKE_MS : Math.min(IDLE_WAKE_MS, Math.max(0, Date.parse(next.scheduled_at_utc) - now.getTime()));
   }
@@ -411,6 +416,43 @@ export class CaptureService {
     await this.adapter?.shutdown();
     // Background work's last chance to report. There's no next tick to raise it.
     if (this.backgroundFailure !== undefined) throw this.backgroundFailure;
+  }
+
+  /**
+   * Eufy asks even a trusted device for a code once its token has expired or it hasn't logged in for 30 days, so a
+   * login has to happen before then to need nobody. One that Eufy challenges early costs nothing: the held token keeps
+   * working, and a person gets days of warning instead of a stopped camera.
+   */
+  private async renewLoginIfDue(): Promise<void> {
+    if (this.adapter === undefined || this.state.getFlag("auth_required") !== undefined) return;
+    const now = this.now().getTime();
+    const expiresAt = this.adapter.loginExpiresAt();
+    if (expiresAt === null || expiresAt.getTime() - now > RENEW_LOGIN_WITHIN_MS) {
+      this.state.setFlag("login_renewal_tried_at", null);
+      await this.alerts.clear("login_renewal");
+      return;
+    }
+    const triedAt = this.state.getFlag("login_renewal_tried_at");
+    if (triedAt !== undefined && now - Date.parse(triedAt) < RENEW_LOGIN_EVERY_MS) return;
+    this.state.setFlag("login_renewal_tried_at", new Date(now).toISOString());
+    const needsPerson = (why: string): Promise<void> =>
+      this.alerts.set("login_renewal", true, `${why} The login ends ${expiresAt.toISOString()}. Run the login command before then, or captures stop.`);
+    try {
+      const renewal = await this.adapter.renewLogin();
+      if (renewal.status === "renewed") {
+        this.state.addEvent("login_renewed", `replaced a login ending ${expiresAt.toISOString()}`);
+        this.options.log("renewed the Eufy login");
+      } else {
+        await needsPerson("Eufy wants a code to renew the login.");
+      }
+    } catch (error) {
+      if (!(error instanceof CaptureFailure)) throw error;
+      if (error.reason === "auth_required") {
+        await needsPerson(`Eufy refused to renew the login: ${error.message}`);
+        return;
+      }
+      this.options.log(`couldn't renew the Eufy login, and will try again tomorrow: ${error.message}`);
+    }
   }
 
   /** A cloud read that doesn't wake the camera. Nothing here contacts the camera, including the login restore. */

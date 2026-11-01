@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { mkdtemp, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
@@ -17,6 +18,7 @@ import { CaptureFailure } from "./adapter.ts";
 import { CELLULAR_POLICY, CONNECT_POLICY_VERSION, setConnectPolicy } from "./p2p-policy.ts";
 import type {
   AbortCause,
+  AuthChallenge,
   AuthInput,
   AuthState,
   BatteryReading,
@@ -26,6 +28,7 @@ import type {
   FailurePhase,
   FrameSize,
   LiveSession,
+  LoginRenewal,
   VideoCodecName,
 } from "./adapter.ts";
 
@@ -42,6 +45,41 @@ const TELEMETRY_NAME = /signal|rssi|band|cellular|network|lte|charging|solar|pow
 const TELEMETRY_EXCLUDED = /imei|iccid|imsi|mac|ssid|serial|ip_?addr/i;
 
 export type MegaLoginResult = { status: "ok" } | { status: "captcha"; image: string } | { status: "2fa" };
+
+const SESSION_FILE = "eufy-sdk-session.json";
+const RENEWAL_DIR_PREFIX = "renewal-";
+const MAX_RENEWAL_STEPS = 5;
+const TRUST_LIST_TIMEOUT_MS = 20_000;
+
+/** The SDK's HTTP client, for the trusted-device calls it doesn't wrap. test/mega-adapter.test.ts checks these against the real class. */
+export interface SecurityApi {
+  securityAppPost(path: string, body: Record<string, unknown>): Promise<unknown>;
+  securityAppHost(): string;
+  baseHeaders(): Record<string, string>;
+  authTokenHeaders(): Record<string, string>;
+}
+
+/** Eufy checks the code here too, and answers 26050 for a wrong one. */
+export async function addTrustedDevice(api: SecurityApi, code: string): Promise<void> {
+  await api.securityAppPost("/v1/app/trust_device/add", { verify_code: code, transaction: `${Date.now()}` });
+}
+
+/** A plain GET, unlike the add. Going around the SDK also keeps a surprise 401 from clearing the session. */
+export async function isTrustedDevice(api: SecurityApi, fetchTrustList: typeof fetch = fetch): Promise<boolean> {
+  const response = await fetchTrustList(`https://${api.securityAppHost()}/v1/app/trust_device/list`, {
+    headers: { ...api.baseHeaders(), ...api.authTokenHeaders() },
+    signal: AbortSignal.timeout(TRUST_LIST_TIMEOUT_MS),
+  });
+  let envelope: { code?: number; data?: { list?: Array<{ is_current_device?: number }> } };
+  try {
+    envelope = JSON.parse(await response.text()) as typeof envelope;
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    throw new MegaApiError("trust_device/list didn't answer in JSON", undefined, response.status);
+  }
+  if (response.status !== 200 || envelope.code !== 0) throw new MegaApiError(`trust_device/list failed (${response.status}/${envelope.code})`, envelope.code, response.status);
+  return (envelope.data?.list ?? []).some((device) => device.is_current_device === 1);
+}
 
 export interface MegaLiveStream {
   on(event: "video-config", listener: (config: { width: number; height: number }) => void): unknown;
@@ -70,6 +108,8 @@ export interface MegaClient {
   connectStation(serial: string, signal?: AbortSignal): Promise<void>;
   getP2pSessions(): Map<string, unknown>;
   deviceState(serial: string): { lastSeenMs?: number };
+  addTrustedDevice(code: string): Promise<void>;
+  isTrustedDevice(): Promise<boolean>;
   disconnect(): Promise<void>;
 }
 
@@ -121,8 +161,12 @@ export function createMegaClient(options: MegaClientOptions): MegaClient {
     if (isProgrammingError(error)) (options.onFatal ?? crash)(error);
     else options.logger.error("SDK error", error);
   });
+  const api = client.api as unknown as SecurityApi;
   // Device's capability accessors are generated at runtime, which TypeScript can't relate to this shape.
-  return client as unknown as MegaClient;
+  return Object.assign(client, {
+    addTrustedDevice: (code: string): Promise<void> => addTrustedDevice(api, code),
+    isTrustedDevice: (): Promise<boolean> => isTrustedDevice(api),
+  }) as unknown as MegaClient;
 }
 
 /** The SDK doesn't export its own version, so read the exact pin from this project's manifest. */
@@ -183,6 +227,11 @@ function isTransientApiError(error: unknown): error is MegaApiError {
   return status === undefined || status >= 500 || status === 408 || status === 429;
 }
 
+/** A trust call failing, which costs the next login a code and costs this one nothing. A bug propagates instead. */
+function isTrustFailure(error: unknown): error is Error {
+  return error instanceof MegaApiError || error instanceof SessionExpiredError || isNetworkError(error) || (error instanceof Error && error.name === "TimeoutError");
+}
+
 /** How the SDK rejects when its signal fires: the signal's own reason, a DOMException, or a plain "aborted". */
 function isAbortRejection(error: unknown, signal: AbortSignal): boolean {
   if (error === signal.reason) return true;
@@ -202,6 +251,12 @@ function isCameraError(error: unknown): error is Error {
   );
 }
 
+/** Where the stored login lives, and how to get a second client for logging in beside it. */
+export interface LoginStore {
+  sessionDir: string;
+  createClient: (sessionDir: string) => MegaClient;
+}
+
 export class MegaAdapter implements CameraAdapter {
   readonly name = "@mega-yfue/eufy-sdk";
   readonly version = `${pinnedVersion()}+${CONNECT_POLICY_VERSION}`;
@@ -217,10 +272,12 @@ export class MegaAdapter implements CameraAdapter {
   private unexpectedConnections = 0;
   private readonly identifiers = new Set<string>();
   private readonly onFatal: (error: Error) => void;
+  private readonly loginStore: LoginStore | undefined;
 
   /** `onFatal` gets a failure on a background timer, which nothing can catch. By default it ends the process, as any bug should. */
-  constructor(client: MegaClient, warn: (message: string) => void, registerSecret: (value: string) => void, onFatal?: (error: Error) => void) {
+  constructor(client: MegaClient, warn: (message: string) => void, registerSecret: (value: string) => void, onFatal?: (error: Error) => void, loginStore?: LoginStore) {
     this.client = client;
+    this.loginStore = loginStore;
     this.onFatal = onFatal ?? crash;
     this.warn = warn;
     this.registerSecret = registerSecret;
@@ -256,7 +313,7 @@ export class MegaAdapter implements CameraAdapter {
   }
 
   /**
-   * A token lasts 30 days, so this runs monthly. By now the SDK's own re-login has failed, for a reason its error
+   * A token that ended before the service renewed it. By now the SDK's own re-login has failed, for a reason its error
    * doesn't give, and only a person being needed should stop captures. The login itself tells an outage from a refusal.
    */
   private async sessionFailure(error: SessionExpiredError, phase: FailurePhase): Promise<CaptureFailure> {
@@ -289,11 +346,86 @@ export class MegaAdapter implements CameraAdapter {
   }
 
   async authenticate(input?: AuthInput): Promise<AuthState> {
+    return this.loginStep(this.client, input);
+  }
+
+  loginExpiresAt(): Date | null {
+    if (this.loginStore === undefined) return null;
+    const seconds = new FileSessionStore(join(this.loginStore.sessionDir, SESSION_FILE)).load()?.tokenExpiresAt;
+    return seconds === undefined || seconds === 0 ? null : new Date(seconds * 1000);
+  }
+
+  /** A crash can leave a renewal's directory behind, holding a token. */
+  private async removeLeftoverRenewals(sessionDir: string): Promise<void> {
+    for (const entry of await readdir(sessionDir)) {
+      if (entry.startsWith(RENEWAL_DIR_PREFIX)) await rm(join(sessionDir, entry), { recursive: true, force: true });
+    }
+  }
+
+  async renewLogin(answer?: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<LoginRenewal> {
+    if (this.loginStore === undefined) throw new Error("This adapter has no login store to renew.");
+    const { sessionDir, createClient } = this.loginStore;
+    await this.removeLeftoverRenewals(sessionDir);
+    const directory = await mkdtemp(join(sessionDir, RENEWAL_DIR_PREFIX));
+    const spare = createClient(directory);
+    try {
+      let input: AuthInput | undefined;
+      for (let step = 0; step < MAX_RENEWAL_STEPS; step += 1) {
+        const state = await this.loginStep(spare, input);
+        if (state.status === "authenticated") {
+          const trusted = input !== undefined && "verifyCode" in input ? await this.trust(spare, input.verifyCode) : null;
+          await this.closeClient(spare);
+          await rename(join(directory, SESSION_FILE), join(sessionDir, SESSION_FILE));
+          return { status: "renewed", trusted };
+        }
+        if (answer === undefined) return { status: "needs_person" };
+        input = await answer(state);
+      }
+      return { status: "needs_person" };
+    } finally {
+      await this.closeClient(spare);
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  async isDeviceTrusted(): Promise<boolean | null> {
+    try {
+      return await this.client.isTrustedDevice();
+    } catch (error) {
+      if (!isTrustFailure(error)) throw error;
+      this.warn(`couldn't ask Eufy whether this device is trusted: ${this.scrub(error.message)}`);
+      return null;
+    }
+  }
+
+  async trustDevice(code: string): Promise<boolean> {
+    return this.trust(this.client, code);
+  }
+
+  private async trust(client: MegaClient, code: string): Promise<boolean> {
+    try {
+      await client.addTrustedDevice(code);
+      return await client.isTrustedDevice();
+    } catch (error) {
+      if (!isTrustFailure(error)) throw error;
+      this.warn(`logged in, but Eufy didn't make this device trusted, so renewing the login will ask for a code again: ${this.scrub(error.message)}`);
+      return false;
+    }
+  }
+
+  private async closeClient(client: MegaClient): Promise<void> {
+    await client.disconnect().catch((error: unknown) => {
+      if (!isDisconnectFailure(error)) throw error;
+      this.warn(`the camera client didn't shut down cleanly: ${this.scrub(error.message)}`);
+    });
+  }
+
+  private async loginStep(client: MegaClient, input?: AuthInput): Promise<AuthState> {
     let result: MegaLoginResult;
     try {
-      if (input === undefined) result = await this.client.login();
-      else if ("verifyCode" in input) result = await this.client.submitVerifyCode(input.verifyCode);
-      else result = await this.client.solveCaptcha(input.captcha.code);
+      if (input === undefined) result = await client.login();
+      else if ("verifyCode" in input) result = await client.submitVerifyCode(input.verifyCode);
+      else result = await client.solveCaptcha(input.captcha.code);
     } catch (error) {
       // Only a real refusal means a person has to log in. An outage mustn't stop captures until someone does.
       if (isNetworkError(error) || isTransientApiError(error)) throw this.cloudUnreachable(error, "auth");
@@ -487,9 +619,6 @@ export class MegaAdapter implements CameraAdapter {
 
   async shutdown(): Promise<void> {
     clearInterval(this.sweepTimer);
-    await this.client.disconnect().catch((error: unknown) => {
-      if (!isDisconnectFailure(error)) throw error;
-      this.warn(`the camera client didn't shut down cleanly: ${this.scrub(error.message)}`);
-    });
+    await this.closeClient(this.client);
   }
 }

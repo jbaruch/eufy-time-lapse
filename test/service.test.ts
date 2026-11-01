@@ -125,6 +125,120 @@ describe("CaptureService", () => {
     }
   }
 
+  describe("renewing the login", () => {
+    const DAY = 24 * 60 * MINUTE;
+    const about = (h: Harness): string[] => h.notices.filter((notice) => /renew the login/.test(notice));
+
+    it("leaves a login with more than a week left alone", async () => {
+      const h = await harness();
+      h.adapter.setLoginExpiry(new Date(AT_0800 + 8 * DAY));
+      await runAt(h, [0]);
+      assert.equal(h.adapter.renewals, 0);
+      h.state.close();
+    });
+
+    it("renews a login inside its last week and tells nobody", async () => {
+      const h = await harness();
+      h.adapter.setLoginExpiry(new Date(AT_0800 + 6 * DAY));
+      await runAt(h, [0]);
+      assert.equal(h.adapter.renewals, 1);
+      assert.deepEqual(about(h), []);
+      h.state.close();
+      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"), { readOnly: true });
+      const event = raw.prepare("SELECT detail FROM events WHERE kind = 'login_renewed'").get() as { detail: string } | undefined;
+      raw.close();
+      assert.match(event?.detail ?? "", new RegExp(new Date(AT_0800 + 6 * DAY).toISOString()));
+    });
+
+    it("tries once a day, since each challenged try emails the account", async () => {
+      const h = await harness();
+      h.adapter.setLoginExpiry(new Date(AT_0800 + 6 * DAY));
+      h.adapter.setRenewal(() => ({ status: "needs_person" }));
+      await runAt(h, [0, 5, 10]);
+      assert.equal(h.adapter.renewals, 1);
+      await runAt(h, [24 * 60 - 5]);
+      assert.equal(h.adapter.renewals, 1, "still inside the day");
+      await runAt(h, [24 * 60]);
+      assert.equal(h.adapter.renewals, 2);
+      h.state.close();
+    });
+
+    it("warns a person with the date while captures carry on", async () => {
+      const h = await harness();
+      h.adapter.setLoginExpiry(new Date(AT_0800 + 6 * DAY));
+      h.adapter.setRenewal(() => ({ status: "needs_person" }));
+      await runAt(h, [0, 5]);
+      assert.equal(about(h).length, 1);
+      assert.match(about(h)[0] ?? "", /Eufy wants a code/);
+      assert.match(about(h)[0] ?? "", new RegExp(new Date(AT_0800 + 6 * DAY).toISOString()));
+      assert.match(about(h)[0] ?? "", /login command/);
+      assert.equal(h.adapter.opens, 2, "both slots still ran");
+      assert.equal(h.state.getFlag("auth_required"), undefined);
+      h.state.close();
+    });
+
+    it("clears the warning once a person has logged in", async () => {
+      const h = await harness();
+      h.adapter.setLoginExpiry(new Date(AT_0800 + 6 * DAY));
+      h.adapter.setRenewal(() => ({ status: "needs_person" }));
+      await runAt(h, [0]);
+      h.adapter.setLoginExpiry(new Date(AT_0800 + 30 * DAY));
+      await runAt(h, [5]);
+      assert.equal(about(h).length, 2);
+      assert.match(about(h)[1] ?? "", /recovered/);
+      assert.equal(h.state.getFlag("login_renewal_tried_at"), undefined);
+      h.state.close();
+    });
+
+    it("sits out an outage quietly and tries again tomorrow", async () => {
+      const h = await harness();
+      h.adapter.setLoginExpiry(new Date(AT_0800 + 6 * DAY));
+      h.adapter.setRenewal(() => {
+        throw new CaptureFailure("camera_unreachable", "auth", "Eufy's cloud can't be reached right now.");
+      });
+      await runAt(h, [0, 5]);
+      assert.equal(h.adapter.renewals, 1);
+      assert.deepEqual(about(h), []);
+      assert.equal(h.adapter.opens, 2);
+      h.state.close();
+    });
+
+    it("warns about a refusal without stopping captures that still work", async () => {
+      const h = await harness();
+      h.adapter.setLoginExpiry(new Date(AT_0800 + 6 * DAY));
+      h.adapter.setRenewal(() => {
+        throw new CaptureFailure("auth_required", "auth", "Eufy login failed: wrong password.");
+      });
+      await runAt(h, [0, 5]);
+      assert.match(about(h)[0] ?? "", /refused to renew/);
+      assert.equal(h.state.getFlag("auth_required"), undefined);
+      assert.equal(h.adapter.opens, 2);
+      h.state.close();
+    });
+
+    it("lets a bug through", async () => {
+      const h = await harness();
+      h.adapter.setLoginExpiry(new Date(AT_0800 + 6 * DAY));
+      h.adapter.setRenewal(() => {
+        throw new TypeError("not a function");
+      });
+      await assert.rejects(runAt(h, [0]), TypeError);
+      h.state.close();
+    });
+
+    it("doesn't try once the login is known to need a person", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.adapter.setLoginExpiry(new Date(AT_0800 + 6 * DAY));
+      h.state.setFlag("auth_required", "Eufy needs a manual login step.");
+      // An idle tick, since running a slot would retire the adapter and hide what this checks.
+      h.clock.ms = AT_0800 + MINUTE;
+      await h.service.tick(h.signal);
+      assert.equal(h.adapter.renewals, 0);
+      h.state.close();
+    });
+  });
+
   describe("capturing a slot", () => {
     it("stores the frame and an immutable metadata record, then frees the work area", async () => {
       const h = await harness();

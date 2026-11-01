@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { promisify } from "node:util";
-import type { CameraAdapter, AuthState, CameraInfo, CleanupResult, LiveSession } from "../../src/adapters/adapter.ts";
+import type { AuthChallenge, AuthInput, CameraAdapter, AuthState, CameraInfo, CleanupResult, LiveSession, LoginRenewal } from "../../src/adapters/adapter.ts";
 import { FRESHNESS_BASIS, TRAFFIC_BASIS } from "../../src/capture/acquire.ts";
 import { EXPOSURE_TIME_NOTE } from "../../src/stored-capture.ts";
 
@@ -114,6 +114,9 @@ export interface MockBehavior {
   camera?: CameraInfo;
   unexpected?: number;
   discoverFailure?: () => Error;
+  loginExpiresAt?: Date;
+  renewal?: () => LoginRenewal;
+  trusted?: boolean | null;
 }
 
 export class MockAdapter implements CameraAdapter {
@@ -122,6 +125,8 @@ export class MockAdapter implements CameraAdapter {
   teardowns = 0;
   opens = 0;
   shutdowns = 0;
+  renewals = 0;
+  trustCodes: string[] = [];
   private readonly behavior: MockBehavior;
 
   constructor(behavior: MockBehavior = {}) {
@@ -142,6 +147,37 @@ export class MockAdapter implements CameraAdapter {
   async authenticate(): Promise<AuthState> {
     if (this.behavior.authFailure !== undefined) throw this.behavior.authFailure();
     return this.behavior.auth?.shift() ?? { status: "authenticated" };
+  }
+
+  /** When the stored login ends, for tests of renewing it. */
+  setLoginExpiry(at: Date): void {
+    this.behavior.loginExpiresAt = at;
+  }
+
+  setRenewal(renewal: () => LoginRenewal): void {
+    this.behavior.renewal = renewal;
+  }
+
+  loginExpiresAt(): Date | null {
+    return this.behavior.loginExpiresAt ?? null;
+  }
+
+  async renewLogin(answer?: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<LoginRenewal> {
+    this.renewals += 1;
+    if (answer !== undefined) {
+      const input = await answer({ status: "tfa_required" });
+      return { status: "renewed", trusted: "verifyCode" in input };
+    }
+    return this.behavior.renewal?.() ?? { status: "renewed", trusted: null };
+  }
+
+  async isDeviceTrusted(): Promise<boolean | null> {
+    return this.behavior.trusted === undefined ? true : this.behavior.trusted;
+  }
+
+  async trustDevice(code: string): Promise<boolean> {
+    this.trustCodes.push(code);
+    return true;
   }
 
   async discoverCamera(): Promise<CameraInfo> {

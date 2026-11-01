@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, it } from "node:test";
-import { EufyMega, LoginStatus, MegaApiError, SessionExpiredError, StationUnreachableError } from "@mega-yfue/eufy-sdk";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { EufyMega, FileSessionStore, LoginStatus, MegaApiError, SessionExpiredError, StationUnreachableError } from "@mega-yfue/eufy-sdk";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
-import { isProgrammingError, MegaAdapter } from "../src/adapters/mega.ts";
-import type { MegaClient, MegaDevice, MegaLiveStream, MegaLoginResult } from "../src/adapters/mega.ts";
+import { addTrustedDevice, createMegaClient, isProgrammingError, isTrustedDevice, MegaAdapter } from "../src/adapters/mega.ts";
+import type { MegaClient, MegaDevice, MegaLiveStream, MegaLoginResult, SecurityApi } from "../src/adapters/mega.ts";
 
 const SERIAL = "T86P2FULLSERIAL1234";
 
@@ -36,6 +39,9 @@ function fakeDevice(overrides: Partial<MegaDevice> = {}, stream: MegaLiveStream 
   };
 }
 
+const HELD_SESSION = JSON.stringify({ authToken: "held", tokenExpiresAt: 1_800_000_000 });
+const FRESH_SESSION = JSON.stringify({ authToken: "fresh", tokenExpiresAt: 1_802_592_000 });
+
 class FakeClient implements MegaClient {
   loginResults: MegaLoginResult[] = [{ status: "ok" }];
   logins = 0;
@@ -52,15 +58,34 @@ class FakeClient implements MegaClient {
   listError: Error | undefined;
   loginError: Error | undefined;
   lastSeenMs: number | undefined;
+  trustedCodes: string[] = [];
+  trustError: Error | undefined;
+  trustedNow = false;
+  /** What a real client persists once a login completes. */
+  sessionFile: string | undefined;
 
   async login(): Promise<MegaLoginResult> {
     this.logins += 1;
     if (this.loginError !== undefined) throw this.loginError;
-    return this.loginResults.shift() ?? { status: "ok" };
+    const result = this.loginResults.shift() ?? { status: "ok" };
+    if (result.status === "ok") await this.persist();
+    return result;
   }
   async submitVerifyCode(code: string): Promise<MegaLoginResult> {
     this.codes.push(code);
+    await this.persist();
     return { status: "ok" };
+  }
+  private async persist(): Promise<void> {
+    if (this.sessionFile !== undefined) await writeFile(this.sessionFile, FRESH_SESSION);
+  }
+  async addTrustedDevice(code: string): Promise<void> {
+    if (this.trustError !== undefined) throw this.trustError;
+    this.trustedCodes.push(code);
+    this.trustedNow = true;
+  }
+  async isTrustedDevice(): Promise<boolean> {
+    return this.trustedNow;
   }
   async solveCaptcha(answer: string): Promise<MegaLoginResult> {
     this.captchas.push(answer);
@@ -271,6 +296,197 @@ describe("MegaAdapter discovery", () => {
     await assert.rejects(adapter.openLiveSession(SERIAL, openSignal()), (error: CaptureFailure) => error.reason === "camera_unreachable" && error.phase === "stream_start");
     assert.equal(client.logins, 1);
     await adapter.shutdown();
+  });
+});
+
+describe("MegaAdapter login renewal", () => {
+  async function renewalSetup(prepare: (spare: FakeClient) => void = () => {}): Promise<{ adapter: MegaAdapter; spare: FakeClient; warnings: string[]; sessionDir: string; held: () => Promise<string>; leftovers: () => Promise<string[]>; done: () => Promise<void> }> {
+    const sessionDir = await mkdtemp(join(tmpdir(), "renewal-test-"));
+    await writeFile(join(sessionDir, "eufy-sdk-session.json"), HELD_SESSION);
+    const spare = new FakeClient();
+    prepare(spare);
+    const warnings: string[] = [];
+    const adapter = new MegaAdapter(new FakeClient(), (message) => warnings.push(message), () => {}, undefined, {
+      sessionDir,
+      createClient: (directory) => {
+        spare.sessionFile = join(directory, "eufy-sdk-session.json");
+        return spare;
+      },
+    });
+    return {
+      adapter,
+      spare,
+      warnings,
+      sessionDir,
+      held: () => readFile(join(sessionDir, "eufy-sdk-session.json"), "utf8"),
+      leftovers: async () => (await readdir(sessionDir)).filter((entry) => entry !== "eufy-sdk-session.json"),
+      done: async () => {
+        await adapter.shutdown();
+        await rm(sessionDir, { recursive: true, force: true });
+      },
+    };
+  }
+
+  it("swaps in a login that needed nobody, and leaves nothing behind", async () => {
+    const t = await renewalSetup();
+    assert.deepEqual(await t.adapter.renewLogin(), { status: "renewed", trusted: null });
+    assert.equal(await t.held(), FRESH_SESSION);
+    assert.deepEqual(await t.leftovers(), []);
+    assert.ok(t.spare.disconnects >= 1);
+    await t.done();
+  });
+
+  it("leaves the held login alone when Eufy wants a code and nobody is there", async () => {
+    const t = await renewalSetup((spare) => {
+      spare.loginResults = [{ status: "2fa" }];
+    });
+    assert.deepEqual(await t.adapter.renewLogin(), { status: "needs_person" });
+    assert.equal(await t.held(), HELD_SESSION);
+    assert.deepEqual(await t.leftovers(), []);
+    await t.done();
+  });
+
+  it("spends a person's code on the login and on trust", async () => {
+    const t = await renewalSetup((spare) => {
+      spare.loginResults = [{ status: "2fa" }];
+    });
+    assert.deepEqual(await t.adapter.renewLogin(async () => ({ verifyCode: "123456" })), { status: "renewed", trusted: true });
+    assert.deepEqual(t.spare.codes, ["123456"]);
+    assert.deepEqual(t.spare.trustedCodes, ["123456"]);
+    assert.equal(await t.held(), FRESH_SESSION);
+    await t.done();
+  });
+
+  it("keeps a good login when only the trust step fails", async () => {
+    const t = await renewalSetup((spare) => {
+      spare.loginResults = [{ status: "2fa" }];
+      spare.trustError = new MegaApiError("Failed to request.", 26050, 200);
+    });
+    assert.deepEqual(await t.adapter.renewLogin(async () => ({ verifyCode: "123456" })), { status: "renewed", trusted: false });
+    assert.equal(await t.held(), FRESH_SESSION);
+    assert.match(t.warnings.join(), /ask for a code again/);
+    await t.done();
+  });
+
+  it("reports an outage without touching the held login", async () => {
+    const t = await renewalSetup((spare) => {
+      spare.loginError = new TypeError("fetch failed");
+    });
+    await assert.rejects(t.adapter.renewLogin(), (error: CaptureFailure) => error.reason === "camera_unreachable");
+    assert.equal(await t.held(), HELD_SESSION);
+    assert.deepEqual(await t.leftovers(), []);
+    await t.done();
+  });
+
+  it("reports a refusal without touching the held login", async () => {
+    const t = await renewalSetup((spare) => {
+      spare.loginError = new MegaApiError("wrong password", 26006, 401);
+    });
+    await assert.rejects(t.adapter.renewLogin(), (error: CaptureFailure) => error.reason === "auth_required");
+    assert.equal(await t.held(), HELD_SESSION);
+    await t.done();
+  });
+
+  it("clears out a renewal a crash left behind, token and all", async () => {
+    const t = await renewalSetup();
+    await mkdir(join(t.sessionDir, "renewal-abandoned"));
+    await writeFile(join(t.sessionDir, "renewal-abandoned", "eufy-sdk-session.json"), FRESH_SESSION);
+    await t.adapter.renewLogin();
+    assert.deepEqual(await t.leftovers(), []);
+    await t.done();
+  });
+
+  it("reads when the login ends from the SDK's own stored session", async () => {
+    const t = await renewalSetup();
+    new FileSessionStore(join(t.sessionDir, "eufy-sdk-session.json")).save({ authToken: "x", tokenExpiresAt: 1_800_000_000 } as never);
+    assert.equal(t.adapter.loginExpiresAt()?.toISOString(), "2027-01-15T08:00:00.000Z");
+    await rm(join(t.sessionDir, "eufy-sdk-session.json"));
+    assert.equal(t.adapter.loginExpiresAt(), null);
+    await t.done();
+  });
+
+  it("knows nothing about expiry without a login store", async () => {
+    const { adapter } = setup();
+    assert.equal(adapter.loginExpiresAt(), null);
+    await adapter.shutdown();
+  });
+});
+
+describe("MegaAdapter device trust", () => {
+  const api = (posted: Array<[string, Record<string, unknown>]> = []): SecurityApi => ({
+    securityAppPost: async (path, body) => {
+      posted.push([path, body]);
+      return {};
+    },
+    securityAppHost: () => "security-app.example",
+    baseHeaders: () => ({ openudid: "device" }),
+    authTokenHeaders: () => ({ "x-auth-token": "token" }),
+  });
+  const answering = (status: number, body: string): typeof fetch => (async () => new Response(body, { status })) as typeof fetch;
+
+  it("adds this device with the code a login used", async () => {
+    const posted: Array<[string, Record<string, unknown>]> = [];
+    await addTrustedDevice(api(posted), "123456");
+    assert.equal(posted[0]?.[0], "/v1/app/trust_device/add");
+    assert.equal(posted[0]?.[1].verify_code, "123456");
+  });
+
+  it("finds this device on Eufy's list by Eufy's own marker", async () => {
+    const list = (flags: number[]): string => JSON.stringify({ code: 0, data: { list: flags.map((is_current_device) => ({ is_current_device })) } });
+    assert.equal(await isTrustedDevice(api(), answering(200, list([0, 0, 1]))), true);
+    assert.equal(await isTrustedDevice(api(), answering(200, list([0, 0, 0]))), false);
+    assert.equal(await isTrustedDevice(api(), answering(200, JSON.stringify({ code: 0, data: {} }))), false);
+  });
+
+  it("sends the login's own headers to the list", async () => {
+    let sent: RequestInit | undefined;
+    let url = "";
+    const capture = (async (target: string, init: RequestInit) => {
+      url = target;
+      sent = init;
+      return new Response(JSON.stringify({ code: 0, data: { list: [] } }), { status: 200 });
+    }) as unknown as typeof fetch;
+    await isTrustedDevice(api(), capture);
+    assert.equal(url, "https://security-app.example/v1/app/trust_device/list");
+    assert.deepEqual(sent?.headers, { openudid: "device", "x-auth-token": "token" });
+  });
+
+  it("calls a refused or garbled list a failure, not an empty one", async () => {
+    await assert.rejects(isTrustedDevice(api(), answering(401, JSON.stringify({ code: 26000 }))), MegaApiError);
+    await assert.rejects(isTrustedDevice(api(), answering(200, JSON.stringify({ code: 26000 }))), MegaApiError);
+    await assert.rejects(isTrustedDevice(api(), answering(502, "<html>bad gateway</html>")), MegaApiError);
+  });
+
+  it("answers null when Eufy can't say whether the device is trusted", async () => {
+    const { client, adapter, warnings } = setup();
+    client.isTrustedDevice = async () => {
+      throw new MegaApiError("trust_device/list failed (500/undefined)", undefined, 500);
+    };
+    assert.equal(await adapter.isDeviceTrusted(), null);
+    assert.match(warnings.join(), /whether this device is trusted/);
+    await adapter.shutdown();
+  });
+
+  it("lets a bug in the trust call through", async () => {
+    const { client, adapter } = setup();
+    client.isTrustedDevice = async () => {
+      throw new TypeError("not a function");
+    };
+    await assert.rejects(adapter.isDeviceTrusted(), TypeError);
+    await adapter.shutdown();
+  });
+
+  it("the SDK still has the calls this reaches for", async () => {
+    const sessionDir = await mkdtemp(join(tmpdir(), "real-client-"));
+    const quiet = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
+    const client = createMegaClient({ email: "a@example.com", password: "x", country: "US", sessionDir, logger: quiet });
+    const real = (client as unknown as { api: SecurityApi }).api;
+    for (const name of ["securityAppPost", "securityAppHost", "baseHeaders", "authTokenHeaders"] as const) {
+      assert.equal(typeof real[name], "function", name);
+    }
+    assert.equal(real.securityAppHost(), "security-app.eufylife.com");
+    await client.disconnect();
+    await rm(sessionDir, { recursive: true, force: true });
   });
 });
 

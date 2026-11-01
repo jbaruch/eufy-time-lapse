@@ -7,6 +7,7 @@ import { parseArgs } from "node:util";
 import { CaptureFailure } from "./adapters/adapter.ts";
 import type { CameraAdapter } from "./adapters/adapter.ts";
 import { createMegaClient, MegaAdapter } from "./adapters/mega.ts";
+import type { MegaClient } from "./adapters/mega.ts";
 import { createNotifier } from "./alerts.ts";
 import { ConfigError, loadConfig, loadSettings } from "./config.ts";
 import type { AppConfig, AppSettings } from "./config.ts";
@@ -71,8 +72,13 @@ function buildAdapter(config: AppConfig, persistentDir: string, write: (line: st
       if (debugLogs) logger.debug(message, ...args);
     },
   };
-  const client = createMegaClient({ email: config.email, password: config.password, country: config.country, sessionDir: persistentDir, logger: sdkLogger, ...(onFatal ? { onFatal } : {}) });
-  adapter = new MegaAdapter(client, log, (value) => redactor.addLiteral(value), onFatal);
+  const clientIn = (sessionDir: string, sdk: typeof logger): MegaClient =>
+    createMegaClient({ email: config.email, password: config.password, country: config.country, sessionDir, logger: sdk, ...(onFatal ? { onFatal } : {}) });
+  const quietDebug = { ...logger, debug: (): void => {} };
+  adapter = new MegaAdapter(clientIn(persistentDir, sdkLogger), log, (value) => redactor.addLiteral(value), onFatal, {
+    sessionDir: persistentDir,
+    createClient: (sessionDir) => clientIn(sessionDir, quietDebug),
+  });
   return adapter;
 }
 

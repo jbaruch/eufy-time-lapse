@@ -48,7 +48,8 @@ The probe has to run on the host that will run the service, because P2P behavior
    docker compose build
    ```
 
-2. Log in. This handles 2FA and captcha, stores the session, and shows the camera it found:
+2. Log in. This handles 2FA and captcha, stores the session, adds this service to the account's trusted devices, and
+   shows the camera it found. Without that trust, Eufy asks for a code every time the 30-day login is renewed:
 
    ```bash
    docker compose run --rm timelapse login
@@ -102,7 +103,7 @@ Run anything else alongside it with `docker compose run --rm timelapse <command>
 | `pause` / `resume` | Stop and restart new captures. `resume --battery-checked` overrides a low-battery pause |
 | `render --from YYYY-MM-DD --to YYYY-MM-DD` | Builds an MP4 from stored frames, with a manifest. Never touches the camera |
 | `export-manifest` | Every capture, one JSON object per line |
-| `login` | Log in again when the service reports `auth_required`. A running service picks it up |
+| `login` | Log in again when the service reports `auth_required` or `login_renewal`, or to make this device trusted. A running service picks it up |
 
 The service also answers on `127.0.0.1:8787`. `/status` has the full report. `/healthz` means only that the
 process is alive, so check `/status` to know frames are arriving.

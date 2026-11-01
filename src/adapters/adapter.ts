@@ -31,10 +31,15 @@ export type AbortCause = "deadline" | "terminated";
 
 export type AuthInput = { verifyCode: string } | { captcha: { id: string; code: string } };
 
+/** `trusted` is null when no code was asked for, so there was nothing to earn trust with. */
+export type LoginRenewal = { status: "renewed"; trusted: boolean | null } | { status: "needs_person" };
+
 export type AuthState =
   | { status: "authenticated" }
   | { status: "tfa_required" }
   | { status: "captcha_required"; captchaId: string; captchaImage: string };
+
+export type AuthChallenge = Exclude<AuthState, { status: "authenticated" }>;
 
 export interface BatteryReading {
   percent: number | null;
@@ -92,6 +97,17 @@ export interface CameraAdapter {
   readonly name: string;
   readonly version: string;
   authenticate(input?: AuthInput): Promise<AuthState>;
+  /** When the stored login ends, if Eufy said. A reason to renew it, not proof that it still works. */
+  loginExpiresAt(): Date | null;
+  /**
+   * Logs in from scratch beside the held login, and swaps the result in only once it's complete. Without `answer`,
+   * a challenge ends it with the held login untouched. Rejects with CaptureFailure on an outage or a refusal.
+   */
+  renewLogin(answer?: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<LoginRenewal>;
+  /** Whether Eufy lists this device as trusted, or null if it can't be asked. Eufy asks an untrusted one for a code at every login. */
+  isDeviceTrusted(): Promise<boolean | null>;
+  /** Spends the code a login just used to make this device trusted. Answers whether Eufy now lists it. */
+  trustDevice(code: string): Promise<boolean>;
   discoverCamera(preferredKey?: string): Promise<CameraInfo>;
   /** Starts a new live session. Rejects with CaptureFailure; aborts promptly when `signal` fires. */
   openLiveSession(cameraKey: string, signal: AbortSignal): Promise<LiveSession>;
