@@ -11,7 +11,7 @@ export interface StatusReport {
   completeness_24h: Completeness;
   consecutive_failures: number;
   pause_reasons: string[];
-  battery: { percent: number | null; read_at: string | null; observed_at: string | null; observed_age_seconds: number | null; every_minutes: number | null };
+  battery: { percent: number | null; read_at: string | null; observed_at: string | null; observed_age_seconds: number | null; every_minutes: number | null; charging: boolean | null; temperature_c: number | null };
   budgets: { session_seconds_today: number; session_seconds_limit: number; media_mb_this_month: number; media_mb_limit: number | null };
   disk_free_mb: number;
   reliability_24h: Reliability;
@@ -105,6 +105,7 @@ export function buildStatus(state: State, config: ServiceConfig, now: Date, disk
   const battery = state.latestBattery();
   // A failed read leaves this row empty, but the last real reading is still what the rate is running on.
   const reading = battery?.percent === null || battery?.observed_at === null ? (state.lastKnownBattery() ?? battery) : battery;
+  const telemetry = reading === undefined ? undefined : (JSON.parse(reading.telemetry_json) as Record<string, unknown>);
 
   let consecutive = 0;
   for (const slot of state.recentOutcomes(500)) {
@@ -134,6 +135,8 @@ export function buildStatus(state: State, config: ServiceConfig, now: Date, disk
       observed_at: reading?.observed_at ?? null,
       observed_age_seconds: reading?.observed_at ? Math.round((now.getTime() - Date.parse(reading.observed_at)) / 1000) : null,
       every_minutes: battery?.every_minutes ?? null,
+      charging: typeof telemetry?.charging === "boolean" ? telemetry.charging : null,
+      temperature_c: typeof telemetry?.batteryTemperature === "number" ? telemetry.batteryTemperature : null,
     },
     budgets: {
       session_seconds_today: Math.round(state.sessionUsedMs(local.date) / 1000),

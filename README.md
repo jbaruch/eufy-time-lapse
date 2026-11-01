@@ -148,6 +148,21 @@ From then on, each frame is compared with the last good one:
 If you meant to change the view, run `framing set` again. `framing off` stops all of it. `"framing": { "return_enabled": false }`
 in `data/config.json` keeps the flags and the verdicts in `status`, but never moves the camera.
 
+## The daily report
+
+Once a day, after the last slot of the window, the service sends one message to the alert destination:
+
+```text
+Time-lapse, Mon Nov 2
+Frames: 130 of 132 at 4K, 1 below 4K, 1 missed.
+Battery: 92%, down 3 today (low 90, high 95).
+Charging: last seen 16:20.
+Battery temperature: 11°C.
+```
+
+It also goes out on a paused day. So no report means the service, the host or Telegram is down, though only someone
+who notices the silence will know. `"alerts": { "daily_report": false }` turns it off.
+
 The service also answers on `127.0.0.1:8787`. `/status` has the full report. `/healthz` means only that the
 process is alive, so check `/status` to know frames are arriving. If the capture loop makes no progress for 15 minutes,
 the service alerts and restarts itself.

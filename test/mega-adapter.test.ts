@@ -203,6 +203,16 @@ describe("MegaAdapter discovery", () => {
     await adapter.shutdown();
   });
 
+  it("keeps the battery's temperature and health", async () => {
+    const { adapter, client } = setup();
+    const properties: Record<string, { value: unknown }> = { battery: { value: 66 }, batteryTemperature: { value: 11 }, batteryHealth: { value: 99 } };
+    client.device = fakeDevice({ getProperty: (name) => properties[name], getProperties: () => properties });
+    const camera = await adapter.discoverCamera();
+    assert.equal(camera.telemetry.batteryTemperature, 11);
+    assert.equal(camera.telemetry.batteryHealth, 99);
+    await adapter.shutdown();
+  });
+
   it("keeps connection telemetry and leaves out the SIM's identifiers", async () => {
     const { adapter } = setup();
     const camera = await adapter.discoverCamera();

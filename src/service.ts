@@ -8,6 +8,7 @@ import type { Notify } from "./alerts.ts";
 import { recoverAttempt, TRAFFIC_BASIS } from "./capture/acquire.ts";
 import type { AttemptRecord, RecoveredAttempt } from "./capture/acquire.ts";
 import { abortableSleep, captureSlot, chooseBest, tryDirectory } from "./capture/slot.ts";
+import { dailyReport } from "./daily-report.ts";
 import { chooseReference, compareFrames, judgeFraming } from "./framing.ts";
 import type { FrameComparison, FramingVerdict } from "./framing.ts";
 import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "./lock.ts";
@@ -16,7 +17,7 @@ import { readGrayFrame } from "./media/ffmpeg.ts";
 import { dataBudgetSpent, decide, nextBatteryPaused, reservedSessionMs, sessionBudgetSpent } from "./policy.ts";
 import type { PolicyInput } from "./policy.ts";
 import type { CameraLink } from "./probe/report.ts";
-import { addDays, formatClock, isActiveForInterval, localParts, planDay } from "./schedule.ts";
+import { addDays, formatClock, isActiveForInterval, localParts, parseClock, planDay } from "./schedule.ts";
 import { EXPOSURE_TIME_NOTE, readStoredCapture, spoolDirectory, storedCaptureProblem } from "./stored-capture.ts";
 import type { CaptureMetadata, CaptureOwner } from "./stored-capture.ts";
 import type { ScheduleConfig } from "./schedule.ts";
@@ -111,6 +112,7 @@ export class CaptureService {
   /** A failure from background work, which the next tick raises so it takes the same path as any other crash. */
   private backgroundFailure: Error | undefined;
   /** Unset until the service runs. */
+  private dailyReportReadFor: string | undefined;
   private loopBeatAt: number | undefined;
   private loopDeclaredStuck = false;
   private readonly onBackgroundFailure = (error: Error): void => {
@@ -429,6 +431,7 @@ export class CaptureService {
       return 0;
     }
     await this.renewLoginIfDue();
+    await this.sendDailyReportIfDue();
     const next = this.state.nextPending(now);
     return next === undefined ? IDLE_WAKE_MS : Math.min(IDLE_WAKE_MS, Math.max(0, Date.parse(next.scheduled_at_utc) - now.getTime()));
   }
@@ -496,6 +499,31 @@ export class CaptureService {
    * login has to happen before then to need nobody. One that Eufy challenges early costs nothing: the held token keeps
    * working, and a person gets days of warning instead of a stopped camera.
    */
+  /**
+   * Once a day, after the last slot of the window. Also the only sign of life that doesn't need something to go wrong, so
+   * it goes out on a paused day or a day with no slots too. An undelivered one is tried again at the next idle wake.
+   */
+  private async sendDailyReportIfDue(): Promise<void> {
+    if (!this.config.alerts.daily_report) return;
+    const now = this.now();
+    const local = localParts(now, this.zone);
+    if (local.minutes < parseClock(this.config.schedule.window_end_exclusive)) return;
+    if (this.state.getFlag("daily_report_date") === local.date || this.state.hasUnfinishedSlotsOn(local.date)) return;
+    if (this.dailyReportReadFor !== local.date) {
+      // Cloud only, so it doesn't wake the camera. Without it, a day with no slots would have no reading at all.
+      const reading = await this.readCamera();
+      this.state.recordBattery({ read_at: now.toISOString(), percent: reading?.percent ?? null, observed_at: reading?.observedAt ?? null, every_minutes: null, telemetry_json: JSON.stringify(this.camera?.telemetry ?? {}) });
+      this.dailyReportReadFor = local.date;
+    }
+    const readings = this.state.batterySince(new Date(now.getTime() - 2 * DAY_MS).toISOString()).filter((row) => localParts(new Date(row.read_at), this.zone).date === local.date);
+    const paused: string[] = [];
+    if (this.state.getFlag("operator_paused") !== undefined) paused.push("by you");
+    if (this.state.getFlag("battery_paused") !== undefined) paused.push("low battery");
+    if (this.state.getFlag("auth_required") !== undefined) paused.push("needs a login");
+    const text = dailyReport({ date: local.date, zone: this.zone, slots: this.state.slotCountsOn(local.date), readings, offTarget: this.state.offTargetCountOn(local.date), paused });
+    if (await this.options.notify(text)) this.state.setFlag("daily_report_date", local.date);
+  }
+
   private async renewLoginIfDue(): Promise<void> {
     if (this.adapter === undefined || this.state.getFlag("auth_required") !== undefined) return;
     const now = this.now().getTime();

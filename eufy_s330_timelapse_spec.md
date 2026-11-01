@@ -197,6 +197,8 @@ Handle SIGTERM by shutting down the active capture and releasing resources. SIGK
 
 The default installation uses a fixed camera position and one field of view; the owner disables auto-tracking during setup. Verify that the camera retains its orientation after sleep and reboot.
 
+Once a day, after the window's last slot, the service sends the alert destination a report of the day's frames and battery, including on a paused day. Its absence is the only sign the service gives that the host itself is down, and it takes a person to notice that, so it isn't a real dead-man's switch.
+
 The owner also uses it as a camera, so someone can pan it and leave it there. `framing set` saves a position, and each scheduled frame is then compared with the last good one: at 480×270, by 12 patches of trees and ground, with normalized correlation, so that light matters less than view. Three patches agreeing on a shift within 32 pixels at 4K is on target, and on a larger shift is off target. No agreement at all is off target only against a reference under 30 minutes old in similar light, and everything else is unsure, because night to day looks the same. On 193 real pairs of frames, hours apart or not, no false shift appeared. Off-target frames are flagged in their own table, never in a capture's immutable metadata, and renders leave them out. On a second off-target slot since the last good frame the camera returns to the position, at most every 30 minutes and 6 times in 24 hours. Unsure never moves it.
 
 Preset restoration is optional and may be enabled only after the exact camera has been tested for support. Apply a configurable settling delay after movement. The service must not silently modify security/surveillance settings.

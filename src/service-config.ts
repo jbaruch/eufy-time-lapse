@@ -34,7 +34,7 @@ export interface ServiceConfig {
   };
   traffic: { monthly_budget_mb: number | null; warn_fraction: number; pause_fraction: number };
   storage: { min_free_disk_mb: number; keep_failed_work_days: number; keep_logs_days: number };
-  alerts: { telegram: TelegramConfig | null; consecutive_failed_slots: number; reminder_hours: number; first_try_warn_percent: number; first_try_window: number };
+  alerts: { telegram: TelegramConfig | null; consecutive_failed_slots: number; reminder_hours: number; first_try_warn_percent: number; first_try_window: number; daily_report: boolean };
   http: { bind: string; port: number };
   framing: { tolerance_pixels: number; return_after_off_target_slots: number; return_enabled: boolean };
   logging: { sdk_debug: boolean };
@@ -66,7 +66,7 @@ export const DEFAULT_SERVICE_CONFIG: ServiceConfig = {
   },
   traffic: { monthly_budget_mb: null, warn_fraction: 0.8, pause_fraction: 1 },
   storage: { min_free_disk_mb: 1024, keep_failed_work_days: 3, keep_logs_days: 30 },
-  alerts: { telegram: null, consecutive_failed_slots: 3, reminder_hours: 24, first_try_warn_percent: 80, first_try_window: 50 },
+  alerts: { telegram: null, consecutive_failed_slots: 3, reminder_hours: 24, first_try_warn_percent: 80, first_try_window: 50, daily_report: true },
   http: { bind: "127.0.0.1", port: 8787 },
   // 32 clears the 10 to 18 pixels a return to a saved position was measured to land off, so a return can't look like a new move.
   framing: { tolerance_pixels: 32, return_after_off_target_slots: 2, return_enabled: true },
@@ -208,6 +208,7 @@ function validate(config: ServiceConfig): void {
   positive("alerts.reminder_hours", reminder);
   percentage("alerts.first_try_warn_percent", warnPercent);
   whole("alerts.first_try_window", tryWindow, 1);
+  if (typeof config.alerts.daily_report !== "boolean") fail(`alerts.daily_report must be true or false, got ${JSON.stringify(config.alerts.daily_report)}.`);
 
   if (typeof config.http.bind !== "string" || config.http.bind.length === 0) fail("http.bind must be an address.");
   whole("http.port", config.http.port, 1, MAX_PORT);
