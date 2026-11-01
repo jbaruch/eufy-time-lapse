@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { chmod, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -215,7 +215,21 @@ describe("scripts/deploy.sh", () => {
     assert.equal(await readFile(log, "utf8"), "");
   });
 
-  for (const [name, entry] of [["climbs out of the project", "../outside.txt"], ["reads as an option", "-rf"], ["is absolute", "/etc/hostname"]] as const) {
+  it("refuses a manifest entry that leads out through a symlink, and leaves what it points at", async () => {
+    const { repo, host, log, env } = await world();
+    const outside = join(host, "..", "elsewhere");
+    await mkdir(outside);
+    await writeFile(join(outside, "keep.txt"), "keep me");
+    await symlink(outside, join(host, "link"));
+    await writeFile(join(host, ".deployed-files"), "# eufy-time-lapse deployed files, schema_version=1\nlink/keep.txt\n");
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /leads outside the project/);
+    assert.equal(await readFile(join(outside, "keep.txt"), "utf8"), "keep me");
+    assert.equal(await readFile(log, "utf8"), "");
+  });
+
+  for (const [name, entry] of [["climbs out of the project", "../outside.txt"], ["reads as an option", "-rf"], ["is absolute", "/etc/hostname"], ["is in the data directory", "data/state.sqlite"], ["is the environment file", ".env"], ["is the manifest itself", ".deployed-files"]] as const) {
     it(`refuses a manifest entry that ${name}, and touches nothing`, async () => {
       const { repo, host, log, env } = await world();
       const outside = join(host, "..", "outside.txt");

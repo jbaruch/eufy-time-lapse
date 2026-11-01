@@ -39,7 +39,7 @@ main() {
     local entry
     while IFS= read -r entry; do
       case "$entry" in
-        "" | /* | -* | *..*)
+        "" | /* | -* | *..* | data | data/* | .env | .env.* | "$MANIFEST")
           echo "$host's $MANIFEST lists an unsafe path, so nothing was deployed. Check it, and remove it if it's stale: $entry" >&2
           exit 1
           ;;
@@ -48,8 +48,16 @@ main() {
   fi
   stale="$(comm -23 <(printf '%s\n' "$previous" | LC_ALL=C sort) <(printf '%s\n' "$tracked"))"
   if [[ -n "$stale" ]]; then
+    # A directory that's a symlink could lead anywhere, so each file's real location has to be inside the project.
     # shellcheck disable=SC2016 # These expand on the host.
-    printf '%s\n' "$stale" | on_host 'while IFS= read -r file; do rm -f -- "$file"; done'
+    printf '%s\n' "$stale" | on_host 'set -e; project="$(pwd -P)"; while IFS= read -r file; do
+      parent="$(dirname -- "$file")"
+      if [ ! -d "$parent" ]; then continue; fi
+      case "$(cd -- "$parent" && pwd -P)" in
+        "$project" | "$project"/*) rm -f -- "$file" ;;
+        *) echo "refusing a path that leads outside the project: $file" >&2; exit 1 ;;
+      esac
+    done'
   fi
   on_host "rm -rf src lab test scripts .github"
   git archive HEAD | on_host "tar -xf -"
