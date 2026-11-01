@@ -14,39 +14,13 @@ import { acquireFrame } from "../src/capture/acquire.ts";
 import { loadConfig } from "../src/config.ts";
 import { withCameraLock } from "../src/lock.ts";
 import { createRedactingLogger, Redactor } from "../src/logging.ts";
+import { blankMilestones, classifyOutcome, notePacket, traceEntry } from "./classify.ts";
+import type { Milestones } from "./classify.ts";
 
 const VARIANTS: Record<string, ConnectPolicy> = {
   sdk: SDK_POLICY,
   cellular: CELLULAR_POLICY,
 };
-
-// Only these keep their payload in the trace. Everything else, lookups above all, carries the account's lookup key.
-const KEEP_PAYLOAD = new Set(["f140", "f169", "f170", "f171", "f172", "f173", "f180", "f181", "f182", "f183", "f184", "f128", "f1f0", "f1e0", "f1e1"]);
-const NOISY = new Set(["f1d0", "f1d1"]);
-
-function didMask(did: string): string {
-  const [prefix = "", number = "0", suffix = ""] = did.split("-");
-  const bytes = Buffer.alloc(20);
-  bytes.write(prefix, 0, "ascii");
-  bytes.writeUInt32BE(Number(number), 8);
-  bytes.write(suffix, 12, "ascii");
-  return bytes.toString("hex");
-}
-
-interface Milestones {
-  firstAck: number | null;
-  address: number | null;
-  relayList: number | null;
-  relayPort: number | null;
-  ready: number | null;
-  closed: number | null;
-  firstKeyframe: number | null;
-  relay: string | null;
-  lookupsSent: number;
-  dataIn: number;
-  relayRequests: Set<string>;
-  listRequests: number;
-}
 
 async function main(): Promise<void> {
   const { values } = parseArgs({
@@ -74,34 +48,14 @@ async function main(): Promise<void> {
   let events: ReturnType<typeof createWriteStream> | null = null;
   let marks: Milestones = blankMilestones();
 
-  function blankMilestones(): Milestones {
-    return { firstAck: null, address: null, relayList: null, relayPort: null, ready: null, closed: null, firstKeyframe: null, relay: null, lookupsSent: 0, dataIn: 0, relayRequests: new Set(), listRequests: 0 };
-  }
-
   function record(line: Record<string, unknown>): void {
     events?.write(`${JSON.stringify({ t: Date.now() - startedAt, ...line })}\n`);
   }
 
   setPacketListener((packet: PacketEvent) => {
-    const t = Date.now() - startedAt;
-    const inbound = packet.direction === "in";
-    if (inbound && packet.type === "f121") marks.firstAck ??= t;
-    if (inbound && packet.type === "f140") marks.address ??= t;
-    if (inbound && packet.type === "f169") marks.relayList ??= t;
-    if (inbound && packet.type === "f173") {
-      marks.relayPort ??= t;
-      marks.relay ??= packet.host;
-    }
-    if (inbound && packet.type === "f184") marks.ready ??= t;
-    if (inbound && packet.type === "f1f0") marks.closed ??= t;
-    if (!inbound && (packet.type === "f126" || packet.type === "f120")) marks.lookupsSent += 1;
-    if (inbound && packet.type === "f1d0") marks.dataIn += 1;
-    if (!inbound && packet.type === "f180") marks.relayRequests.add(packet.payload.toString("hex"));
-    if (!inbound && packet.type === "f16a") marks.listRequests += 1;
-    if (NOISY.has(packet.type)) return;
-    const keep = KEEP_PAYLOAD.has(packet.type);
-    const hex = keep ? packet.payload.toString("hex").replaceAll(didMask(packet.did), "<did>") : undefined;
-    record({ d: packet.direction, peer: `${packet.host}:${packet.port}`, type: packet.type, len: packet.payload.length, ...(hex === undefined ? {} : { hex }) });
+    notePacket(marks, packet, Date.now() - startedAt);
+    const entry = traceEntry(packet);
+    if (entry !== null) record({ ...entry });
   });
 
   const redactor = new Redactor([config.password, config.email, ...(config.cameraSerial ? [config.cameraSerial] : [])]);
@@ -153,7 +107,7 @@ async function main(): Promise<void> {
           signal: AbortSignal.any([controller.signal, lockLost]),
         });
         events.end();
-        const outcome = result.status === "captured" ? (result.stream_stop === "target_reached" ? "clean" : "hangup_4k") : result.status === "captured_degraded" ? "hangup_low" : marks.ready === null ? "no_rdy" : "no_video";
+        const outcome = classifyOutcome(result, marks);
         const summary = { try: tryId, variant, outcome, at: new Date(startedAt).toISOString(), session_ms: result.timing.session_ms, connect_ms: result.timing.connect_ms, width: result.frame?.width ?? null, stop: result.stream_stop, failure: result.failure?.message ?? null, cleanup: result.cleanup.status, video_bytes: result.traffic.video_bytes, ...marks, relayRequests: marks.relayRequests.size };
         appendFileSync(resultsPath, `${JSON.stringify(summary)}\n`);
         process.stdout.write(`${tryId.padEnd(14)} ${outcome.padEnd(10)} ${(result.timing.session_ms / 1000).toFixed(1).padStart(5)}s addr=${marks.address ?? "-"} list=${marks.relayList ?? "-"} port=${marks.relayPort ?? "-"} rdy=${marks.ready ?? "-"} kf=${marks.firstKeyframe ?? "-"} close=${marks.closed ?? "-"} relay=${marks.relay ?? "-"} rolls=${marks.relayRequests.size} lists=${marks.listRequests / 3} data=${marks.dataIn}\n`);
