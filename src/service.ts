@@ -346,8 +346,8 @@ export class CaptureService {
   }
 
   private effectivePercent(reading: BatteryReading | null): number | null {
-    if (reading === null || reading.percent === null) return null;
-    if (reading.observedAt === null) return reading.percent;
+    // A reading of unknown age could be any age, so it counts as unknown. A cached full charge must not keep the fastest tier running.
+    if (reading === null || reading.percent === null || reading.observedAt === null) return null;
     const ageMs = this.now().getTime() - Date.parse(reading.observedAt);
     return ageMs > this.config.battery.reading_max_age_hours * 3_600_000 ? null : reading.percent;
   }

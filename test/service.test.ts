@@ -51,7 +51,7 @@ describe("CaptureService", () => {
   const hangUp = async (): Promise<LiveSession> => {
     throw new CaptureFailure("capture_timeout", "first_media", "the camera hung up");
   };
-  const reading = (percent: number | null, observedAt: string | null = null): CameraInfo => ({ ...CAMERA, battery: { percent, observedAt, note: null } });
+  const reading = (percent: number | null, observedAt: string | null = new Date(AT_0800).toISOString()): CameraInfo => ({ ...CAMERA, battery: { percent, observedAt, note: null } });
 
   interface Harness {
     service: CaptureService;
@@ -353,6 +353,23 @@ describe("CaptureService", () => {
       const h = await harness({ camera: reading(null) });
       await runAt(h, [0, 5, 60]);
       assert.equal(h.adapter.opens, 2);
+      h.state.close();
+    });
+
+    it("treats a reading of unknown age as unknown, however good it looks", async () => {
+      const h = await harness({ camera: reading(100, null) });
+      await runAt(h, [5]);
+      assert.equal(h.adapter.opens, 0, "the fastest tier would have run this slot");
+      assert.equal(h.state.getSlot("construction/site-overview/2026-07-01T13:05:00.000Z")?.reason, "battery_tier");
+      h.state.close();
+    });
+
+    it("doesn't let a reading of unknown age clear a low-battery pause", async () => {
+      const h = await harness({ camera: reading(90, null) });
+      h.state.setFlag("battery_paused", "20");
+      await runAt(h, [0]);
+      assert.equal(h.state.getSlot(SLOT_0800)?.reason, "battery_low");
+      assert.equal(h.state.getFlag("battery_paused"), "20");
       h.state.close();
     });
 
