@@ -9,7 +9,7 @@ import type { CameraAdapter } from "./adapters/adapter.ts";
 import { createMegaClient, MegaAdapter } from "./adapters/mega.ts";
 import type { MegaClient } from "./adapters/mega.ts";
 import { createNotifier } from "./alerts.ts";
-import { ConfigError, loadConfig, loadSettings } from "./config.ts";
+import { ConfigError, isFileSystemError, loadConfig, loadSettings } from "./config.ts";
 import type { AppConfig, AppSettings } from "./config.ts";
 import { createStatusServer, listenForStatus } from "./http.ts";
 import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "./lock.ts";
@@ -22,7 +22,7 @@ import type { ServiceConfig, TelegramConfig } from "./service-config.ts";
 import { CaptureService } from "./service.ts";
 import { State } from "./state.ts";
 import { buildCalibration, buildStatus } from "./status.ts";
-import { sendTelegram, TelegramDeliveryError } from "./telegram.ts";
+import { checkRoute, sendTelegram, TelegramDeliveryError } from "./telegram.ts";
 import type { TelegramRoute } from "./telegram.ts";
 
 const USAGE = `Usage: timelapse <command> [options]
@@ -223,11 +223,13 @@ function telegramRoute(telegram: TelegramConfig | null): TelegramRoute | null {
     try {
       return readFileSync(path, "utf8");
     } catch (error) {
-      if (!(error instanceof Error)) throw error;
-      throw new ConfigError(`Can't read alerts.telegram.${setting} at ${path}: ${(error as NodeJS.ErrnoException).code ?? error.name}. See "Alerts" in the README.`);
+      if (!isFileSystemError(error)) throw error;
+      throw new ConfigError(`Can't read alerts.telegram.${setting} at ${path}: ${error.code}. See "Alerts" in the README.`);
     }
   };
-  return { botId: telegram.bot_id, chatId: telegram.chat_id, proxyUrl: read(telegram.proxy_url_file, "proxy_url_file").trim(), ca: read(telegram.ca_file, "ca_file") };
+  const route = { botId: telegram.bot_id, chatId: telegram.chat_id, proxyUrl: read(telegram.proxy_url_file, "proxy_url_file").trim(), ca: read(telegram.ca_file, "ca_file") };
+  checkRoute(route);
+  return route;
 }
 
 function buildService(config: AppConfig, service: ServiceConfig, paths: Paths, state: State, write: (line: string) => void): CaptureService {

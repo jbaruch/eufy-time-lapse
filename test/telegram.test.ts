@@ -10,7 +10,8 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { after, before, beforeEach, describe, it } from "node:test";
 import { promisify } from "node:util";
-import { sendTelegram, TelegramDeliveryError } from "../src/telegram.ts";
+import { ConfigError } from "../src/config.ts";
+import { checkRoute, failure, sendTelegram, TelegramDeliveryError } from "../src/telegram.ts";
 import type { TelegramRoute } from "../src/telegram.ts";
 import { tempDir } from "./helpers/fixtures.ts";
 
@@ -147,5 +148,46 @@ describe("sendTelegram, through a stand-in gateway", () => {
     const other = await certificate("other");
     await assert.rejects(sendTelegram(route({ ca: other.cert }), "hello"), refusedWithout(CREDENTIAL.password, /talking to Telegram/));
     assert.deepEqual(received, [], "nothing was sent to an untrusted server");
+  });
+});
+
+describe("checkRoute", () => {
+  const good: TelegramRoute = { botId: "1", chatId: "-2", proxyUrl: "http://x:proxy-secret@172.17.0.1:10255", ca: "-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----\n" };
+
+  it("accepts a gateway URL with its credential, and a certificate", () => {
+    checkRoute(good);
+  });
+
+  for (const [name, proxyUrl] of [["isn't a URL", "proxy-secret"], ["has no credential", "http://172.17.0.1:10255"], ["is empty", ""], ["isn't http", "ftp://x:proxy-secret@172.17.0.1:10255"]] as const) {
+    it(`refuses a proxy URL that ${name}, without quoting it`, () => {
+      assert.throws(() => checkRoute({ ...good, proxyUrl }), (error: Error) => error instanceof ConfigError && /proxy_url_file/.test(error.message) && !error.message.includes("proxy-secret"));
+    });
+  }
+
+  it("refuses a certificate file with no certificate in it", () => {
+    assert.throws(() => checkRoute({ ...good, ca: "" }), (error: Error) => error instanceof ConfigError && /ca_file/.test(error.message));
+  });
+});
+
+describe("failure", () => {
+  const coded = (error: Error, code: string): NodeJS.ErrnoException => Object.assign(error, { code });
+
+  for (const [name, error] of [["a system error", coded(new Error("connect failed"), "ECONNRESET")], ["a TLS error", coded(new Error("bad certificate"), "DEPTH_ZERO_SELF_SIGNED_CERT")], ["every address failing", coded(new AggregateError([], "all failed"), "ECONNREFUSED")]] as const) {
+    it(`calls ${name} a delivery failure, by its code alone`, () => {
+      const result = failure("talking to Telegram", error);
+      assert.ok(result instanceof TelegramDeliveryError);
+      assert.equal(result.message, `Telegram delivery failed: talking to Telegram: ${error.code}`);
+    });
+  }
+
+  for (const [name, error] of [["a TypeError", new TypeError("x is not a function")], ["a TypeError with a code", coded(new TypeError("bad argument"), "ERR_INVALID_ARG_TYPE")], ["a RangeError", new RangeError("too big")], ["an error with no code", new Error("what happened")]] as const) {
+    it(`leaves ${name} as it is`, () => {
+      assert.equal(failure("talking to Telegram", error), error);
+    });
+  }
+
+  it("leaves a delivery failure as it is", () => {
+    const error = new TelegramDeliveryError("already explained");
+    assert.equal(failure("talking to Telegram", error), error);
   });
 });

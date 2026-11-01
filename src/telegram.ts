@@ -2,6 +2,7 @@ import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import type { Socket } from "node:net";
 import { connect as tlsConnect } from "node:tls";
+import { ConfigError } from "./config.ts";
 
 const API_HOST = "api.telegram.org";
 const TIMEOUT_MS = 15_000;
@@ -27,9 +28,21 @@ export interface TelegramRoute {
   ca: string;
 }
 
-function failure(stage: string, error: NodeJS.ErrnoException): TelegramDeliveryError {
-  if (error instanceof TelegramDeliveryError) return error;
-  return new TelegramDeliveryError(`${stage}: ${error.code ?? error.name}`, { cause: error });
+/** Checked at startup, so a bad file stops the service now instead of losing the first alert. Never quotes the URL. */
+export function checkRoute(route: TelegramRoute): void {
+  const proxy = URL.canParse(route.proxyUrl) ? new URL(route.proxyUrl) : null;
+  if (proxy === null || proxy.protocol !== "http:" || proxy.hostname === "" || proxy.password === "") {
+    throw new ConfigError(`alerts.telegram.proxy_url_file doesn't hold the gateway's http URL with its credential. See "Alerts" in the README.`);
+  }
+  if (!route.ca.includes("BEGIN CERTIFICATE")) {
+    throw new ConfigError(`alerts.telegram.ca_file doesn't hold a PEM certificate. See "Alerts" in the README.`);
+  }
+}
+
+/** An outage carries a code, the network's or TLS's. A bug that reaches this far isn't an outage, and stays what it is. */
+export function failure(stage: string, error: NodeJS.ErrnoException): Error {
+  if (error instanceof TelegramDeliveryError || error instanceof TypeError || error instanceof RangeError || error.code === undefined) return error;
+  return new TelegramDeliveryError(`${stage}: ${error.code}`, { cause: error });
 }
 
 function openTunnel(route: TelegramRoute): Promise<Socket> {

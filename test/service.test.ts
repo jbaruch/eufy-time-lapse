@@ -974,7 +974,7 @@ describe("CaptureService", () => {
       const h = await diedOnSecondTry();
       const lowered = serviceConfig({ capture: { ...DEFAULT_SERVICE_CONFIG.capture, max_attempts: 1 } });
       const state = new State(join(h.dataDir, "state.sqlite"), () => new Date(h.clock.ms));
-      const service = new CaptureService({ config: lowered, state, createAdapter: () => h.adapter, dataDir: h.dataDir, minWidth: 1280, minHeight: 720, link: "cellular", operator: null, log: () => {}, notify: async () => {}, now: () => new Date(h.clock.ms), sleep: async () => {}, diskFreeMb: async () => 50_000 });
+      const service = new CaptureService({ config: lowered, state, createAdapter: () => h.adapter, dataDir: h.dataDir, minWidth: 1280, minHeight: 720, link: "cellular", operator: null, log: () => {}, notify: async () => true, now: () => new Date(h.clock.ms), sleep: async () => {}, diskFreeMb: async () => 50_000 });
       await service.reconcile();
       assert.equal(state.getSlot(SLOT_0800)?.state, "captured");
       state.close();

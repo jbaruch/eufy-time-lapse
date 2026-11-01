@@ -339,7 +339,7 @@ After a change in SDK version, camera firmware, SIM operator, or capture host, r
 
 # 11. Sample Configuration
 
-These are proposed MVP defaults, not camera capabilities guaranteed by Eufy. The owner supplies the project dates, actual site time zone, camera serial, SIM tariff, archive destination, and webhook during setup. Missing deployment-specific values must not prevent local development using a mock adapter.
+These are proposed MVP defaults, not camera capabilities guaranteed by Eufy. The owner supplies the project dates, actual site time zone, camera serial, SIM tariff, archive destination, and Telegram route during setup. Missing deployment-specific values must not prevent local development using a mock adapter.
 
 ```yaml
 project:
