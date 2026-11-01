@@ -21,6 +21,11 @@ import type { ServiceConfig } from "./service-config.ts";
 import type { AttemptRow, CaptureRow, SlotRow, State } from "./state.ts";
 
 const IDLE_WAKE_MS = 60_000;
+/** Nothing in a tick waits this long when it's working: the slot deadline bounds a capture, and the lock refuses rather than waits. */
+const STUCK_AFTER_MS = 15 * 60_000;
+const WATCHDOG_CHECK_MS = 30_000;
+/** How long a stuck loop's last alert gets, in case the alert is what's stuck. Telegram's own timeouts come to less. */
+const STUCK_ALERT_GRACE_MS = 40_000;
 /** Eufy's tokens last 30 days. A week leaves room for a person, if Eufy asks for one. */
 const RENEW_LOGIN_WITHIN_MS = 7 * 24 * 60 * 60 * 1000;
 /** Each try that Eufy challenges sends the account an email. */
@@ -46,6 +51,16 @@ export interface ServiceOptions {
   now?: () => Date;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   diskFreeMb?: () => Promise<number>;
+  /** How often to check the loop is still coming round. */
+  watchdogCheckMs?: number;
+  /** Gets a stuck loop's error. By default it ends the process, which the restart policy brings back. */
+  onStuck?: (error: Error) => void;
+}
+
+function crash(error: Error): void {
+  setImmediate(() => {
+    throw error;
+  });
 }
 
 export function scheduleConfigOf(config: ServiceConfig): ScheduleConfig {
@@ -79,6 +94,9 @@ export class CaptureService {
   private lastPruneDate: string | undefined;
   /** A failure from background work, which the next tick raises so it takes the same path as any other crash. */
   private backgroundFailure: Error | undefined;
+  /** Unset until reconcile is done: rebuilding a lost database from a full spool is slow on purpose. */
+  private loopBeatAt: number | undefined;
+  private loopDeclaredStuck = false;
   private readonly onBackgroundFailure = (error: Error): void => {
     this.backgroundFailure ??= error;
   };
@@ -397,12 +415,41 @@ export class CaptureService {
     return next === undefined ? IDLE_WAKE_MS : Math.min(IDLE_WAKE_MS, Math.max(0, Date.parse(next.scheduled_at_utc) - now.getTime()));
   }
 
+  /**
+   * A hung await would leave the process alive and /healthz answering, with no slot and no alert ever again, since
+   * alerts come from the same loop. A restart recovers, and reconcile records what was interrupted.
+   */
+  checkLoop(): void {
+    if (this.loopBeatAt === undefined || this.loopDeclaredStuck) return;
+    const silentMs = this.now().getTime() - this.loopBeatAt;
+    if (silentMs < Math.max(STUCK_AFTER_MS, this.config.capture.slot_deadline_seconds * 2000)) return;
+    this.loopDeclaredStuck = true;
+    const minutes = Math.round(silentMs / 60_000);
+    const error = new Error(`The capture loop made no progress for ${minutes} minutes, so the service is restarting itself.`);
+    this.options.log(error.message);
+    let ended = false;
+    const end = (): void => {
+      if (ended) return;
+      ended = true;
+      clearTimeout(grace);
+      (this.options.onStuck ?? crash)(error);
+    };
+    const grace = setTimeout(end, STUCK_ALERT_GRACE_MS);
+    this.alerts.raise("service_crashed", `the capture loop made no progress for ${minutes} minutes, and the service is restarting itself`).then(end, (cause: unknown) => {
+      this.options.log(`couldn't raise the alert for a stuck loop: ${String(cause)}`);
+      end();
+    });
+  }
+
   async run(signal: AbortSignal): Promise<void> {
     let audit: Promise<void> = Promise.resolve();
+    const watchdog = setInterval(() => this.checkLoop(), this.options.watchdogCheckMs ?? WATCHDOG_CHECK_MS);
+    watchdog.unref();
     try {
       await this.reconcile();
       audit = this.auditStoredFrames(signal).catch(this.onBackgroundFailure);
       while (!signal.aborted) {
+        this.loopBeatAt = this.now().getTime();
         // No swallowing here: an unexpected error should crash this process. The restart policy brings it back,
         // and reconcile records the interrupted slot, which beats limping on in an unknown state.
         const waitMs = await this.tick(signal);
@@ -410,9 +457,11 @@ export class CaptureService {
       }
     } catch (error) {
       // A crash that keeps recurring would otherwise die before any slot's alert. The tracker dedupes across restarts.
+      clearInterval(watchdog);
       await this.alerts.raise("service_crashed", `the service stopped on an unexpected ${error instanceof Error ? error.name : "error"} and restarts by itself. If this repeats, read the container log`);
       throw error;
     }
+    clearInterval(watchdog);
     await audit;
     await this.adapter?.shutdown();
     // Background work's last chance to report. There's no next tick to raise it.

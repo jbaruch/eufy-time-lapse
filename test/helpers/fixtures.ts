@@ -114,6 +114,7 @@ export interface MockBehavior {
   camera?: CameraInfo;
   unexpected?: number;
   discoverFailure?: () => Error;
+  discoverHang?: Promise<void>;
   loginExpiresAt?: Date;
   renewal?: () => LoginRenewal;
   trusted?: boolean | null;
@@ -180,7 +181,13 @@ export class MockAdapter implements CameraAdapter {
     return true;
   }
 
+  /** Discoveries wait on this, for tests of a call that never answers. */
+  setDiscoverHang(hang: Promise<void>): void {
+    this.behavior.discoverHang = hang;
+  }
+
   async discoverCamera(): Promise<CameraInfo> {
+    if (this.behavior.discoverHang !== undefined) await this.behavior.discoverHang;
     if (this.behavior.discoverFailure !== undefined) throw this.behavior.discoverFailure();
     return this.behavior.camera ?? CAMERA;
   }
