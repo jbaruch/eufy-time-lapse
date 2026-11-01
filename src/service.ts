@@ -127,8 +127,13 @@ export class CaptureService {
         for (const day of await this.subdirectories(join(root, year, month))) {
           const relativeDay = join(root, year, month, day);
           for (const captureId of await this.subdirectories(relativeDay)) {
-            if (this.state.hasCapture(captureId)) continue;
             const relativeDir = join(relativeDay, captureId);
+            const known = this.state.getCapture(captureId);
+            if (known !== undefined) {
+              // The row's own directory is the audit's to check. A second one under that id isn't anything's but this.
+              if (known.relative_dir !== relativeDir) unreadable.push(relativeDir);
+              continue;
+            }
             const metadata = await readStoredCapture(this.options.dataDir, relativeDir, captureId, `${year}-${month}-${day}`, this.owner);
             if (metadata === null || !this.slotClaimHolds(metadata)) {
               unreadable.push(relativeDir);

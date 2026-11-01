@@ -877,6 +877,28 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("alerts about a second directory under a known capture's id, and leaves both", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      const [capture] = h.state.allCaptures();
+      assert.ok(capture !== undefined);
+      const duplicate = join(h.dataDir, "spool", "construction", "site-overview", "2026", "05", "01", capture.capture_id);
+      await cp(join(h.dataDir, capture.relative_dir), duplicate, { recursive: true });
+      await h.service.reconcile();
+      assert.ok(h.notices.some((notice) => notice.includes("1 frame(s) in the spool have unreadable metadata")), h.notices.join("; "));
+      assert.equal(h.state.getCapture(capture.capture_id)?.relative_dir, capture.relative_dir);
+      await access(join(duplicate, "frame.jpg"));
+      h.state.close();
+    });
+
+    it("doesn't take a known capture's own directory for a duplicate", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      await h.service.reconcile();
+      assert.equal(h.notices.some((notice) => notice.includes("unreadable metadata")), false, h.notices.join("; "));
+      h.state.close();
+    });
+
     it("rebuilds a lost slot row from the frame, so the camera isn't sent after it again", async () => {
       const h = await harness();
       await runAt(h, [0]);
