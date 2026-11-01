@@ -294,6 +294,10 @@ export class State {
     return this.one("SELECT 1 FROM captures WHERE capture_id = ?", captureId) !== undefined;
   }
 
+  slotHasCapture(slotId: string): boolean {
+    return this.one("SELECT 1 FROM captures WHERE slot_id = ?", slotId) !== undefined;
+  }
+
   capturesBetween(from: string, to: string): CaptureRow[] {
     return this.all<CaptureRow>("SELECT * FROM captures WHERE local_date >= ? AND local_date <= ? ORDER BY frame_received_at", from, to);
   }
