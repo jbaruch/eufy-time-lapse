@@ -118,6 +118,8 @@ Answering the camera's relay packets, and switching to another relay on a stall 
 
 **A slot during live view, also on November 1:** the owner watched in the app while a slot fired. The picture flickered once and carried on, and the frame still came out at 4K on the first try, in about 13 seconds or less. The camera also recorded an event, which it didn't do for a slot nobody was watching. That is one observation, so what caused the event isn't known.
 
+**The battery reading is coarse, seen on the pole on November 1:** it fell from 100% to 95% over the morning, reported charging for an hour on an overcast afternoon while it stayed at exactly 95%, then read 100% and not charging, and held there. Nothing was plugged in. The likely reason is that the charger reached its end point and the camera corrected its figure, though without the voltage that's an inference. So a day's change isn't a measure of energy, and calibration has to read the trend over several days. `solarIntensity` stayed at 0 throughout and `powerSource` read "Battery", so neither says anything about charging on this camera.
+
 **Leaving a saved position and coming back, also on November 1:** the camera moved one step each way, and returning to a saved preset landed 18 and then 10 pixels off horizontally at 4K, with no vertical error. Two untouched frames differed by at most 2 pixels, so that's real, about 0.5% of the frame's width at worst. A preset could only be created in the first empty slot: the list shows 10 slots, and a save to slot 9 did nothing while a save to slot 3 worked. No position events arrived, so comparing frames is the only way found so far to tell where the camera is pointing.
 
 **Broken on purpose, on the real camera:**
