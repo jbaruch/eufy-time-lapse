@@ -9,7 +9,8 @@ import { TRAFFIC_BASIS } from "./capture/acquire.ts";
 import type { AttemptRecord } from "./capture/acquire.ts";
 import { abortableSleep, captureSlot } from "./capture/slot.ts";
 import { CameraLockHeldError, withCameraLock } from "./lock.ts";
-import { decide, nextBatteryPaused, reservedSessionMs } from "./policy.ts";
+import { dataBudgetSpent, decide, nextBatteryPaused, reservedSessionMs, sessionBudgetSpent } from "./policy.ts";
+import type { PolicyInput } from "./policy.ts";
 import type { CameraLink } from "./probe/report.ts";
 import { addDays, isActiveForInterval, localParts, planDay } from "./schedule.ts";
 import type { ScheduleConfig } from "./schedule.ts";
@@ -295,21 +296,18 @@ export class CaptureService {
       this.state.addEvent(batteryPaused ? "battery_pause" : "battery_resume", String(percent));
     }
 
-    const decision = decide(
-      {
-        batteryPercent: percent,
-        batteryPaused,
-        batteryOverride: this.state.getFlag("battery_override") !== undefined,
-        operatorPaused: this.state.getFlag("operator_paused") !== undefined,
-        authRequired: this.state.getFlag("auth_required") !== undefined,
-        diskFreeMb: await this.freeDiskMb(),
-        sessionUsedMs: this.state.sessionUsedMs(local.date),
-        monthBytes: this.state.monthBytes(local.date.slice(0, 7)),
-        localMinutes: slot.local_minutes,
-      },
-      this.config,
-      (every) => isActiveForInterval(slot.local_minutes, this.config.schedule.window_start, every),
-    );
+    const input: PolicyInput = {
+      batteryPercent: percent,
+      batteryPaused,
+      batteryOverride: this.state.getFlag("battery_override") !== undefined,
+      operatorPaused: this.state.getFlag("operator_paused") !== undefined,
+      authRequired: this.state.getFlag("auth_required") !== undefined,
+      diskFreeMb: await this.freeDiskMb(),
+      sessionUsedMs: this.state.sessionUsedMs(local.date),
+      monthBytes: this.state.monthBytes(local.date.slice(0, 7)),
+      localMinutes: slot.local_minutes,
+    };
+    const decision = decide(input, this.config, (every) => isActiveForInterval(slot.local_minutes, this.config.schedule.window_start, every));
 
     this.state.recordBattery({
       read_at: now.toISOString(),
@@ -318,7 +316,7 @@ export class CaptureService {
       every_minutes: decision.everyMinutes,
       telemetry_json: JSON.stringify(this.camera?.telemetry ?? {}),
     });
-    await this.syncPolicyAlerts(decision.action === "skip" ? decision.reason : null, percent, local.date);
+    await this.syncPolicyAlerts(input, percent, local.date);
 
     if (decision.action === "skip") {
       this.state.setSlot(slot.slot_id, "skipped_policy", { reason: decision.reason, everyMinutes: decision.everyMinutes });
@@ -411,8 +409,8 @@ export class CaptureService {
         everyMinutes,
       });
       this.state.setSlot(slot.slot_id, chosen.status === "captured" ? "captured" : "captured_degraded", { captureId, everyMinutes });
-      await rm(slotDir, { recursive: true, force: true });
-      for (const other of otherTries) await rm(join(this.options.dataDir, "work", other.attempt_id), { recursive: true, force: true });
+      // Every try's directory, the kept one included. Each holds raw 4K video.
+      for (const record of [chosen, ...otherTries]) await rm(join(this.options.dataDir, "work", record.attempt_id), { recursive: true, force: true });
       this.options.log(`${slot.local_date} ${slot.local_time}: ${chosen.status} ${chosen.frame.width}x${chosen.frame.height} via ${chosen.connection_path ?? "unknown"} in ${chosen.timing.session_ms} ms, ${otherTries.length + 1} tries (${relativeDir})`);
     } else {
       const reason = chosen.failure?.reason ?? "capture_timeout";
@@ -535,14 +533,15 @@ export class CaptureService {
     return relativeDir;
   }
 
-  private async syncPolicyAlerts(reason: string | null, percent: number | null, localDate: string): Promise<void> {
-    const { battery, traffic } = this.config;
-    await this.alerts.set("auth_required", reason === "auth_required", `Eufy needs a manual login: ${this.state.getFlag("auth_required") ?? ""}`);
-    await this.alerts.set("operator_paused", reason === "operator_paused", "capture is paused by the operator");
-    await this.alerts.set("battery_paused", reason === "battery_low", `capture paused on low battery (${percent ?? "unknown"}%). If the reading is old, check the app and run resume --battery-checked`);
-    await this.alerts.set("storage_full", reason === "storage_full", "capture paused: the disk is nearly full");
-    await this.alerts.set("session_budget", reason === "session_budget", "capture paused: today's camera-contact budget is spent");
-    await this.alerts.set("data_budget", reason === "data_budget", "capture paused: this month's data budget is spent");
+  /** Each condition stands on its own. Reading them from the one skip reason that won would call one condition's end whenever another outranked it. */
+  private async syncPolicyAlerts(input: PolicyInput, percent: number | null, localDate: string): Promise<void> {
+    const { battery, traffic, storage } = this.config;
+    await this.alerts.set("auth_required", input.authRequired, `Eufy needs a manual login: ${this.state.getFlag("auth_required") ?? ""}`);
+    await this.alerts.set("operator_paused", input.operatorPaused, "capture is paused by the operator");
+    await this.alerts.set("battery_paused", input.batteryPaused && !input.batteryOverride, `capture paused on low battery (${percent ?? "unknown"}%). If the reading is old, check the app and run resume --battery-checked`);
+    await this.alerts.set("storage_full", input.diskFreeMb <= storage.min_free_disk_mb, "capture paused: the disk is nearly full");
+    await this.alerts.set("session_budget", sessionBudgetSpent(input, this.config), "capture paused: today's camera-contact budget is spent");
+    await this.alerts.set("data_budget", dataBudgetSpent(input, this.config), "capture paused: this month's data budget is spent");
     await this.alerts.set("battery_warning", percent !== null && percent < battery.warn_below_percent, `battery is at ${percent ?? "unknown"}%`);
     if (traffic.monthly_budget_mb !== null) {
       const used = this.state.monthBytes(localDate.slice(0, 7));

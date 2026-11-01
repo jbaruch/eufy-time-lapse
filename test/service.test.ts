@@ -198,6 +198,15 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("leaves no raw video behind when a retry's frame is the one kept", async () => {
+      const script = [hangUp, fresh];
+      const h = await harness({ open: async () => (script.shift() as () => Promise<LiveSession>)() });
+      await runAt(h, [0]);
+      assert.equal(h.state.getSlot(SLOT_0800)?.state, "captured");
+      assert.deepEqual(await readdir(join(h.dataDir, "work")), []);
+      h.state.close();
+    });
+
     it("records a miss with its reason, keeps the evidence, and carries on with the next slot", async () => {
       const script = [hangUp, hangUp, hangUp, fresh];
       const h = await harness({ open: async () => (script.shift() as () => Promise<LiveSession>)() });
@@ -419,6 +428,36 @@ describe("CaptureService", () => {
       assert.equal(left.includes("old-try"), false);
       assert.equal(state.allCaptures().length, frames);
       state.close();
+    });
+  });
+
+  describe("alerts that overlap", () => {
+    function firstAndLastNotices(notices: string[], about: string): string[] {
+      return notices.filter((notice) => notice.includes(about));
+    }
+
+    it("doesn't call a spent budget recovered on a slot the battery tier skipped, and raises it once", async () => {
+      // The 15-minute tier: 08:00 and 08:15 are active, the slots between are skipped.
+      const config = serviceConfig({ capture: { ...DEFAULT_SERVICE_CONFIG.capture, max_session_seconds_per_day: 1 } });
+      const h = await harness({ config, camera: reading(50, new Date(AT_0800).toISOString()) });
+      await runAt(h, [0, 5, 10, 15, 20, 25, 30]);
+      assert.equal(h.adapter.opens, 0);
+      assert.equal(h.state.getSlot("construction/site-overview/2026-07-01T13:05:00.000Z")?.reason, "battery_tier");
+      assert.equal(h.state.getSlot("construction/site-overview/2026-07-01T13:15:00.000Z")?.reason, "session_budget");
+      const notices = firstAndLastNotices(h.notices, "camera-contact budget");
+      assert.deepEqual(notices.length, 1, notices.join("; "));
+      assert.equal(notices.some((notice) => notice.includes("recovered")), false);
+      h.state.close();
+    });
+
+    it("doesn't call a low-battery pause over while a login outranks it", async () => {
+      const h = await harness({ camera: reading(20, new Date(AT_0800).toISOString()) });
+      await runAt(h, [0]);
+      assert.equal(firstAndLastNotices(h.notices, "low battery").length, 1);
+      h.state.setFlag("auth_required", "a code is needed");
+      await runAt(h, [5]);
+      assert.equal(h.notices.some((notice) => notice.includes("recovered") && notice.includes("low battery")), false, h.notices.join("; "));
+      h.state.close();
     });
   });
 

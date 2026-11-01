@@ -35,6 +35,15 @@ export function reservedSessionMs(config: ServiceConfig["capture"]): number {
 }
 
 /** Whether a slot may wake the camera. Each rule is explicit and recorded, so the capture rate never changes silently. */
+export function sessionBudgetSpent(input: PolicyInput, config: ServiceConfig): boolean {
+  return input.sessionUsedMs + reservedSessionMs(config.capture) > config.capture.max_session_seconds_per_day * 1000;
+}
+
+export function dataBudgetSpent(input: PolicyInput, config: ServiceConfig): boolean {
+  const { monthly_budget_mb: budget, pause_fraction: fraction } = config.traffic;
+  return budget !== null && input.monthBytes >= budget * 1024 * 1024 * fraction;
+}
+
 export function decide(input: PolicyInput, config: ServiceConfig, isActive: (everyMinutes: number) => boolean): PolicyDecision {
   const everyMinutes = chooseInterval(input.batteryPercent, config.cadence);
   const skip = (reason: SkipReason): PolicyDecision => ({ action: "skip", reason, everyMinutes });
@@ -43,8 +52,7 @@ export function decide(input: PolicyInput, config: ServiceConfig, isActive: (eve
   if (input.batteryPaused && !input.batteryOverride) return skip("battery_low");
   if (input.diskFreeMb <= config.storage.min_free_disk_mb) return skip("storage_full");
   if (!isActive(everyMinutes)) return skip("battery_tier");
-  if (input.sessionUsedMs + reservedSessionMs(config.capture) > config.capture.max_session_seconds_per_day * 1000) return skip("session_budget");
-  const { monthly_budget_mb: budget, pause_fraction: fraction } = config.traffic;
-  if (budget !== null && input.monthBytes >= budget * 1024 * 1024 * fraction) return skip("data_budget");
+  if (sessionBudgetSpent(input, config)) return skip("session_budget");
+  if (dataBudgetSpent(input, config)) return skip("data_budget");
   return { action: "capture", everyMinutes };
 }
