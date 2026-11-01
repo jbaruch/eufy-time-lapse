@@ -28,7 +28,7 @@ Names follow the SDK where it has them. `f1` is the protocol's magic byte.
 | `f172` / `f173` | Asks a relay for a session port / the port and a mark |
 | `f180` / `f181` | Asks the lookup servers to send the camera to that relay / acknowledgement |
 | `f182` | A relay endpoint to register with, and a mark |
-| `f183` | Registers at a relay with a mark. The camera's arrives here through the relay |
+| `f183` | Registers at a relay with a mark. The camera's arrives here through the relay, 23 copies whether answered or not |
 | `f184` | Ready: the camera has joined the relay session |
 | `f1e0` / `f1e1` | Ping / pong |
 | `f1d0` / `f1d1` | Data / its acknowledgement |

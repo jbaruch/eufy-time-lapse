@@ -58,8 +58,6 @@ describe("loadServiceConfig", () => {
     ["no tiers", { cadence: { tiers: [] } }, /empty/],
     ["resume at or below pause", { battery: { resume_at_or_above_percent: 25 } }, /flap/],
     ["a slot deadline too short for its retries", { capture: { slot_deadline_seconds: 100 } }, /too short/],
-    ["a relay head start of zero", { capture: { relay_after_seconds: 0 } }, /relay_after_seconds/],
-    ["a relay head start past the attempt timeout", { capture: { relay_after_seconds: 60 } }, /relay_after_seconds/],
   ];
   for (const [name, content, message] of invalid) {
     it(`rejects ${name}`, async () => {

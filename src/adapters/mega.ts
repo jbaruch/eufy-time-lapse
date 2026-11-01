@@ -14,6 +14,7 @@ import {
   StationUnreachableError,
 } from "@mega-yfue/eufy-sdk";
 import { CaptureFailure } from "./adapter.ts";
+import { CELLULAR_POLICY, setConnectPolicy } from "./p2p-policy.ts";
 import type {
   AbortCause,
   AuthInput,
@@ -33,9 +34,6 @@ const CAMERA_MODEL_PREFIX = "T86P2";
 const P2P_IDLE_MS = 5_000;
 const CLOSE_POLL_MS = 100;
 const SWEEP_INTERVAL_MS = 5_000;
-/** The SDK's private RELAY_AFTER_ACKED_ROUNDS: its relay fallback starts once the round counter passes this. */
-const SDK_RELAY_AFTER_ROUNDS = 24;
-const RELAY_POLL_MS = 100;
 const TELEMETRY_NAME = /signal|rssi|band|cellular|network|lte|charging|solar|power|quality/i;
 const TELEMETRY_EXCLUDED = /imei|iccid|imsi|mac|ssid|serial|ip_?addr/i;
 
@@ -80,6 +78,7 @@ export interface MegaClientOptions {
 }
 
 export function createMegaClient(options: MegaClientOptions): MegaClient {
+  setConnectPolicy(CELLULAR_POLICY);
   const client = new EufyMega({
     email: options.email,
     password: options.password,
@@ -167,11 +166,9 @@ export class MegaAdapter implements CameraAdapter {
   private relayUsed = false;
   private loginNeeded = false;
   private unexpectedConnections = 0;
-  private readonly relayAfterMs: number | null;
 
-  constructor(client: MegaClient, warn: (message: string) => void, registerSecret: (value: string) => void, options: { relayAfterMs?: number | null } = {}) {
+  constructor(client: MegaClient, warn: (message: string) => void, registerSecret: (value: string) => void) {
     this.client = client;
-    this.relayAfterMs = options.relayAfterMs ?? null;
     this.warn = warn;
     this.registerSecret = registerSecret;
     this.sweepTimer = setInterval(() => void this.sweepConnections(), SWEEP_INTERVAL_MS);
@@ -265,31 +262,6 @@ export class MegaAdapter implements CameraAdapter {
     throw error;
   }
 
-  /**
-   * Starts the SDK's relay fallback sooner, when configured. Its wait of about 25 s for a hole punch has no setting,
-   * so this moves the private counter behind it, and test/mega-adapter.test.ts holds that against the real SDK class.
-   * Runs until stopped, because the SDK can replace a session mid-start, and a replacement counts from zero again.
-   */
-  private expediteRelay(stationSn: string): () => void {
-    if (this.relayAfterMs === null) return () => {};
-    let expedited: unknown;
-    let timer: NodeJS.Timeout;
-    const tick = (): void => {
-      const session = this.client.getP2pSessions().get(stationSn) as { ackedRounds?: number } | undefined;
-      if (session !== undefined && !("ackedRounds" in session)) {
-        this.warn("capture.relay_after_seconds did nothing: this SDK build has no relay round counter. Check the pinned SDK version, or set it to null.");
-        return;
-      }
-      if (session !== undefined && session !== expedited && typeof session.ackedRounds === "number") {
-        session.ackedRounds = SDK_RELAY_AFTER_ROUNDS;
-        expedited = session;
-      }
-      timer = setTimeout(tick, RELAY_POLL_MS);
-    };
-    timer = setTimeout(tick, this.relayAfterMs);
-    return () => clearTimeout(timer);
-  }
-
   async openLiveSession(cameraKey: string, signal: AbortSignal): Promise<LiveSession> {
     this.attemptActive = true;
     this.relayUsed = false;
@@ -303,24 +275,18 @@ export class MegaAdapter implements CameraAdapter {
     const coldConnection = !this.client.getP2pSessions().has(device.stationSn);
 
     const startedAt = Date.now();
-    const stopExpediting = this.expediteRelay(device.stationSn);
-    let connectMs: number;
+    try {
+      await this.client.connectStation(cameraKey, signal);
+    } catch (error) {
+      throw this.failureFrom(error, "connect", signal);
+    }
+    const connectMs = Date.now() - startedAt;
+
     let stream: MegaLiveStream;
     try {
-      try {
-        await this.client.connectStation(cameraKey, signal);
-      } catch (error) {
-        throw this.failureFrom(error, "connect", signal);
-      }
-      connectMs = Date.now() - startedAt;
-
-      try {
-        stream = await camera.live({ signal });
-      } catch (error) {
-        throw this.failureFrom(error, "stream_start", signal);
-      }
-    } finally {
-      stopExpediting();
+      stream = await camera.live({ signal });
+    } catch (error) {
+      throw this.failureFrom(error, "stream_start", signal);
     }
     this.stream = stream;
 

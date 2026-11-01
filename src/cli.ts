@@ -58,7 +58,7 @@ function log(message: string): void {
   process.stderr.write(`${new Date().toISOString()} ${message}\n`);
 }
 
-function buildAdapter(config: AppConfig, persistentDir: string, write: (line: string) => void, debugLogs: boolean, relayAfterSeconds: number | null = null): CameraAdapter {
+function buildAdapter(config: AppConfig, persistentDir: string, write: (line: string) => void, debugLogs: boolean): CameraAdapter {
   const redactor = new Redactor([config.password, config.email, ...(config.cameraSerial ? [config.cameraSerial] : [])]);
   const logger = createRedactingLogger(redactor, write);
   let adapter: MegaAdapter | undefined;
@@ -71,7 +71,7 @@ function buildAdapter(config: AppConfig, persistentDir: string, write: (line: st
     },
   };
   const client = createMegaClient({ email: config.email, password: config.password, country: config.country, sessionDir: persistentDir, logger: sdkLogger });
-  adapter = new MegaAdapter(client, log, (value) => redactor.addLiteral(value), { relayAfterMs: relayAfterSeconds === null ? null : relayAfterSeconds * 1000 });
+  adapter = new MegaAdapter(client, log, (value) => redactor.addLiteral(value));
   return adapter;
 }
 
@@ -210,7 +210,7 @@ function buildService(config: AppConfig, service: ServiceConfig, paths: Paths, s
   return new CaptureService({
     config: service,
     state,
-    createAdapter: () => buildAdapter(config, paths.sessionDir, write, service.logging.sdk_debug, service.capture.relay_after_seconds),
+    createAdapter: () => buildAdapter(config, paths.sessionDir, write, service.logging.sdk_debug),
     dataDir: paths.dataDir,
     ...(config.cameraSerial ? { cameraSerial: config.cameraSerial } : {}),
     minWidth: config.minWidth,

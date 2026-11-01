@@ -9,13 +9,21 @@ export interface ConnectPolicy {
   relayAfterRounds: number | null;
   /** The SDK's seven extra sockets, which only help a hole punch. */
   probeSockets: boolean;
+  /** The hole punch itself: bursts at consecutive ports on the camera's address, which carrier NAT defeats anyway. */
+  holePunch: boolean;
   /** Stops asking the lookup servers for new P2P sessions once the relay handshake has begun. */
   stopLookupsOnRelay: boolean;
-  /** Answers the camera's relay packets with relay-ready, which the SDK never does. */
-  answerRelayPacket: boolean;
+  /**
+   * How long one relay step may wait before asking the lookup servers for the relay list again. Relays answer only
+   * once the camera has heard about them, and the SDK asks once, so a lost message would otherwise end the connect.
+   */
+  relayStallMs: number | null;
 }
 
-export const SDK_POLICY: ConnectPolicy = { relayAfterRounds: null, probeSockets: true, stopLookupsOnRelay: false, answerRelayPacket: false };
+export const SDK_POLICY: ConnectPolicy = { relayAfterRounds: null, probeSockets: true, holePunch: true, stopLookupsOnRelay: false, relayStallMs: null };
+
+/** What this camera needs, on carrier NAT, where every working connection has been through a relay. lab/ measures it. */
+export const CELLULAR_POLICY: ConnectPolicy = { relayAfterRounds: 6, probeSockets: false, holePunch: false, stopLookupsOnRelay: true, relayStallMs: 2000 };
 
 export interface PacketEvent {
   direction: "in" | "out";
@@ -33,14 +41,25 @@ interface Address {
   port: number;
 }
 
+interface RelayHandshake {
+  step: string;
+  relays: Address[];
+  via?: Address | undefined;
+  mark?: number | undefined;
+  /** Not the SDK's: the step this project last saw the handshake waiting on, and since when. */
+  waitingOn?: string | undefined;
+  waitingSince?: number | undefined;
+}
+
 interface SessionInternals {
   connected: boolean;
   socket: unknown;
-  relay: { step: string } | undefined;
+  relay: RelayHandshake | undefined;
   ackedRounds: number | undefined;
   cloudLookup: unknown;
   cfg: { p2pDid: string };
   startPunchProbes(): Promise<void>;
+  beginCheckCam(address: Address, socket: unknown): void;
   sendLookups(): void;
   countAckedRound(): void;
   sendRelay(): void;
@@ -48,16 +67,20 @@ interface SessionInternals {
   onMessage(message: Buffer, remote: { address: string; port: number }, socket: unknown): void;
 }
 
-const RELAY_PACKET = "f183";
-const RELAY_READY_HEADER = Buffer.from([0xf1, 0x84]);
-/** A relay packet's payload: a four-byte mark, then the 20-byte device id that relay-ready repeats. */
-const RELAY_PACKET_DID = { start: 4, end: 24 };
-
-const WRAPPED_METHODS = ["startPunchProbes", "sendLookups", "countAckedRound", "sendRelay", "send", "onMessage"] as const;
+const WRAPPED_METHODS = ["startPunchProbes", "beginCheckCam", "sendLookups", "countAckedRound", "sendRelay", "send", "onMessage"] as const;
 
 let policy = SDK_POLICY;
 let packetListener: ((event: PacketEvent) => void) | null = null;
 let installed = false;
+
+function restartRelayHandshake(relay: RelayHandshake): void {
+  relay.step = "list";
+  relay.relays = [];
+  relay.via = undefined;
+  relay.mark = undefined;
+  relay.waitingOn = undefined;
+  relay.waitingSince = undefined;
+}
 
 function install(): void {
   if (installed) return;
@@ -65,10 +88,13 @@ function install(): void {
   for (const method of WRAPPED_METHODS) {
     if (typeof session[method] !== "function") throw new Error(`The pinned SDK has no P2PSession.${method}, so the connect policy can't apply. Check the SDK version in package.json.`);
   }
-  const { startPunchProbes, sendLookups, countAckedRound, send, onMessage } = session;
+  const { startPunchProbes, beginCheckCam, sendLookups, countAckedRound, sendRelay, send, onMessage } = session;
 
   session.startPunchProbes = function (this: SessionInternals): Promise<void> {
     return policy.probeSockets ? startPunchProbes.call(this) : Promise.resolve();
+  };
+  session.beginCheckCam = function (this: SessionInternals, address, socket): void {
+    if (policy.holePunch) beginCheckCam.call(this, address, socket);
   };
   session.countAckedRound = function (this: SessionInternals): void {
     if (policy.relayAfterRounds === null) {
@@ -77,7 +103,7 @@ function install(): void {
     }
     if (this.ackedRounds === undefined || this.relay !== undefined || this.cloudLookup === undefined) return;
     this.ackedRounds += 1;
-    if (this.ackedRounds > policy.relayAfterRounds) this.relay = { step: "list", relays: [] } as SessionInternals["relay"];
+    if (this.ackedRounds > policy.relayAfterRounds) this.relay = { step: "list", relays: [] };
   };
   session.sendLookups = function (this: SessionInternals): void {
     if (policy.stopLookupsOnRelay && this.relay !== undefined && !this.connected && this.socket !== undefined) {
@@ -86,17 +112,24 @@ function install(): void {
     }
     sendLookups.call(this);
   };
+  session.sendRelay = function (this: SessionInternals): void {
+    const relay = this.relay;
+    if (policy.relayStallMs !== null && relay !== undefined && relay.step !== "list" && !this.connected) {
+      if (relay.waitingOn !== relay.step) {
+        relay.waitingOn = relay.step;
+        relay.waitingSince = Date.now();
+      } else if (Date.now() - (relay.waitingSince ?? 0) >= policy.relayStallMs) {
+        restartRelayHandshake(relay);
+      }
+    }
+    sendRelay.call(this);
+  };
   session.send = function (this: SessionInternals, address, type, payload, socket, done): void {
     packetListener?.({ direction: "out", host: address.host, port: address.port, type: type.toString("hex"), payload: payload ?? Buffer.alloc(0), did: this.cfg.p2pDid });
     send.call(this, address, type, payload, socket, done);
   };
   session.onMessage = function (this: SessionInternals, message, remote, socket): void {
-    const type = message.subarray(0, 2).toString("hex");
-    const payload = message.subarray(4);
-    packetListener?.({ direction: "in", host: remote.address, port: remote.port, type, payload, did: this.cfg.p2pDid });
-    if (policy.answerRelayPacket && type === RELAY_PACKET) {
-      this.send({ host: remote.address, port: remote.port }, RELAY_READY_HEADER, payload.subarray(RELAY_PACKET_DID.start, RELAY_PACKET_DID.end), socket, undefined);
-    }
+    packetListener?.({ direction: "in", host: remote.address, port: remote.port, type: message.subarray(0, 2).toString("hex"), payload: message.subarray(4), did: this.cfg.p2pDid });
     onMessage.call(this, message, remote, socket);
   };
   installed = true;

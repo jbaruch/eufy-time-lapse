@@ -339,7 +339,6 @@ capture:
   retry_delay_seconds: 30
   slot_deadline_seconds: 180
   max_session_seconds_per_day: 6000
-  relay_after_seconds: null
 
 battery:
   warn_below_percent: 35

@@ -17,8 +17,10 @@ import { createRedactingLogger, Redactor } from "../src/logging.ts";
 
 const VARIANTS: Record<string, ConnectPolicy> = {
   sdk: SDK_POLICY,
-  quiet: { relayAfterRounds: 6, probeSockets: false, stopLookupsOnRelay: true, answerRelayPacket: false },
-  answer: { relayAfterRounds: 6, probeSockets: false, stopLookupsOnRelay: true, answerRelayPacket: true },
+  quiet: { relayAfterRounds: 6, probeSockets: false, holePunch: true, stopLookupsOnRelay: true, relayStallMs: null },
+  reroll: { relayAfterRounds: 6, probeSockets: false, holePunch: true, stopLookupsOnRelay: true, relayStallMs: 2000 },
+  nopunch: { relayAfterRounds: 6, probeSockets: false, holePunch: false, stopLookupsOnRelay: true, relayStallMs: null },
+  relist: { relayAfterRounds: 6, probeSockets: false, holePunch: false, stopLookupsOnRelay: true, relayStallMs: 2000 },
 };
 
 // Only these keep their payload in the trace. Everything else, lookups above all, carries the account's lookup key.
@@ -45,6 +47,8 @@ interface Milestones {
   relay: string | null;
   lookupsSent: number;
   dataIn: number;
+  relayRequests: Set<string>;
+  listRequests: number;
 }
 
 const { values } = parseArgs({
@@ -73,7 +77,7 @@ let events: ReturnType<typeof createWriteStream> | null = null;
 let marks: Milestones = blankMilestones();
 
 function blankMilestones(): Milestones {
-  return { firstAck: null, address: null, relayList: null, relayPort: null, ready: null, closed: null, firstKeyframe: null, relay: null, lookupsSent: 0, dataIn: 0 };
+  return { firstAck: null, address: null, relayList: null, relayPort: null, ready: null, closed: null, firstKeyframe: null, relay: null, lookupsSent: 0, dataIn: 0, relayRequests: new Set(), listRequests: 0 };
 }
 
 function record(line: Record<string, unknown>): void {
@@ -94,6 +98,8 @@ setPacketListener((packet: PacketEvent) => {
   if (inbound && packet.type === "f1f0") marks.closed ??= t;
   if (!inbound && (packet.type === "f126" || packet.type === "f120")) marks.lookupsSent += 1;
   if (inbound && packet.type === "f1d0") marks.dataIn += 1;
+  if (!inbound && packet.type === "f180") marks.relayRequests.add(packet.payload.toString("hex"));
+  if (!inbound && packet.type === "f16a") marks.listRequests += 1;
   if (NOISY.has(packet.type)) return;
   const keep = KEEP_PAYLOAD.has(packet.type);
   const hex = keep ? packet.payload.toString("hex").replaceAll(didMask(packet.did), "<did>") : undefined;
@@ -150,9 +156,9 @@ await withCameraLock(join(dataDir, "camera.lock"), async () => {
       });
       events.end();
       const outcome = result.status === "captured" ? (result.stream_stop === "target_reached" ? "clean" : "hangup_4k") : result.status === "captured_degraded" ? "hangup_low" : marks.ready === null ? "no_rdy" : "no_video";
-      const summary = { try: tryId, variant, outcome, at: new Date(startedAt).toISOString(), session_ms: result.timing.session_ms, connect_ms: result.timing.connect_ms, width: result.frame?.width ?? null, stop: result.stream_stop, failure: result.failure?.message ?? null, cleanup: result.cleanup.status, video_bytes: result.traffic.video_bytes, ...marks };
+      const summary = { try: tryId, variant, outcome, at: new Date(startedAt).toISOString(), session_ms: result.timing.session_ms, connect_ms: result.timing.connect_ms, width: result.frame?.width ?? null, stop: result.stream_stop, failure: result.failure?.message ?? null, cleanup: result.cleanup.status, video_bytes: result.traffic.video_bytes, ...marks, relayRequests: marks.relayRequests.size };
       appendFileSync(resultsPath, `${JSON.stringify(summary)}\n`);
-      process.stdout.write(`${tryId.padEnd(14)} ${outcome.padEnd(10)} ${(result.timing.session_ms / 1000).toFixed(1).padStart(5)}s addr=${marks.address ?? "-"} list=${marks.relayList ?? "-"} port=${marks.relayPort ?? "-"} rdy=${marks.ready ?? "-"} kf=${marks.firstKeyframe ?? "-"} close=${marks.closed ?? "-"} relay=${marks.relay ?? "-"} lookups=${marks.lookupsSent} data=${marks.dataIn}\n`);
+      process.stdout.write(`${tryId.padEnd(14)} ${outcome.padEnd(10)} ${(result.timing.session_ms / 1000).toFixed(1).padStart(5)}s addr=${marks.address ?? "-"} list=${marks.relayList ?? "-"} port=${marks.relayPort ?? "-"} rdy=${marks.ready ?? "-"} kf=${marks.firstKeyframe ?? "-"} close=${marks.closed ?? "-"} relay=${marks.relay ?? "-"} rolls=${marks.relayRequests.size} lists=${marks.listRequests / 3} data=${marks.dataIn}\n`);
       if (gapMs > 0) await delay(gapMs);
     }
   }
