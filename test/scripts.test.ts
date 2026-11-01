@@ -86,6 +86,49 @@ describe("scripts/set-credentials.sh", () => {
     assert.notEqual(result.code, 0);
   });
 
+  it("leaves nothing behind but the two files", async () => {
+    const secrets = join(dir.path, "tidy");
+    assert.equal((await bash([script], { env: { TIMELAPSE_SECRETS_DIR: secrets }, input: "me@example.com\nhunter2\n" })).code, 0);
+    assert.deepEqual((await readdir(secrets)).sort(), ["eufy_email", "eufy_password"]);
+  });
+
+  for (const name of ["eufy_email", "eufy_password"]) {
+    it(`refuses a symlink at ${name}, and writes nothing through it`, async () => {
+      const secrets = join(dir.path, `linked-${name}`);
+      const outside = join(dir.path, `outside-${name}`);
+      await mkdir(secrets);
+      await writeFile(outside, "keep me");
+      await symlink(outside, join(secrets, name));
+      const result = await bash([script], { env: { TIMELAPSE_SECRETS_DIR: secrets }, input: "me@example.com\nhunter2\n" });
+      assert.equal(result.code, 1);
+      assert.match(result.stderr, /isn't a regular file/);
+      assert.equal(await readFile(outside, "utf8"), "keep me");
+      assert.deepEqual(await readdir(secrets), [name]);
+    });
+  }
+
+  it("refuses a directory in place of a credential file", async () => {
+    const secrets = join(dir.path, "directory-there");
+    await mkdir(join(secrets, "eufy_password"), { recursive: true });
+    const result = await bash([script], { env: { TIMELAPSE_SECRETS_DIR: secrets }, input: "me@example.com\nhunter2\n" });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /isn't a regular file/);
+    assert.deepEqual((await readdir(secrets)).sort(), ["eufy_password"]);
+  });
+
+  for (const [name, suffix] of [["a symlinked secrets directory", ""], ["one given with a trailing slash", "/"]] as const) {
+    it(`refuses ${name}, and writes nothing through it`, async () => {
+      const outside = join(dir.path, `outside-dir-${suffix.length}`);
+      const link = join(dir.path, `linked-dir-${suffix.length}`);
+      await mkdir(outside);
+      await symlink(outside, link);
+      const result = await bash([script], { env: { TIMELAPSE_SECRETS_DIR: `${link}${suffix}` }, input: "me@example.com\nhunter2\n" });
+      assert.equal(result.code, 1);
+      assert.match(result.stderr, /is a symlink/);
+      assert.deepEqual(await readdir(outside), []);
+    });
+  }
+
   it("does nothing when only sourced", async () => {
     const result = await bash(["-c", `source '${script}'; echo sourced`], { input: "" });
     assert.equal(result.stdout, "sourced\n");
