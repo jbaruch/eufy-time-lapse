@@ -114,7 +114,9 @@ Answering the camera's relay packets, and switching to another relay on a stall 
 
 **The quick check, on the bench:** 10 captures back to back took 3 minutes 45 seconds. All 10 came out at 4K, 9 on the first try. Connects took 3.4 seconds at the median and 7.4 at most, and sessions took 12.3 and 27.2. Back to back is kinder than real slots, whose connects took 7 to 13 seconds, so compare a mount-day check with this run and not with the overnight numbers.
 
-**The same check at the site, on November 1, once mounted:** 2 minutes 28 seconds. All 10 came out at 4K on the first try. Connects took 3.7 seconds at the median and 11.4 at most, and sessions took 6.9 and 16.1. The first slot at production pace took 25.4 seconds, and came out at 4K on the first try.
+**The same check at the site, on November 1, once mounted:** 2 minutes 28 seconds. All 10 came out at 4K on the first try. Connects took 3.7 seconds at the median and 11.4 at most, and sessions took 6.9 and 16.1. The first slot at production pace took 25.4 seconds, and came out at 4K on the first try. It spent 18.7 of them connecting, as the next slot spent 23.3 of its 30.7, so at the site the wait for a connection is what a session's length depends on.
+
+**A slot during live view, also on November 1:** the owner watched in the app while a slot fired. The picture flickered once and carried on, and the frame still came out at 4K on the first try, in about 13 seconds or less. The camera also recorded an event, which it didn't do for a slot nobody was watching. That is one observation, so what caused the event isn't known.
 
 **Broken on purpose, on the real camera:**
 
