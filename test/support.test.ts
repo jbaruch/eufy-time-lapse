@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
 import { ConfigError, loadConfig } from "../src/config.ts";
-import { CameraLockHeldError, CameraLockLostError, evictIfStale, withCameraLock } from "../src/lock.ts";
+import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "../src/lock.ts";
 import { runLogin } from "../src/login.ts";
 import { createRedactingLogger, Redactor } from "../src/logging.ts";
 import { State } from "../src/state.ts";
@@ -122,39 +122,65 @@ describe("withCameraLock", () => {
     await assert.rejects(withCameraLock(path, async () => "second", at), CameraLockHeldError);
   });
 
-  describe("evicting a stale lock", () => {
-    it("re-checks under its guard, so a lock replaced after it looked stale survives", async () => {
-      const path = lockPath();
-      await heldSince(path, NOW - 1_000);
-      await evictIfStale(path, at.now);
-      assert.equal(await readFile(path, "utf8"), "some-other-holder");
-    });
+  describe("when contenders overlap", () => {
+    const turn = async (): Promise<void> => {
+      await new Promise((resolve) => setImmediate(resolve));
+    };
 
-    it("removes a lock that's still stale, and its guard", async () => {
+    it("re-judges the lock once its turn comes, so one replaced in the meantime survives", async () => {
       const path = lockPath();
       await heldSince(path, NOW - 60_000);
-      await evictIfStale(path, at.now);
+      await writeFile(`${path}.guard`, "");
+      await utimes(`${path}.guard`, new Date(NOW), new Date(NOW));
+      // It sees a stale lock now, but can't act until the guard clears. By then a new holder has taken over.
+      const contender = withCameraLock(path, async () => "should not run", at);
+      await turn();
+      await writeFile(path, "the-new-holder");
+      await utimes(path, new Date(NOW), new Date(NOW));
+      await rm(`${path}.guard`);
+      await assert.rejects(contender, CameraLockHeldError);
+      assert.equal(await readFile(path, "utf8"), "the-new-holder");
+    });
+
+    it("doesn't release during another contender's turn, and finishes after it", async () => {
+      const path = lockPath();
+      let release: (() => void) | undefined;
+      const holding = withCameraLock(
+        path,
+        () =>
+          new Promise<string>((resolve) => {
+            release = () => resolve("done");
+          }),
+        at,
+      );
+      // The work starts only after taking the lock has finished, guard released.
+      while (release === undefined) await turn();
+      await writeFile(`${path}.guard`, "");
+      await utimes(`${path}.guard`, new Date(NOW), new Date(NOW));
+      release();
+      await turn();
+      await turn();
+      assert.ok((await readFile(path, "utf8")).length > 0, "still there while the guard is held");
+      await rm(`${path}.guard`);
+      assert.equal(await holding, "done");
       await assert.rejects(stat(path), { code: "ENOENT" });
-      await assert.rejects(stat(`${path}.evict`), { code: "ENOENT" });
     });
 
-    it("leaves it to another contender already evicting", async () => {
+    it("gives up on a guard that stays held, and calls the camera busy", async () => {
       const path = lockPath();
-      await heldSince(path, NOW - 60_000);
-      await writeFile(`${path}.evict`, "");
-      await utimes(`${path}.evict`, new Date(NOW - 1_000), new Date(NOW - 1_000));
-      await assert.rejects(evictIfStale(path, at.now), CameraLockHeldError);
-      assert.equal(await readFile(path, "utf8"), "some-other-holder");
+      await writeFile(`${path}.guard`, "");
+      await utimes(`${path}.guard`, new Date(NOW), new Date(NOW));
+      await assert.rejects(withCameraLock(path, async () => "should not run", at), CameraLockHeldError);
+      await rm(`${path}.guard`);
     });
 
-    it("clears the guard of a contender that crashed while evicting", async () => {
+    it("clears the guard of a contender that crashed holding it", async () => {
       const path = lockPath();
       await heldSince(path, NOW - 60_000);
-      await writeFile(`${path}.evict`, "");
-      await utimes(`${path}.evict`, new Date(NOW - 60_000), new Date(NOW - 60_000));
-      await assert.rejects(evictIfStale(path, at.now), CameraLockHeldError);
-      await assert.rejects(stat(`${path}.evict`), { code: "ENOENT" });
+      await writeFile(`${path}.guard`, "");
+      await utimes(`${path}.guard`, new Date(NOW - 60_000), new Date(NOW - 60_000));
       assert.equal(await withCameraLock(path, async () => "recovered", at), "recovered");
+      await assert.rejects(stat(`${path}.guard`), { code: "ENOENT" });
     });
   });
 

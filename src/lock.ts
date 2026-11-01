@@ -4,6 +4,8 @@ import { open, readFile, rm, stat, utimes } from "node:fs/promises";
 const HEARTBEAT_MS = 5_000;
 /** A holder this long without a heartbeat is gone. */
 const STALE_AFTER_MS = 20_000;
+/** Event-loop turns to wait for another contender's guard. It's held for milliseconds, and counting turns needs no clock. */
+const GUARD_TRIES = 2_000;
 
 export class CameraLockHeldError extends Error {
   constructor(lockPath: string) {
@@ -30,61 +32,70 @@ function isErrno(error: unknown, code: string): boolean {
 }
 
 /**
- * Removes a stale lock, re-checking under a guard. Without the guard, two contenders could judge the same lock stale,
- * and the slower one would remove the lock the faster one had just taken, leaving both with the camera.
+ * Runs one lock change with every other contender held off. Taking, evicting and releasing all go through this, so no
+ * step can land between another's check and its act: without it, a slow contender could judge a lock stale, and then
+ * delete the one a faster contender had just taken, leaving both with the camera.
  */
-export async function evictIfStale(lockPath: string, now: () => number): Promise<void> {
-  const guardPath = `${lockPath}.evict`;
-  try {
-    await (await open(guardPath, "wx")).close();
-  } catch (error) {
-    if (!isErrno(error, "EEXIST")) throw error;
-    // Another contender is evicting. A guard this old means it crashed doing so, and the next try can take over.
-    if (now() - (await stat(guardPath)).mtimeMs >= STALE_AFTER_MS) await rm(guardPath, { force: true });
-    throw new CameraLockHeldError(lockPath);
+async function underGuard<T>(lockPath: string, now: () => number, change: () => Promise<T>): Promise<T> {
+  const guardPath = `${lockPath}.guard`;
+  for (let tries = 0; ; tries += 1) {
+    try {
+      await (await open(guardPath, "wx")).close();
+      break;
+    } catch (error) {
+      if (!isErrno(error, "EEXIST")) throw error;
+    }
+    if (tries >= GUARD_TRIES) throw new CameraLockHeldError(lockPath);
+    await clearAbandonedGuard(guardPath, now);
+    await new Promise((resolve) => setImmediate(resolve));
   }
   try {
-    if (now() - (await stat(lockPath)).mtimeMs >= STALE_AFTER_MS) await rm(lockPath, { force: true });
-  } catch (error) {
-    if (!isErrno(error, "ENOENT")) throw error;
+    return await change();
   } finally {
     await rm(guardPath, { force: true });
   }
 }
 
-async function acquire(lockPath: string, token: string, now: () => number): Promise<void> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const handle = await open(lockPath, "wx");
-      await handle.writeFile(token);
-      await handle.close();
-      return;
-    } catch (error) {
-      if (!isErrno(error, "EEXIST")) throw error;
-    }
-    let ageMs: number;
-    try {
-      ageMs = now() - (await stat(lockPath)).mtimeMs;
-    } catch (error) {
-      if (isErrno(error, "ENOENT")) continue; // The holder released it between the two calls.
-      throw error;
-    }
-    if (ageMs < STALE_AFTER_MS) throw new CameraLockHeldError(lockPath);
-    await evictIfStale(lockPath, now);
+/** A guard is held for milliseconds, so one this old belongs to a process that crashed holding it. */
+async function clearAbandonedGuard(guardPath: string, now: () => number): Promise<void> {
+  try {
+    if (now() - (await stat(guardPath)).mtimeMs >= STALE_AFTER_MS) await rm(guardPath, { force: true });
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) throw error;
   }
-  throw new Error(`Could not take the camera lock at ${lockPath}: another process keeps recreating it.`);
+}
+
+async function create(lockPath: string, token: string): Promise<boolean> {
+  try {
+    const handle = await open(lockPath, "wx");
+    await handle.writeFile(token);
+    await handle.close();
+    return true;
+  } catch (error) {
+    if (isErrno(error, "EEXIST")) return false;
+    throw error;
+  }
+}
+
+async function acquire(lockPath: string, token: string, now: () => number): Promise<void> {
+  await underGuard(lockPath, now, async () => {
+    if (await create(lockPath, token)) return;
+    if (now() - (await stat(lockPath)).mtimeMs < STALE_AFTER_MS) throw new CameraLockHeldError(lockPath);
+    await rm(lockPath, { force: true });
+    if (!(await create(lockPath, token))) throw new CameraLockHeldError(lockPath);
+  });
 }
 
 /** Removes the lock only if it's still this holder's. A stale holder must not delete its successor's. */
-async function release(lockPath: string, token: string): Promise<void> {
-  let holder: string;
+async function release(lockPath: string, token: string, now: () => number): Promise<void> {
   try {
-    holder = await readFile(lockPath, "utf8");
+    await underGuard(lockPath, now, async () => {
+      if ((await readFile(lockPath, "utf8")) === token) await rm(lockPath, { force: true });
+    });
   } catch (error) {
-    if (isErrno(error, "ENOENT")) return;
-    throw error;
+    // Already gone is what release wants. Stuck behind a guard, the lock goes stale by itself, so the work's result stands.
+    if (!isErrno(error, "ENOENT") && !(error instanceof CameraLockHeldError)) throw error;
   }
-  if (holder === token) await rm(lockPath, { force: true });
 }
 
 /**
@@ -126,6 +137,6 @@ export async function withCameraLock<T>(lockPath: string, work: (lost: AbortSign
     throw error;
   } finally {
     clearInterval(heartbeat);
-    await release(lockPath, token);
+    await release(lockPath, token, now);
   }
 }
