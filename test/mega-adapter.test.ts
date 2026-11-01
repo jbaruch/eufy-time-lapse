@@ -713,6 +713,42 @@ describe("MegaAdapter, when a try's deadline and a failure land together", () =>
   }
 });
 
+describe("MegaAdapter, when the live stream reports an error", () => {
+  async function open(): Promise<{ stream: FakeStream; video: NodeJS.ReadableStream; fatal: Error[]; adapter: MegaAdapter }> {
+    const client = new FakeClient();
+    const fatal: Error[] = [];
+    const adapter = new MegaAdapter(client, () => {}, () => {}, (error) => fatal.push(error));
+    const stream = new FakeStream();
+    client.device = fakeDevice({}, stream);
+    const session = await adapter.openLiveSession(SERIAL, openSignal());
+    return { stream, video: session.video, fatal, adapter };
+  }
+
+  function failureOf(video: NodeJS.ReadableStream): Promise<Error> {
+    return new Promise((resolve) => video.once("error", resolve));
+  }
+
+  it("ends the attempt, and doesn't call a stream fault a bug", async () => {
+    const { stream, video, fatal, adapter } = await open();
+    const failure = failureOf(video);
+    stream.emit("error", new Error(`relay closed for ${SERIAL}`));
+    assert.equal((await failure).message, "relay closed for [camera]");
+    assert.deepEqual(fatal, []);
+    await adapter.shutdown();
+  });
+
+  for (const bug of [new TypeError("x is not a function"), new RangeError("offset out of range")]) {
+    it(`takes a ${bug.name} to the fatal path, and still ends the attempt`, async () => {
+      const { stream, video, fatal, adapter } = await open();
+      const failure = failureOf(video);
+      stream.emit("error", bug);
+      await failure;
+      assert.deepEqual(fatal, [bug]);
+      await adapter.shutdown();
+    });
+  }
+});
+
 describe("MegaAdapter, when frames arrive after the stream has stopped", () => {
   it("ignores them, instead of raising an error nobody is listening for", async () => {
     const { client, adapter } = setup();

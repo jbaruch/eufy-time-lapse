@@ -429,7 +429,11 @@ export class MegaAdapter implements CameraAdapter {
       video.end();
       audio.end();
     });
-    stream.on("error", (error) => video.destroy(new Error(this.scrub(error.message), { cause: error })));
+    stream.on("error", (error) => {
+      // A bug stays a bug, whatever reported it. This attempt still ends now, instead of at its deadline.
+      if (isProgrammingError(error)) this.onFatal(error);
+      video.destroy(new Error(this.scrub(error.message), { cause: error }));
+    });
     return session;
   }
 
