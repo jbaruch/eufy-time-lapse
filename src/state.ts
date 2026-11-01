@@ -233,6 +233,15 @@ export class State {
       .run(state, fields.reason ?? null, fields.captureId ?? null, fields.everyMinutes ?? null, this.stamp(), slotId);
   }
 
+  /** A crash between saving a frame's row and finishing its slot leaves a real frame on a slot that looks unfinished. */
+  repairSlotLinks(): string[] {
+    const rows = this.all<{ capture_id: string; slot_id: string; quality_status: string }>(`
+      SELECT c.capture_id, c.slot_id, c.quality_status FROM captures c JOIN slots s ON s.slot_id = c.slot_id
+      WHERE s.capture_id IS NULL OR s.capture_id != c.capture_id`);
+    for (const row of rows) this.setSlot(row.slot_id, row.quality_status === "ok" ? "captured" : "captured_degraded", { captureId: row.capture_id });
+    return rows.map((row) => row.capture_id);
+  }
+
   /** A slot left running means the process died mid-capture. Whether the camera connection closed is unknowable. */
   markInterruptedSlots(): SlotRow[] {
     const rows = this.all<SlotRow>("SELECT * FROM slots WHERE state = 'running'");

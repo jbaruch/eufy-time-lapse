@@ -92,6 +92,12 @@ describe("loadServiceConfig", () => {
     });
   }
 
+  for (const [name, root] of [["null", "null"], ["a number", "5"], ["a list", "[]"]] as const) {
+    it(`explains a file whose JSON is ${name}`, async () => {
+      await assert.rejects(load(root), (error: ConfigError) => error instanceof ConfigError && /must hold a JSON object/.test(error.message));
+    });
+  }
+
   it("explains a file that isn't JSON", async () => {
     await assert.rejects(load("{ nope"), /not valid JSON/);
   });

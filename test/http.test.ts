@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, it } from "node:test";
-import { createStatusServer } from "../src/http.ts";
+import { createStatusServer, listenForStatus } from "../src/http.ts";
 
 describe("the status server", () => {
   let server: Server | undefined;
@@ -51,6 +51,18 @@ describe("the status server", () => {
     circular.self = circular;
     const base = await serve(async () => circular);
     assert.equal((await fetch(`${base}/status`)).status, 500);
+  });
+
+  it("reports a port someone else holds, and doesn't take the service down", async () => {
+    const holder = createStatusServer(async () => ({}));
+    await new Promise<void>((resolve) => holder.listen(0, "127.0.0.1", resolve));
+    const { port } = holder.address() as AddressInfo;
+    server = createStatusServer(async () => ({}));
+    const logged: string[] = [];
+    listenForStatus(server, port, "127.0.0.1", (message) => logged.push(message));
+    while (logged.length === 0) await new Promise((resolve) => setImmediate(resolve));
+    assert.match(logged[0] ?? "", /EADDRINUSE.*capture carries on/);
+    holder.close();
   });
 
   it("knows nothing else", async () => {

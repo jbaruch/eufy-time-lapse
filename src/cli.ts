@@ -10,7 +10,7 @@ import { createMegaClient, MegaAdapter } from "./adapters/mega.ts";
 import { createNotifier } from "./alerts.ts";
 import { ConfigError, loadConfig, loadSettings } from "./config.ts";
 import type { AppConfig, AppSettings } from "./config.ts";
-import { createStatusServer } from "./http.ts";
+import { createStatusServer, listenForStatus } from "./http.ts";
 import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "./lock.ts";
 import { runLogin } from "./login.ts";
 import { createRedactingLogger, Redactor } from "./logging.ts";
@@ -59,7 +59,7 @@ function log(message: string): void {
   process.stderr.write(`${new Date().toISOString()} ${message}\n`);
 }
 
-function buildAdapter(config: AppConfig, persistentDir: string, write: (line: string) => void, debugLogs: boolean): CameraAdapter {
+function buildAdapter(config: AppConfig, persistentDir: string, write: (line: string) => void, debugLogs: boolean, onFatal?: (error: Error) => void): CameraAdapter {
   const redactor = new Redactor([config.password, config.email, ...(config.cameraSerial ? [config.cameraSerial] : [])]);
   const logger = createRedactingLogger(redactor, write);
   let adapter: MegaAdapter | undefined;
@@ -72,7 +72,7 @@ function buildAdapter(config: AppConfig, persistentDir: string, write: (line: st
     },
   };
   const client = createMegaClient({ email: config.email, password: config.password, country: config.country, sessionDir: persistentDir, logger: sdkLogger });
-  adapter = new MegaAdapter(client, log, (value) => redactor.addLiteral(value));
+  adapter = new MegaAdapter(client, log, (value) => redactor.addLiteral(value), onFatal);
   return adapter;
 }
 
@@ -211,7 +211,7 @@ function buildService(config: AppConfig, service: ServiceConfig, paths: Paths, s
   return new CaptureService({
     config: service,
     state,
-    createAdapter: () => buildAdapter(config, paths.sessionDir, write, service.logging.sdk_debug),
+    createAdapter: (onFatal) => buildAdapter(config, paths.sessionDir, write, service.logging.sdk_debug, onFatal),
     dataDir: paths.dataDir,
     ...(config.cameraSerial ? { cameraSerial: config.cameraSerial } : {}),
     minWidth: config.minWidth,
@@ -232,7 +232,7 @@ async function commandRun(paths: Paths): Promise<number> {
   const signal = terminationSignal();
 
   const server = createStatusServer(async () => buildStatus(state, serviceConfig, new Date(), await diskFreeMb(paths.dataDir), REVISION));
-  server.listen(serviceConfig.http.port, serviceConfig.http.bind);
+  listenForStatus(server, serviceConfig.http.port, serviceConfig.http.bind, log);
   log(`service running at revision ${REVISION}; status on http://${serviceConfig.http.bind}:${serviceConfig.http.port}/status`);
 
   await service.run(signal);

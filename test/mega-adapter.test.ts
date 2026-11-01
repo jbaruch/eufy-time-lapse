@@ -437,7 +437,7 @@ describe("MegaAdapter teardown", () => {
     const { client, adapter } = setup();
     const original = client.disconnect.bind(client);
     client.disconnect = async () => {
-      throw new Error("socket stuck");
+      throw Object.assign(new Error("socket stuck"), { code: "ERR_SOCKET_DGRAM_NOT_RUNNING" });
     };
     const result = await adapter.teardown(SERIAL, 20);
     assert.equal(result.status, "error");
@@ -585,10 +585,10 @@ describe("MegaAdapter, telling an outage from a refusal from a bug", () => {
 });
 
 describe("MegaAdapter, when disconnecting fails", () => {
-  function refusing(): { client: FakeClient; adapter: MegaAdapter; warnings: string[] } {
+  function refusing(error: Error = Object.assign(new Error("socket stuck"), { code: "ERR_SOCKET_DGRAM_NOT_RUNNING" })): { client: FakeClient; adapter: MegaAdapter; warnings: string[] } {
     const parts = setup();
     parts.client.disconnect = async () => {
-      throw new Error("socket stuck");
+      throw error;
     };
     return parts;
   }
@@ -605,28 +605,62 @@ describe("MegaAdapter, when disconnecting fails", () => {
     await adapter.shutdown();
   });
 
-  it("survives a failed shutdown, and says so", async () => {
+  it("survives a socket failure at shutdown, and says so", async () => {
     const { adapter, warnings } = refusing();
     await adapter.shutdown();
     assert.match(warnings.join(), /didn't shut down cleanly.*socket stuck/);
   });
 
-  it("keeps a rejected sweep from becoming an unhandled rejection", async (t) => {
+  it("lets a bug at shutdown or teardown propagate", async () => {
+    const { adapter } = refusing(new RangeError("a bug"));
+    await assert.rejects(adapter.teardown(SERIAL, 20), RangeError);
+    await assert.rejects(adapter.shutdown(), RangeError);
+  });
+
+  it("hands a sweep's unexpected failure to the fatal path, rather than logging and carrying on", async (t) => {
     t.mock.timers.enable({ apis: ["setInterval"] });
-    const unhandled: unknown[] = [];
-    const listener = (reason: unknown): void => void unhandled.push(reason);
-    process.on("unhandledRejection", listener);
-    t.after(() => process.off("unhandledRejection", listener));
-    const { client, adapter, warnings } = setup();
+    const client = new FakeClient();
+    const fatal: Error[] = [];
+    const adapter = new MegaAdapter(client, () => {}, () => {}, (error) => fatal.push(error));
     client.getP2pSessions = () => {
       throw new RangeError("the sweep itself broke");
     };
     t.mock.timers.tick(5_000);
-    await new Promise((resolve) => setImmediate(resolve));
-    await new Promise((resolve) => setImmediate(resolve));
-    assert.deepEqual(unhandled, []);
-    assert.match(warnings.join(), /the connection sweep failed.*the sweep itself broke/);
+    while (fatal.length === 0) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(fatal[0] instanceof RangeError);
     client.getP2pSessions = () => client.sessions;
     await adapter.shutdown();
+  });
+});
+
+describe("MegaAdapter, keeping the camera's identifiers out of messages", () => {
+  it("removes the serial from a connect failure", async () => {
+    const { client, adapter } = setup();
+    client.connect = async () => {
+      throw new Error(`P2P connect timeout for ${SERIAL} (relay: request)`);
+    };
+    await assert.rejects(adapter.openLiveSession(SERIAL, openSignal()), (error: CaptureFailure) => {
+      assert.equal(error.reason, "camera_unreachable");
+      assert.equal(error.message.includes(SERIAL), false, error.message);
+      assert.match(error.message, /P2P connect timeout for \[camera\]/);
+      return true;
+    });
+  });
+
+  it("removes the station serial as well, once it's known", async () => {
+    const { client, adapter } = setup();
+    client.device = fakeDevice({ stationSn: "T86P2STATION99" });
+    client.connect = async () => {
+      throw new StationUnreachableError("T86P2STATION99", 45000);
+    };
+    await assert.rejects(adapter.openLiveSession(SERIAL, openSignal()), (error: CaptureFailure) => !error.message.includes("T86P2STATION99"));
+  });
+
+  it("removes it from an outage message too", async () => {
+    const { client, adapter } = setup();
+    client.getDevice = async () => {
+      throw Object.assign(new Error(`connect ENETUNREACH for ${SERIAL}`), { code: "ENETUNREACH" });
+    };
+    await assert.rejects(adapter.openLiveSession(SERIAL, openSignal()), (error: CaptureFailure) => error.reason === "camera_unreachable" && !error.message.includes(SERIAL));
   });
 });

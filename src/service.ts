@@ -24,7 +24,8 @@ const ARCHIVE_DISABLED = "not_configured";
 export interface ServiceOptions {
   config: ServiceConfig;
   state: State;
-  createAdapter: () => CameraAdapter;
+  /** `onFatal` is how an adapter reports a failure on its own timer, which would otherwise have no way into the service. */
+  createAdapter: (onFatal: (error: Error) => void) => CameraAdapter;
   dataDir: string;
   cameraSerial?: string;
   minWidth: number;
@@ -101,12 +102,15 @@ export function parseCaptureMetadata(text: string): AdoptableCapture | null {
   }
   if (typeof value !== "object" || value === null) return null;
   const record = value as Record<string, unknown>;
-  const strings = ["capture_id", "local_date", "frame_received_at", "sha256"].every((key) => typeof record[key] === "string");
-  const numbers = ["width", "height", "jpeg_bytes"].every((key) => typeof record[key] === "number");
+  const field = (key: string): string => (typeof record[key] === "string" ? record[key] : "");
+  const counts = ["width", "height", "jpeg_bytes"].every((key) => Number.isInteger(record[key]) && (record[key] as number) > 0);
   const valid =
     record.schema_version === 1 &&
-    strings &&
-    numbers &&
+    field("capture_id").length > 0 &&
+    /^\d{4}-\d{2}-\d{2}$/.test(field("local_date")) &&
+    !Number.isNaN(Date.parse(field("frame_received_at"))) &&
+    /^[0-9a-f]{64}$/.test(field("sha256")) &&
+    counts &&
     (record.slot_id === null || typeof record.slot_id === "string") &&
     (record.kind === "scheduled" || record.kind === "manual") &&
     (record.quality_status === "ok" || record.quality_status === "degraded");
@@ -137,6 +141,8 @@ export class CaptureService {
   private adapter: CameraAdapter | undefined;
   private camera: CameraInfo | undefined;
   private lastPruneDate: string | undefined;
+  /** A failure from background work, which the next tick raises so it takes the same path as any other crash. */
+  private backgroundFailure: Error | undefined;
 
   constructor(options: ServiceOptions) {
     this.options = options;
@@ -169,6 +175,7 @@ export class CaptureService {
   async reconcile(): Promise<void> {
     await rm(join(this.options.dataDir, "spool-tmp"), { recursive: true, force: true });
     await this.adoptPublishedFrames();
+    for (const captureId of this.state.repairSlotLinks()) this.state.addEvent("slot_link_repaired", captureId);
     for (const slot of this.state.markInterruptedSlots()) {
       this.state.addEvent("slot_interrupted", slot.slot_id);
       this.options.log(`slot ${slot.local_date} ${slot.local_time} was interrupted by a restart; marked missed`);
@@ -187,7 +194,7 @@ export class CaptureService {
           for (const captureId of await this.subdirectories(relativeDay)) {
             if (this.state.hasCapture(captureId)) continue;
             const relativeDir = join(relativeDay, captureId);
-            const metadata = await this.readMetadata(relativeDir);
+            const metadata = await this.verifiedCapture(relativeDir, captureId, `${year}-${month}-${day}`);
             if (metadata === null) {
               unreadable.push(relativeDir);
               continue;
@@ -216,9 +223,15 @@ export class CaptureService {
     }
   }
 
-  private async readMetadata(relativeDir: string): Promise<AdoptableCapture | null> {
+  /** A capture the database has never heard of counts only if its record, its place in the spool and its frame all agree. */
+  private async verifiedCapture(relativeDir: string, captureId: string, localDate: string): Promise<AdoptableCapture | null> {
+    const directory = join(this.options.dataDir, relativeDir);
     try {
-      return parseCaptureMetadata(await readFile(join(this.options.dataDir, relativeDir, "metadata.json"), "utf8"));
+      const metadata = parseCaptureMetadata(await readFile(join(directory, "metadata.json"), "utf8"));
+      if (metadata === null || metadata.capture_id !== captureId || metadata.local_date !== localDate) return null;
+      const frame = await readFile(join(directory, "frame.jpg"));
+      const matches = frame.length === metadata.jpeg_bytes && createHash("sha256").update(frame).digest("hex") === metadata.sha256;
+      return matches ? metadata : null;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
@@ -253,6 +266,7 @@ export class CaptureService {
 
   /** Runs what's due now, and answers how long to wait before looking again. */
   async tick(signal: AbortSignal): Promise<number> {
+    if (this.backgroundFailure !== undefined) throw this.backgroundFailure;
     const now = this.now();
     const today = localParts(now, this.zone).date;
     const revision = scheduleRevision(this.config);
@@ -314,7 +328,9 @@ export class CaptureService {
     let starting: CameraAdapter | undefined;
     try {
       if (this.adapter === undefined) {
-        starting = this.options.createAdapter();
+        starting = this.options.createAdapter((error) => {
+          this.backgroundFailure = error;
+        });
         const auth = await starting.authenticate();
         if (auth.status !== "authenticated") throw new CaptureFailure("auth_required", "auth", "Eufy wants a manual login step. Run the login command in a terminal.");
         this.adapter = starting;
@@ -484,7 +500,9 @@ export class CaptureService {
     if ([chosen, ...otherTries].some((record) => record.cleanup.status === "timeout")) {
       // Its teardown is still running, and could cut off a later capture on the same adapter. Not awaited: it may hang too.
       this.adapter = undefined;
-      adapter.shutdown().catch((error: Error) => this.options.log(`an abandoned camera client failed to shut down: ${error.message}`));
+      adapter.shutdown().catch((error: Error) => {
+        this.backgroundFailure = error;
+      });
     }
 
     const cleanupFault = [chosen, ...otherTries].find((record) => record.cleanup.status !== "ok");
@@ -637,10 +655,10 @@ export class CaptureService {
     await this.alerts.set("session_budget", sessionBudgetSpent(input, this.config), "capture paused: today's camera-contact budget is spent");
     await this.alerts.set("data_budget", dataBudgetSpent(input, this.config), "capture paused: this month's data budget is spent");
     await this.alerts.set("battery_warning", percent !== null && percent < battery.warn_below_percent, `battery is at ${percent ?? "unknown"}%`);
-    if (traffic.monthly_budget_mb !== null) {
-      const used = this.state.monthBytes(localDate.slice(0, 7));
-      await this.alerts.set("data_warning", used >= traffic.monthly_budget_mb * 1024 * 1024 * traffic.warn_fraction, `data use is at ${Math.round(used / (1024 * 1024))} MB of ${traffic.monthly_budget_mb} MB this month`);
-    }
+    // With no budget there's nothing to warn about, including a warning left from when there was one.
+    const used = this.state.monthBytes(localDate.slice(0, 7));
+    const budget = traffic.monthly_budget_mb;
+    await this.alerts.set("data_warning", budget !== null && used >= budget * 1024 * 1024 * traffic.warn_fraction, `data use is at ${Math.round(used / (1024 * 1024))} MB of ${budget ?? 0} MB this month`);
   }
 
   private async syncFailureAlert(): Promise<void> {

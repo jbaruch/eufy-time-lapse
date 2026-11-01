@@ -56,6 +56,7 @@ export interface MockBehavior {
   teardown?: () => Promise<CleanupResult>;
   auth?: AuthState[];
   authFailure?: () => Error;
+  shutdownFailure?: () => Error;
   camera?: CameraInfo;
   unexpected?: number;
 }
@@ -98,5 +99,6 @@ export class MockAdapter implements CameraAdapter {
 
   async shutdown(): Promise<void> {
     this.shutdowns += 1;
+    if (this.behavior.shutdownFailure !== undefined) throw this.behavior.shutdownFailure();
   }
 }

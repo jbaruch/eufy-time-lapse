@@ -138,12 +138,9 @@ function readTelemetry(device: MegaDevice): Record<string, string | number | boo
   return telemetry;
 }
 
-function cloudUnreachable(error: Error, phase: FailurePhase): CaptureFailure {
-  return new CaptureFailure("camera_unreachable", phase, `Eufy's cloud can't be reached right now (${error.message}). Check this host's internet connection. The next slot tries again by itself.`, { cause: error });
-}
-
-function authFailure(error: Error): CaptureFailure {
-  return new CaptureFailure("auth_required", "auth", `Eufy login failed: ${error.message}. Check the Eufy credentials, then run the login command.`, { cause: error });
+/** How closing a session fails: a socket-level error, which Node reports with a code. Anything else is a bug. */
+function isDisconnectFailure(error: unknown): error is Error {
+  return error instanceof Error && typeof (error as NodeJS.ErrnoException).code === "string";
 }
 
 /** The network being down, however Node reports it. */
@@ -186,16 +183,46 @@ export class MegaAdapter implements CameraAdapter {
   private relayUsed = false;
   private loginNeeded = false;
   private unexpectedConnections = 0;
+  private readonly identifiers = new Set<string>();
+  private readonly onFatal: (error: Error) => void;
 
-  constructor(client: MegaClient, warn: (message: string) => void, registerSecret: (value: string) => void) {
+  /** `onFatal` gets a failure on a background timer, which nothing can catch. By default it ends the process, as any bug should. */
+  constructor(client: MegaClient, warn: (message: string) => void, registerSecret: (value: string) => void, onFatal?: (error: Error) => void) {
     this.client = client;
+    this.onFatal =
+      onFatal ??
+      ((error) => {
+        setImmediate(() => {
+          throw error;
+        });
+      });
     this.warn = warn;
     this.registerSecret = registerSecret;
     this.sweepTimer = setInterval(() => {
-      // A rejection here would have no handler, and Node would end the process.
-      this.sweepConnections().catch((error: Error) => this.warn(`the connection sweep failed: ${error.message}`));
+      this.sweepConnections().catch((error: Error) => this.onFatal(error));
     }, SWEEP_INTERVAL_MS);
     this.sweepTimer.unref();
+  }
+
+  private identify(value: string): void {
+    if (this.identifiers.has(value)) return;
+    this.identifiers.add(value);
+    this.registerSecret(value);
+  }
+
+  /** The SDK's messages quote the camera's serial, and these reach logs and reports that the log redactor never sees. */
+  private scrub(text: string): string {
+    let scrubbed = text;
+    for (const identifier of this.identifiers) scrubbed = scrubbed.replaceAll(identifier, "[camera]");
+    return scrubbed;
+  }
+
+  private cloudUnreachable(error: Error, phase: FailurePhase): CaptureFailure {
+    return new CaptureFailure("camera_unreachable", phase, `Eufy's cloud can't be reached right now (${this.scrub(error.message)}). Check this host's internet connection. The next slot tries again by itself.`, { cause: error });
+  }
+
+  private authFailure(error: Error): CaptureFailure {
+    return new CaptureFailure("auth_required", "auth", `Eufy login failed: ${this.scrub(error.message)}. Check the Eufy credentials, then run the login command.`, { cause: error });
   }
 
   /** The SDK reports its relay handshake only in its logs, so the logger passes that along. */
@@ -213,8 +240,8 @@ export class MegaAdapter implements CameraAdapter {
       await this.client.disconnect();
       this.warn("closed a camera connection that opened outside a capture attempt");
     } catch (error) {
-      if (!(error instanceof Error)) throw error;
-      this.warn(`couldn't close a camera connection that opened outside a capture attempt, and will try again: ${error.message}`);
+      if (!isDisconnectFailure(error)) throw error;
+      this.warn(`couldn't close a camera connection that opened outside a capture attempt, and will try again: ${this.scrub(error.message)}`);
     }
   }
 
@@ -226,8 +253,8 @@ export class MegaAdapter implements CameraAdapter {
       else result = await this.client.solveCaptcha(input.captcha.code);
     } catch (error) {
       // Only a real refusal means a person has to log in. An outage mustn't stop captures until someone does.
-      if (isNetworkError(error) || isTransientApiError(error)) throw cloudUnreachable(error, "auth");
-      if (error instanceof MegaApiError || error instanceof SessionExpiredError) throw authFailure(error);
+      if (isNetworkError(error) || isTransientApiError(error)) throw this.cloudUnreachable(error, "auth");
+      if (error instanceof MegaApiError || error instanceof SessionExpiredError) throw this.authFailure(error);
       throw error;
     }
     if (result.status === LoginStatus.Ok) return { status: "authenticated" };
@@ -250,20 +277,21 @@ export class MegaAdapter implements CameraAdapter {
     try {
       return await this.client.getDevice(key);
     } catch (error) {
-      if (error instanceof SessionExpiredError) throw authFailure(error);
-      if (isCameraError(error)) throw cloudUnreachable(error, "discovery");
+      if (error instanceof SessionExpiredError) throw this.authFailure(error);
+      if (isCameraError(error)) throw this.cloudUnreachable(error, "discovery");
       throw error;
     }
   }
 
   async discoverCamera(preferredKey?: string): Promise<CameraInfo> {
+    if (preferredKey !== undefined) this.identify(preferredKey);
     await this.restoreLogin();
     let listed: Array<{ sn: string; model: string }>;
     try {
       listed = await this.client.getDevices();
     } catch (error) {
-      if (error instanceof SessionExpiredError) throw authFailure(error);
-      if (isCameraError(error)) throw cloudUnreachable(error, "discovery");
+      if (error instanceof SessionExpiredError) throw this.authFailure(error);
+      if (isCameraError(error)) throw this.cloudUnreachable(error, "discovery");
       throw error;
     }
     const matches = listed.filter((device) => (preferredKey === undefined ? device.model.startsWith(CAMERA_MODEL_PREFIX) : device.sn === preferredKey));
@@ -281,9 +309,9 @@ export class MegaAdapter implements CameraAdapter {
     if (others.length > 0) {
       throw new CaptureFailure("camera_not_found", "discovery", `This account sees ${matches.length} ${CAMERA_MODEL_PREFIX} cameras. Set EUFY_CAMERA_SERIAL to pick one.`);
     }
-    this.registerSecret(match.sn);
+    this.identify(match.sn);
     const device = await this.deviceFor(match.sn);
-    this.registerSecret(device.stationSn);
+    this.identify(device.stationSn);
     return {
       key: match.sn,
       model: match.model,
@@ -302,7 +330,7 @@ export class MegaAdapter implements CameraAdapter {
         ? new CaptureFailure("camera_unreachable", phase, "No P2P connection to the camera before the attempt deadline.", { cause: error })
         : new CaptureFailure("capture_timeout", phase, "The camera connected, but the live stream did not start before the attempt deadline.", { cause: error });
     }
-    if (isCameraError(error)) return new CaptureFailure("camera_unreachable", phase, `${error.name}: ${error.message}`, { cause: error });
+    if (isCameraError(error)) return new CaptureFailure("camera_unreachable", phase, `${error.name}: ${this.scrub(error.message)}`, { cause: error });
     throw error;
   }
 
@@ -311,7 +339,9 @@ export class MegaAdapter implements CameraAdapter {
     this.relayUsed = false;
     await this.restoreLogin();
 
+    this.identify(cameraKey);
     const device = await this.deviceFor(cameraKey);
+    this.identify(device.stationSn);
     const camera = device.camera?.();
     if (camera?.live === undefined) {
       throw new CaptureFailure("camera_unreachable", "stream_start", "The SDK exposes no live video path for this camera.");
@@ -372,7 +402,7 @@ export class MegaAdapter implements CameraAdapter {
       video.end();
       audio.end();
     });
-    stream.on("error", (error) => video.destroy(error));
+    stream.on("error", (error) => video.destroy(new Error(this.scrub(error.message), { cause: error })));
     return session;
   }
 
@@ -380,8 +410,9 @@ export class MegaAdapter implements CameraAdapter {
     const problems: string[] = [];
     this.stream?.stop();
     this.stream = undefined;
-    await this.client.disconnect().catch((error: Error) => {
-      problems.push(`disconnect failed: ${error.message}`);
+    await this.client.disconnect().catch((error: unknown) => {
+      if (!isDisconnectFailure(error)) throw error;
+      problems.push(`disconnect failed: ${this.scrub(error.message)}`);
     });
     this.loginNeeded = true;
 
@@ -405,6 +436,9 @@ export class MegaAdapter implements CameraAdapter {
 
   async shutdown(): Promise<void> {
     clearInterval(this.sweepTimer);
-    await this.client.disconnect().catch((error: Error) => this.warn(`the camera client didn't shut down cleanly: ${error.message}`));
+    await this.client.disconnect().catch((error: unknown) => {
+      if (!isDisconnectFailure(error)) throw error;
+      this.warn(`the camera client didn't shut down cleanly: ${this.scrub(error.message)}`);
+    });
   }
 }

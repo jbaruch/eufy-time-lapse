@@ -201,6 +201,7 @@ export function loadServiceConfig(path: string): ServiceConfig {
   } catch (error) {
     throw new ConfigError(`${path} is not valid JSON: ${(error as Error).message}`);
   }
+  if (!isRecord(parsed)) throw new ConfigError(`${path} must hold a JSON object of settings. Compare it with config.example.json.`);
   const config = merge(DEFAULT_SERVICE_CONFIG, parsed, "");
   validate(config);
   const tiers = [...config.cadence.tiers].sort((a, b) => b.battery_at_least - a.battery_at_least);

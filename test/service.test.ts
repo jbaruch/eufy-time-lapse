@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { access, mkdir, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { after, before, describe, it } from "node:test";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
 import type { AuthState, CameraInfo, LiveSession } from "../src/adapters/adapter.ts";
@@ -66,7 +67,7 @@ describe("CaptureService", () => {
     restart: () => { service: CaptureService; state: State };
   }
 
-  async function harness(options: { open?: (signal: AbortSignal) => Promise<LiveSession>; teardown?: MockBehavior["teardown"]; authFailure?: MockBehavior["authFailure"]; camera?: CameraInfo; auth?: AuthState[]; config?: ServiceConfig; startMs?: number } = {}): Promise<Harness> {
+  async function harness(options: { open?: (signal: AbortSignal) => Promise<LiveSession>; teardown?: MockBehavior["teardown"]; authFailure?: MockBehavior["authFailure"]; shutdownFailure?: MockBehavior["shutdownFailure"]; camera?: CameraInfo; auth?: AuthState[]; config?: ServiceConfig; startMs?: number } = {}): Promise<Harness> {
     run += 1;
     const dataDir = join(root.path, `data-${run}`);
     await mkdir(dataDir, { recursive: true });
@@ -74,7 +75,7 @@ describe("CaptureService", () => {
     const now = (): Date => new Date(clock.ms);
     const disk = { mb: 50_000 };
     const notices: string[] = [];
-    const adapter = new MockAdapter({ open: options.open ?? fresh, camera: options.camera ?? reading(80), ...(options.teardown ? { teardown: options.teardown } : {}), ...(options.authFailure ? { authFailure: options.authFailure } : {}), ...(options.auth ? { auth: options.auth } : {}) });
+    const adapter = new MockAdapter({ open: options.open ?? fresh, camera: options.camera ?? reading(80), ...(options.teardown ? { teardown: options.teardown } : {}), ...(options.authFailure ? { authFailure: options.authFailure } : {}), ...(options.shutdownFailure ? { shutdownFailure: options.shutdownFailure } : {}), ...(options.auth ? { auth: options.auth } : {}) });
     const created = { count: 0 };
     const build = (state: State): CaptureService =>
       new CaptureService({
@@ -687,12 +688,15 @@ describe("CaptureService", () => {
   });
 
   describe("crash recovery over the whole spool", () => {
-    const metadataFor = (captureId: string, overrides: Record<string, unknown> = {}) => ({ schema_version: 1, capture_id: captureId, slot_id: null, kind: "manual", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 10, sha256: "abc", quality_status: "ok", ...overrides });
+    const FRAME = Buffer.from("not really a jpeg, but it has bytes");
+    const HASH = createHash("sha256").update(FRAME).digest("hex");
+    const metadataFor = (captureId: string, overrides: Record<string, unknown> = {}) => ({ schema_version: 1, capture_id: captureId, slot_id: null, kind: "manual", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: FRAME.length, sha256: HASH, quality_status: "ok", ...overrides });
 
-    async function spooled(h: { dataDir: string }, captureId: string, content: string): Promise<void> {
+    async function spooled(h: { dataDir: string }, captureId: string, metadata: string, frame: Buffer | null = FRAME): Promise<void> {
       const directory = join(h.dataDir, "spool", "construction", "site-overview", "2026", "05", "01", captureId);
       await mkdir(directory, { recursive: true });
-      await writeFile(join(directory, "metadata.json"), content);
+      await writeFile(join(directory, "metadata.json"), metadata);
+      if (frame !== null) await writeFile(join(directory, "frame.jpg"), frame);
     }
 
     it("adopts a frame published two months before the restart", async () => {
@@ -703,22 +707,73 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
-    it("leaves unreadable metadata alone, alerts about it, and carries on", async () => {
+    const refused: Array<[string, (h: { dataDir: string }) => Promise<void>]> = [
+      ["a newer schema", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { schema_version: 2 })))],
+      ["metadata that isn't JSON", async (h) => spooled(h, "bad", "{ nope")],
+      ["a capture id that isn't its directory's", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("elsewhere")))],
+      ["a date that isn't its directory's", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { local_date: "2026-05-02" })))],
+      ["no frame", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad")), null)],
+      ["a frame of the wrong size", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad")), Buffer.from("short"))],
+      ["a frame with the wrong hash", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad")), Buffer.alloc(FRAME.length, 1))],
+    ];
+    for (const [name, arrange] of refused) {
+      it(`leaves a capture with ${name} alone, alerts about it, and carries on`, async () => {
+        const h = await harness();
+        await arrange(h);
+        await spooled(h, "good", JSON.stringify(metadataFor("good")));
+        await h.service.reconcile();
+        assert.equal(h.state.hasCapture("bad"), false);
+        assert.equal(h.state.hasCapture("good"), true);
+        assert.ok(h.notices.some((notice) => notice.includes("1 frame(s) in the spool have unreadable metadata")), h.notices.join("; "));
+        h.state.close();
+      });
+    }
+
+    it("repairs a slot when the crash came after saving its frame's row", async () => {
       const h = await harness();
-      await spooled(h, "newer-schema", JSON.stringify(metadataFor("newer-schema", { schema_version: 2 })));
-      await spooled(h, "not-json", "{ nope");
-      await spooled(h, "good", JSON.stringify(metadataFor("good")));
-      await h.service.reconcile();
-      assert.equal(h.state.hasCapture("newer-schema"), false);
-      assert.equal(h.state.hasCapture("not-json"), false);
-      assert.equal(h.state.hasCapture("good"), true);
-      assert.ok(h.notices.some((notice) => notice.includes("2 frame(s) in the spool have unreadable metadata")), h.notices.join("; "));
+      await runAt(h, [0]);
+      const captureId = h.state.getSlot(SLOT_0800)?.capture_id;
+      new DatabaseSync(join(h.dataDir, "state.sqlite")).prepare("UPDATE slots SET state = 'running', capture_id = NULL WHERE slot_id = ?").run(SLOT_0800);
+      h.state.close();
+      const { service, state } = h.restart();
+      await service.reconcile();
+      assert.equal(state.getSlot(SLOT_0800)?.state, "captured");
+      assert.equal(state.getSlot(SLOT_0800)?.capture_id, captureId);
+      state.close();
+    });
+  });
+
+  describe("configuration changes across a restart", () => {
+    it("clears a data warning once there's no budget to warn about", async () => {
+      const budgeted = serviceConfig({ traffic: { ...DEFAULT_SERVICE_CONFIG.traffic, monthly_budget_mb: 1 } });
+      const first = await harness({ config: budgeted });
+      await runAt(first, [0]);
+      first.state.upsertAlert("data_warning", "data use is high", new Date(AT_0800).toISOString(), new Date(AT_0800).toISOString());
+      const unbudgeted = serviceConfig({ traffic: { ...DEFAULT_SERVICE_CONFIG.traffic, monthly_budget_mb: null } });
+      const second = await harness({ config: unbudgeted });
+      second.state.upsertAlert("data_warning", "data use is high", new Date(AT_0800).toISOString(), new Date(AT_0800).toISOString());
+      await runAt(second, [0]);
+      assert.equal(second.state.getAlert("data_warning"), undefined);
+      assert.ok(second.notices.some((notice) => notice.includes("recovered") && notice.includes("data use")), second.notices.join("; "));
+      first.state.close();
+      second.state.close();
+    });
+  });
+
+  describe("failures on background work", () => {
+    it("takes an abandoned client's unexpected shutdown failure down the crash path, alert included", async () => {
+      const h = await harness({ teardown: async () => ({ status: "timeout", detail: "still running" }), shutdownFailure: () => new RangeError("a bug") });
+      await h.service.tick(h.signal);
+      assert.equal(h.adapter.shutdowns, 1);
+      await new Promise((resolve) => setImmediate(resolve));
+      await assert.rejects(h.service.run(h.signal), RangeError);
+      assert.ok(h.notices.some((notice) => notice.includes("RangeError")), h.notices.join("; "));
       h.state.close();
     });
   });
 
   describe("parseCaptureMetadata", () => {
-    const good = { schema_version: 1, capture_id: "id", slot_id: "slot", kind: "scheduled", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 10, sha256: "abc", quality_status: "ok" };
+    const good = { schema_version: 1, capture_id: "id", slot_id: "slot", kind: "scheduled", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 10, sha256: "a".repeat(64), quality_status: "ok" };
 
     it("accepts what this build wrote", () => {
       assert.equal(parseCaptureMetadata(JSON.stringify(good))?.capture_id, "id");
@@ -730,6 +785,12 @@ describe("CaptureService", () => {
       ["a width that isn't a number", JSON.stringify({ ...good, width: "3840" })],
       ["an unknown quality", JSON.stringify({ ...good, quality_status: "great" })],
       ["a slot id of the wrong type", JSON.stringify({ ...good, slot_id: 5 })],
+      ["an empty capture id", JSON.stringify({ ...good, capture_id: "" })],
+      ["a date in another format", JSON.stringify({ ...good, local_date: "May 1" })],
+      ["a receive time that isn't a time", JSON.stringify({ ...good, frame_received_at: "soon" })],
+      ["a hash that isn't SHA-256", JSON.stringify({ ...good, sha256: "abc" })],
+      ["a fractional width", JSON.stringify({ ...good, width: 3840.5 })],
+      ["a frame of no bytes", JSON.stringify({ ...good, jpeg_bytes: 0 })],
       ["JSON that isn't an object", "[1]"],
       ["null", "null"],
       ["text that isn't JSON", "{ nope"],
