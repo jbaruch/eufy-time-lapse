@@ -35,7 +35,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Lint scripts
-        run: shellcheck scripts/*.sh
+        uses: docker://koalaman/shellcheck:v0.11.0@sha256:bb596a0d169b85ddd81d8b6d3a2ff6d5baf5fca10b97f575ebc647c3dff62b3d
+        with:
+          args: scripts/deploy.sh scripts/set-credentials.sh
       - name: Install the production FFmpeg
         run: |
           image="$(sed -n 's/^FROM \(mwader\/static-ffmpeg[^ ]*\) AS ffmpeg$/\1/p' Dockerfile)"
