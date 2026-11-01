@@ -756,6 +756,27 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("doesn't report charging at a time the camera couldn't be read", async () => {
+      const h = await harness({ camera: { ...reading(80), telemetry: { charging: true } } });
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(() => new CaptureFailure("camera_unreachable", "discovery", "no cloud"));
+      await idleAt(h, AT_1800 + MINUTE);
+      assert.match(reports(h)[0] ?? "", /Charging: last seen 08:00\./);
+      h.state.close();
+    });
+
+    it("keeps nothing from an earlier read in the row for a read that failed, at a slot or at the report", async () => {
+      const h = await harness({ camera: { ...reading(80), telemetry: { charging: true } } });
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(() => new CaptureFailure("camera_unreachable", "discovery", "no cloud"));
+      await runAt(h, [5]);
+      await idleAt(h, AT_1800 + MINUTE);
+      const failed = h.state.batterySince("2000-01-01T00:00:00.000Z").filter((row) => row.percent === null);
+      assert.ok(failed.length >= 2, `${failed.length} failed reads`);
+      for (const row of failed) assert.equal(row.telemetry_json, "{}");
+      h.state.close();
+    });
+
     it("says nothing before the window closes", async () => {
       const h = await harness();
       await idleAt(h, AT_1800 - 3 * MINUTE);

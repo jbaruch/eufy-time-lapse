@@ -495,11 +495,6 @@ export class CaptureService {
   }
 
   /**
-   * Eufy asks even a trusted device for a code once its token has expired or it hasn't logged in for 30 days, so a
-   * login has to happen before then to need nobody. One that Eufy challenges early costs nothing: the held token keeps
-   * working, and a person gets days of warning instead of a stopped camera.
-   */
-  /**
    * Once a day, after the last slot of the window. Also the only sign of life that doesn't need something to go wrong, so
    * it goes out on a paused day or a day with no slots too. An undelivered one is tried again at the next idle wake.
    */
@@ -512,7 +507,7 @@ export class CaptureService {
     if (this.dailyReportReadFor !== local.date) {
       // Cloud only, so it doesn't wake the camera. Without it, a day with no slots would have no reading at all.
       const reading = await this.readCamera();
-      this.state.recordBattery({ read_at: now.toISOString(), percent: reading?.percent ?? null, observed_at: reading?.observedAt ?? null, every_minutes: null, telemetry_json: JSON.stringify(this.camera?.telemetry ?? {}) });
+      this.recordBatteryReading(now, reading, null);
       this.dailyReportReadFor = local.date;
     }
     const readings = this.state.batterySince(new Date(now.getTime() - 2 * DAY_MS).toISOString()).filter((row) => localParts(new Date(row.read_at), this.zone).date === local.date);
@@ -524,6 +519,11 @@ export class CaptureService {
     if (await this.options.notify(text)) this.state.setFlag("daily_report_date", local.date);
   }
 
+  /**
+   * Eufy asks even a trusted device for a code once its token has expired or it hasn't logged in for 30 days, so a
+   * login has to happen before then to need nobody. One that Eufy challenges early costs nothing: the held token keeps
+   * working, and a person gets days of warning instead of a stopped camera.
+   */
   private async renewLoginIfDue(): Promise<void> {
     if (this.adapter === undefined || this.state.getFlag("auth_required") !== undefined) return;
     const now = this.now().getTime();
@@ -600,6 +600,17 @@ export class CaptureService {
     await this.alerts.set("camera_read_failing", failures >= this.config.alerts.consecutive_failed_slots, `the camera's state couldn't be read from Eufy's cloud at ${failures} slots in a row. Capture uses the last battery reading until it's too old. The log has the reason`);
   }
 
+  /** A failed read keeps the last camera around, and its telemetry says nothing about now. */
+  private recordBatteryReading(now: Date, reading: BatteryReading | null, everyMinutes: number | null): void {
+    this.state.recordBattery({
+      read_at: now.toISOString(),
+      percent: reading?.percent ?? null,
+      observed_at: reading?.observedAt ?? null,
+      every_minutes: everyMinutes,
+      telemetry_json: JSON.stringify(reading === null ? {} : (this.camera?.telemetry ?? {})),
+    });
+  }
+
   /** What the last good read said, for a read that failed. A failed read says nothing about the battery either way. */
   private lastKnownReading(): BatteryReading | null {
     const row = this.state.lastKnownBattery();
@@ -649,13 +660,7 @@ export class CaptureService {
     };
     const decision = decide(input, this.config, (every) => isActiveForInterval(slot.local_minutes, this.config.schedule.window_start, every));
 
-    this.state.recordBattery({
-      read_at: now.toISOString(),
-      percent: reading?.percent ?? null,
-      observed_at: reading?.observedAt ?? null,
-      every_minutes: decision.everyMinutes,
-      telemetry_json: JSON.stringify(this.camera?.telemetry ?? {}),
-    });
+    this.recordBatteryReading(now, reading, decision.everyMinutes);
     await this.syncPolicyAlerts(input, percent, local.date);
 
     if (decision.action === "skip") {

@@ -37,7 +37,7 @@ function batteryLines(readings: readonly BatteryRow[], zone: string): string[] {
   const direction = change === 0 ? "unchanged today" : `${change > 0 ? "up" : "down"} ${Math.abs(change)} today`;
   const lines = [`Battery: ${last.percent}%, ${direction} (low ${Math.min(...percents)}, high ${Math.max(...percents)}).`];
 
-  const lastCharging = readings.filter((row) => telemetryOf(row).charging === true).at(-1);
+  const lastCharging = known.filter((row) => telemetryOf(row).charging === true).at(-1);
   if (lastCharging !== undefined) lines.push(`Charging: last seen ${formatClock(localParts(new Date(lastCharging.read_at), zone).minutes)}.`);
   // A full battery reads as not charging, and that's no reason for anyone to go and look at the panel.
   else lines.push(Math.min(...percents) === 100 ? "Charging: none needed, it's full." : "Charging: none seen today.");

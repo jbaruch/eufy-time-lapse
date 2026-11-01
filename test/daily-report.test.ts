@@ -58,6 +58,11 @@ describe("dailyReport", () => {
     assert.match(report(), /Charging: last seen 16:20\./);
   });
 
+  it("doesn't trust the charging flag on a reading with no charge in it", () => {
+    const failed = [reading("2026-11-02T13:00:00.000Z", 80, { charging: false }), reading("2026-11-02T23:00:00.000Z", null, { charging: true })];
+    assert.match(report({ readings: failed }), /Charging: none seen today\./);
+  });
+
   it("says so when it saw no charging at all, which is what a person needs to hear", () => {
     const dark = [reading("2026-11-02T13:00:00.000Z", 80, { charging: false }), reading("2026-11-02T23:00:00.000Z", 76, { charging: false })];
     assert.match(report({ readings: dark }), /Charging: none seen today\./);
