@@ -321,6 +321,8 @@ export class CaptureService {
       throw error;
     }
     await this.adapter?.shutdown();
+    // Background work's last chance to report. There's no next tick to raise it.
+    if (this.backgroundFailure !== undefined) throw this.backgroundFailure;
   }
 
   /** A cloud read that doesn't wake the camera. Nothing here contacts the camera, including the login restore. */
@@ -740,7 +742,6 @@ export class CaptureService {
         log: this.options.log,
         sleep: this.sleep,
         now: this.now,
-        onLateFailure: this.onBackgroundFailure,
       }),
       this.lockOptions,
     ).catch(giveBackIfNoTryBegan);
@@ -751,6 +752,10 @@ export class CaptureService {
     const captureId = randomUUID();
     await this.publish(captureId, result.chosen, 1, { adapter, kind: "manual", slot: null, camera, reading, everyMinutes: null });
     await rm(join(this.options.dataDir, "work", key), { recursive: true, force: true });
+    if (result.chosen.cleanup.status === "timeout") {
+      // This process is about to end, so anything that teardown does later has nobody to tell. Say so now, and fail the command.
+      return new CaptureFailure("cleanup_timeout", "cleanup", `The frame was saved as capture ${captureId}, but the camera connection didn't close in time. It may stay open for a while, which spends battery. Don't run another capture yet.`);
+    }
     await this.adapter.shutdown();
     this.adapter = undefined;
     const row = this.state.allCaptures().find((capture) => capture.capture_id === captureId);

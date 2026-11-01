@@ -388,6 +388,32 @@ describe("runLogin", () => {
   });
 });
 
+describe("the export-manifest command", () => {
+  it("delivers a manifest far longer than a pipe's buffer, whole", async () => {
+    const dir = await tempDir();
+    try {
+      const state = new State(join(dir.path, "state.sqlite"));
+      const total = 3_000;
+      for (let index = 0; index < total; index += 1) {
+        state.insertCapture({ capture_id: `capture-${index}`, slot_id: null, kind: "manual", local_date: "2026-07-01", frame_received_at: "2026-07-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 700_000, sha256: "a".repeat(64), quality_status: "ok", relative_dir: `spool/${"x".repeat(100)}/${index}`, archive_status: "not_configured", created_at: "2026-07-01T13:01:00.000Z" });
+      }
+      state.close();
+      const child = spawn(process.execPath, [fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "export-manifest"], { env: { ...process.env, TIMELAPSE_DATA_DIR: dir.path }, stdio: ["ignore", "pipe", "inherit"] });
+      let output = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        output += chunk;
+      });
+      const [code] = await once(child, "close");
+      assert.equal(code, 0);
+      assert.ok(output.length > 256 * 1024, `this test needs more than a pipe's worth of output, got ${output.length}`);
+      assert.equal(output.trim().split("\n").length, total);
+    } finally {
+      await dir.remove();
+    }
+  });
+});
+
 describe("the resume command", () => {
   const cli = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
   const run = promisify(execFile);

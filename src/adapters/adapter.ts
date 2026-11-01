@@ -8,9 +8,10 @@ export type FailureReason =
   | "decode_failed"
   | "stale_source"
   | "budget_spent"
+  | "cleanup_timeout"
   | "aborted";
 
-export type FailurePhase = "auth" | "discovery" | "connect" | "stream_start" | "first_media" | "decode";
+export type FailurePhase = "auth" | "discovery" | "connect" | "stream_start" | "first_media" | "decode" | "cleanup";
 
 export class CaptureFailure extends Error {
   readonly reason: FailureReason;

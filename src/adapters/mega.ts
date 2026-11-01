@@ -79,6 +79,23 @@ export interface MegaClientOptions {
   country: string;
   sessionDir: string;
   logger: { debug(message: string, ...args: unknown[]): void; info(message: string, ...args: unknown[]): void; warn(message: string, ...args: unknown[]): void; error(message: string, ...args: unknown[]): void };
+  /** Gets a programming error the SDK emits, which nothing can catch. By default it ends the process, as any bug should. */
+  onFatal?: (error: Error) => void;
+}
+
+function crash(error: Error): void {
+  setImmediate(() => {
+    throw error;
+  });
+}
+
+/**
+ * Tells a bug from the rest of what the SDK emits. Most of it reports trouble the SDK has already handled, like a packet it
+ * couldn't parse, and each try's own deadline bounds what that can cost. Ending the process over those would lose frames.
+ */
+export function isProgrammingError(error: unknown): error is Error {
+  if (error instanceof TypeError) return error.message !== "fetch failed";
+  return error instanceof RangeError || error instanceof ReferenceError || error instanceof SyntaxError;
 }
 
 export function createMegaClient(options: MegaClientOptions): MegaClient {
@@ -100,7 +117,10 @@ export function createMegaClient(options: MegaClientOptions): MegaClient {
     noBroadcast: true,
   });
   // With no listener, EventEmitter throws an "error" event and takes the whole process down.
-  client.on("error", (error) => options.logger.error("SDK error", error));
+  client.on("error", (error) => {
+    if (isProgrammingError(error)) (options.onFatal ?? crash)(error);
+    else options.logger.error("SDK error", error);
+  });
   // Device's capability accessors are generated at runtime, which TypeScript can't relate to this shape.
   return client as unknown as MegaClient;
 }
@@ -191,13 +211,7 @@ export class MegaAdapter implements CameraAdapter {
   /** `onFatal` gets a failure on a background timer, which nothing can catch. By default it ends the process, as any bug should. */
   constructor(client: MegaClient, warn: (message: string) => void, registerSecret: (value: string) => void, onFatal?: (error: Error) => void) {
     this.client = client;
-    this.onFatal =
-      onFatal ??
-      ((error) => {
-        setImmediate(() => {
-          throw error;
-        });
-      });
+    this.onFatal = onFatal ?? crash;
     this.warn = warn;
     this.registerSecret = registerSecret;
     this.sweepTimer = setInterval(() => {

@@ -639,6 +639,15 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("fails the command when the camera connection didn't close, though the frame is kept and says where", async () => {
+      const h = await harness({ teardown: async () => ({ status: "timeout", detail: "still running" }) });
+      const result = await h.service.captureManual(h.signal);
+      assert.ok(result instanceof CaptureFailure && result.reason === "cleanup_timeout", String(result));
+      assert.equal(h.state.allCaptures().length, 1);
+      assert.ok(result.message.includes(h.state.allCaptures()[0]?.capture_id ?? "?"));
+      h.state.close();
+    });
+
     it("refuses when the budget is spent, without touching the camera", async () => {
       const config = serviceConfig({ capture: { ...DEFAULT_SERVICE_CONFIG.capture, max_session_seconds_per_day: 1 } });
       const h = await harness({ config });
@@ -756,6 +765,16 @@ describe("CaptureService", () => {
   });
 
   describe("failures on background work", () => {
+    it("reports one that arrives during shutdown, when no next tick would raise it", async () => {
+      const controller = new AbortController();
+      const h = await harness({ teardown: async () => ({ status: "timeout", detail: "still running" }), shutdownFailure: () => new RangeError("a bug") });
+      await h.service.tick(h.signal);
+      await new Promise((resolve) => setImmediate(resolve));
+      controller.abort();
+      await assert.rejects(h.service.run(controller.signal), RangeError);
+      h.state.close();
+    });
+
     it("takes an abandoned client's unexpected shutdown failure down the crash path, alert included", async () => {
       const h = await harness({ teardown: async () => ({ status: "timeout", detail: "still running" }), shutdownFailure: () => new RangeError("a bug") });
       await h.service.tick(h.signal);

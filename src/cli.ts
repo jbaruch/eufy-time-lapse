@@ -71,7 +71,7 @@ function buildAdapter(config: AppConfig, persistentDir: string, write: (line: st
       if (debugLogs) logger.debug(message, ...args);
     },
   };
-  const client = createMegaClient({ email: config.email, password: config.password, country: config.country, sessionDir: persistentDir, logger: sdkLogger });
+  const client = createMegaClient({ email: config.email, password: config.password, country: config.country, sessionDir: persistentDir, logger: sdkLogger, ...(onFatal ? { onFatal } : {}) });
   adapter = new MegaAdapter(client, log, (value) => redactor.addLiteral(value), onFatal);
   return adapter;
 }
@@ -398,8 +398,11 @@ async function main(argv: string[]): Promise<number> {
 
 if (import.meta.main) {
   try {
-    // The SDK can leave sockets and timers behind after shutdown, so the exit has to be explicit.
-    process.exit(await main(process.argv.slice(2)));
+    const code = await main(process.argv.slice(2));
+    // The SDK can leave sockets and timers behind after shutdown, so the exit has to be explicit. Output goes first: on a
+    // pipe, what's still buffered at exit is lost, and a manifest can be far longer than the pipe's buffer.
+    await new Promise<void>((resolve) => process.stdout.write("", () => resolve()));
+    process.exit(code);
   } catch (error) {
     if (!(error instanceof ConfigError || error instanceof CaptureFailure || error instanceof CameraLockHeldError || error instanceof CameraLockLostError || error instanceof RenderError)) throw error;
     process.stderr.write(`${error.message}\n`);

@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { describe, it } from "node:test";
 import { EufyMega, LoginStatus, MegaApiError, SessionExpiredError, StationUnreachableError } from "@mega-yfue/eufy-sdk";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
-import { MegaAdapter } from "../src/adapters/mega.ts";
+import { isProgrammingError, MegaAdapter } from "../src/adapters/mega.ts";
 import type { MegaClient, MegaDevice, MegaLiveStream, MegaLoginResult } from "../src/adapters/mega.ts";
 
 const SERIAL = "T86P2FULLSERIAL1234";
@@ -670,4 +670,18 @@ describe("MegaAdapter, keeping the camera's identifiers out of messages", () => 
     };
     await assert.rejects(adapter.openLiveSession(SERIAL, openSignal()), (error: CaptureFailure) => error.reason === "camera_unreachable" && !error.message.includes(SERIAL));
   });
+});
+
+describe("isProgrammingError", () => {
+  for (const [name, error] of [["a TypeError", new TypeError("x is not a function")], ["a RangeError", new RangeError("bad")], ["a ReferenceError", new ReferenceError("x")], ["a SyntaxError", new SyntaxError("x")]] as const) {
+    it(`takes ${name} for a bug`, () => {
+      assert.equal(isProgrammingError(error), true);
+    });
+  }
+
+  for (const [name, error] of [["fetch's report of a dead network", new TypeError("fetch failed")], ["a plain SDK diagnostic", new Error("malformed packet")], ["an API error", new MegaApiError("refused", 1, 500)], ["something that isn't an error", "text"]] as const) {
+    it(`doesn't take ${name} for a bug`, () => {
+      assert.equal(isProgrammingError(error), false);
+    });
+  }
 });
