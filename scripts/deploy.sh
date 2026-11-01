@@ -15,6 +15,11 @@ on_host() {
   ssh "$host" "cd '$directory' && $1"
 }
 
+# The lines of the first list that aren't in the second. comm needs input sorted in its own locale, so both use one.
+lines_only_in() {
+  LC_ALL=C comm -23 <(printf '%s\n' "$1" | LC_ALL=C sort) <(printf '%s\n' "$2" | LC_ALL=C sort)
+}
+
 main() {
   host="${1:-nas}"
   directory="${2:-eufy-time-lapse}"
@@ -47,7 +52,7 @@ main() {
       esac
     done <<< "$previous"
   fi
-  stale="$(comm -23 <(printf '%s\n' "$previous" | LC_ALL=C sort) <(printf '%s\n' "$tracked"))"
+  stale="$(lines_only_in "$previous" "$tracked")"
   if [[ -n "$stale" ]]; then
     # A directory that's a symlink could lead anywhere, so each file's real location has to be inside the project.
     # shellcheck disable=SC2016 # These expand on the host.
@@ -77,7 +82,7 @@ main() {
   local present extras
   # Everything but directories: a stray symlink such as compose.override.yaml would change the deployment just as well.
   present="$(on_host "find . \( -path ./data -o -path ./.env -o -path './$MANIFEST' \) -prune -o ! -type d -print | sed 's|^\./||' | LC_ALL=C sort")"
-  extras="$(comm -13 <(printf '%s\n' "$tracked") <(printf '%s\n' "$present"))"
+  extras="$(lines_only_in "$present" "$tracked")"
   if [[ -n "$extras" ]]; then
     echo "$host has files this commit doesn't, so the service wasn't restarted. Look at them, then remove them:" >&2
     printf '%s\n' "$extras" >&2

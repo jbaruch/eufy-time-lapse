@@ -138,6 +138,8 @@ describe("scripts/deploy.sh", () => {
     // The retry wait, so a test of it takes no real time.
     await executable(join(stubs, "sleep"), "exit 0");
     await executable(join(stubs, "sha256sum"), options.corrupt === true ? 'echo "0000  $1"' : 'exec shasum -a 256 "$@"');
+    // Which locales a machine has installed varies, so every deploy test checks the one comm's input is sorted in.
+    await executable(join(stubs, "comm"), `if [ "\${LC_ALL:-}" != "C" ]; then echo "comm ran outside the locale its input is sorted in" >&2; exit 1; fi\nPATH='${process.env.PATH ?? ""}' exec comm "$@"`);
     return { repo, host, log, env: { PATH: `${stubs}:${process.env.PATH ?? ""}`, DEPLOY_WAIT_SECONDS: "2" }, revision };
   }
 
@@ -275,6 +277,19 @@ describe("scripts/deploy.sh", () => {
     const again = await bash([script, "somehost", "app"], { cwd: repo, env });
     assert.equal(again.code, 0, again.stderr);
     assert.equal(await readFile(join(host, ".env.example"), "utf8"), "SETTING=\n");
+  });
+
+  it("keeps files with mixed-case names when run from a locale that sorts them differently", async () => {
+    const { repo, host, env } = await world();
+    await writeFile(join(repo, "CHANGELOG.md"), "log\n");
+    await writeFile(join(repo, "Dockerfile"), "FROM scratch\n");
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-q", "-m", "names");
+    const localized = { ...env, LC_ALL: "en_US.UTF-8" };
+    assert.equal((await bash([script, "somehost", "app"], { cwd: repo, env: localized })).code, 0);
+    const again = await bash([script, "somehost", "app"], { cwd: repo, env: localized });
+    assert.equal(again.code, 0, again.stderr);
+    assert.deepEqual((await readdir(host)).sort(), [".deployed-files", "CHANGELOG.md", "Dockerfile", "compose.yaml", "src"]);
   });
 
   it("does nothing when only sourced", async () => {
