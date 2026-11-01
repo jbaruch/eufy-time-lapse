@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, it } from "node:test";
-import { EufyMega, LoginStatus, MegaApiError, SessionExpiredError, StationUnreachableError } from "@mega-yfue/eufy-sdk";
+import { EufyMega, LoginStatus, MegaApiError, P2PSession, SessionExpiredError, StationUnreachableError } from "@mega-yfue/eufy-sdk";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
 import { MegaAdapter } from "../src/adapters/mega.ts";
 import type { MegaClient, MegaDevice, MegaLiveStream, MegaLoginResult } from "../src/adapters/mega.ts";
@@ -487,5 +487,122 @@ describe("the pinned SDK still has what the adapter calls", () => {
 
   it("uses the login statuses the adapter's types assume", () => {
     assert.deepEqual([LoginStatus.Ok, LoginStatus.Captcha, LoginStatus.TwoFactor], ["ok", "captcha", "2fa"]);
+  });
+});
+
+describe("relay head start", () => {
+  const settle = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+  /** A connect that stays pending until released, with `session` in the SDK's session map the whole time. */
+  function held(session: unknown, relayAfterMs: number | null = 8000): { adapter: MegaAdapter; client: FakeClient; warnings: string[]; release: () => void } {
+    const client = new FakeClient();
+    const warnings: string[] = [];
+    let release = (): void => {};
+    client.connect = () => {
+      client.sessions.set(SERIAL, session);
+      return new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    };
+    const adapter = new MegaAdapter(client, (message) => warnings.push(message), () => {}, { relayAfterMs });
+    return { adapter, client, warnings, release: () => release() };
+  }
+
+  it("moves the round counter once the head start has passed, and not before", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const session = { ackedRounds: 3 };
+    const { adapter, release } = held(session);
+    const opening = adapter.openLiveSession(SERIAL, openSignal());
+    await settle();
+    t.mock.timers.tick(7999);
+    assert.equal(session.ackedRounds, 3);
+    t.mock.timers.tick(1);
+    assert.equal(session.ackedRounds, 24);
+    release();
+    await opening;
+  });
+
+  it("waits for the lookup server's first acknowledgement, because the counter doesn't exist before it", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const session: { ackedRounds: number | undefined } = { ackedRounds: undefined };
+    const { adapter, release } = held(session);
+    const opening = adapter.openLiveSession(SERIAL, openSignal());
+    await settle();
+    t.mock.timers.tick(8000);
+    assert.equal(session.ackedRounds, undefined);
+    session.ackedRounds = 0;
+    t.mock.timers.tick(100);
+    assert.equal(session.ackedRounds, 24);
+    release();
+    await opening;
+  });
+
+  it("also starts the relay early on a session the SDK replaces during stream start", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const first = { ackedRounds: 1 };
+    const replacement = { ackedRounds: 1 };
+    const { adapter, client, release } = held(first);
+    let serve = (_stream: MegaLiveStream): void => {};
+    client.device = fakeDevice({ camera: () => ({ live: () => new Promise<MegaLiveStream>((resolve) => { serve = resolve; }) }) });
+    const opening = adapter.openLiveSession(SERIAL, openSignal());
+    await settle();
+    release();
+    await settle();
+    t.mock.timers.tick(8000);
+    assert.equal(first.ackedRounds, 24);
+    client.sessions.set(SERIAL, replacement);
+    t.mock.timers.tick(100);
+    assert.equal(replacement.ackedRounds, 24);
+    serve(new FakeStream());
+    await opening;
+  });
+
+  it("leaves a session alone once the stream is open", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const session = { ackedRounds: 3 };
+    const { adapter, release } = held(session);
+    const opening = adapter.openLiveSession(SERIAL, openSignal());
+    await settle();
+    release();
+    await opening;
+    t.mock.timers.tick(60_000);
+    assert.equal(session.ackedRounds, 3);
+  });
+
+  it("stays out of the way when it isn't configured", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const session = { ackedRounds: 3 };
+    const { adapter, release } = held(session, null);
+    const opening = adapter.openLiveSession(SERIAL, openSignal());
+    await settle();
+    t.mock.timers.tick(60_000);
+    assert.equal(session.ackedRounds, 3);
+    release();
+    await opening;
+  });
+
+  it("says so when the SDK no longer has the counter, and the capture carries on", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const { adapter, warnings, release } = held({});
+    const opening = adapter.openLiveSession(SERIAL, openSignal());
+    await settle();
+    t.mock.timers.tick(60_000);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? "", /relay_after_seconds did nothing/);
+    release();
+    await opening;
+  });
+
+  it("matches the real SDK: at this counter value, the next lookup round starts the relay", () => {
+    // Reaches into a private on purpose. A pinned SDK upgrade that moves this must fail here, not quietly on the roof.
+    const session = new P2PSession({ stationSn: "T86P2FULLSERIAL1234", p2pDid: "ABCDEFG-000000-ABCDE" }) as unknown as { ackedRounds?: number; cloudLookup: unknown; relay?: { step: string }; countAckedRound(): void };
+    const relayStep = (): string | undefined => session.relay?.step;
+    assert.ok("ackedRounds" in session);
+    session.cloudLookup = { key: "key", addresses: [] };
+    session.ackedRounds = 23;
+    session.countAckedRound();
+    assert.equal(relayStep(), undefined);
+    session.countAckedRound();
+    assert.equal(relayStep(), "list");
   });
 });

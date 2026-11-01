@@ -28,7 +28,8 @@
     "max_attempts": 2,
     "retry_delay_seconds": 30,
     "slot_deadline_seconds": 180,
-    "max_session_seconds_per_day": 6000
+    "max_session_seconds_per_day": 6000,
+    "relay_after_seconds": null
   },
   "traffic": { "monthly_budget_mb": null, "warn_fraction": 0.8, "pause_fraction": 1 },
   "storage": { "min_free_disk_mb": 1024, "keep_failed_work_days": 3 },

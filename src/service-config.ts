@@ -23,6 +23,8 @@ export interface ServiceConfig {
     retry_delay_seconds: number;
     slot_deadline_seconds: number;
     max_session_seconds_per_day: number;
+    /** Seconds of hole punching before the relay starts. null keeps the SDK's own wait of about 25 s. */
+    relay_after_seconds: number | null;
   };
   traffic: { monthly_budget_mb: number | null; warn_fraction: number; pause_fraction: number };
   storage: { min_free_disk_mb: number; keep_failed_work_days: number };
@@ -53,6 +55,7 @@ export const DEFAULT_SERVICE_CONFIG: ServiceConfig = {
     retry_delay_seconds: 30,
     slot_deadline_seconds: 180,
     max_session_seconds_per_day: 6000,
+    relay_after_seconds: null,
   },
   traffic: { monthly_budget_mb: null, warn_fraction: 0.8, pause_fraction: 1 },
   storage: { min_free_disk_mb: 1024, keep_failed_work_days: 3 },
@@ -108,6 +111,8 @@ function validate(config: ServiceConfig): void {
   const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup, retry_delay_seconds: retry, slot_deadline_seconds: deadline, max_attempts: tries } = config.capture;
   if (tries < 1) fail("capture.max_attempts must be at least 1.");
   if ((acquire + cleanup) * tries + retry * (tries - 1) > deadline) fail("capture.slot_deadline_seconds is too short for max_attempts to finish.");
+  const { relay_after_seconds: relayAfter } = config.capture;
+  if (relayAfter !== null && (!(relayAfter > 0) || relayAfter >= acquire)) fail(`capture.relay_after_seconds must be null, or above 0 and below acquisition_timeout_seconds (${acquire}), got ${relayAfter}.`);
 }
 
 export function loadServiceConfig(path: string): ServiceConfig {
