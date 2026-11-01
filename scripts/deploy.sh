@@ -5,7 +5,10 @@
 # aren't in the tree, so this never touches them. Refuses to restart unless the host holds exactly this commit.
 set -euo pipefail
 
+# Owned by this script, the only reader and writer: what the last deploy shipped, one path per line after the header.
+# A new shape means a new schema_version and a migration here. Anything else on the host gets refused, not guessed at.
 readonly MANIFEST=".deployed-files"
+readonly MANIFEST_HEADER="# eufy-time-lapse deployed files, schema_version=1"
 
 on_host() {
   # shellcheck disable=SC2029 # The directory is meant to expand here, on this side of the connection.
@@ -27,6 +30,13 @@ main() {
 
   # What the last deploy shipped and this commit no longer has. The code directories go wholesale, for the same reason.
   previous="$(on_host "if [ -f '$MANIFEST' ]; then cat '$MANIFEST'; fi")"
+  if [[ -n "$previous" ]]; then
+    if [[ "${previous%%$'\n'*}" != "$MANIFEST_HEADER" ]]; then
+      echo "$host has a $MANIFEST this version doesn't understand, so nothing was deployed. Check it, and remove it if it's stale." >&2
+      exit 1
+    fi
+    previous="${previous#*$'\n'}"
+  fi
   stale="$(comm -23 <(printf '%s\n' "$previous" | LC_ALL=C sort) <(printf '%s\n' "$tracked"))"
   if [[ -n "$stale" ]]; then
     # shellcheck disable=SC2016 # These expand on the host.
@@ -34,7 +44,7 @@ main() {
   fi
   on_host "rm -rf src lab test scripts .github"
   git archive HEAD | on_host "tar -xf -"
-  printf '%s\n' "$tracked" | on_host "cat > '$MANIFEST'"
+  printf '%s\n%s\n' "$MANIFEST_HEADER" "$tracked" | on_host "cat > '$MANIFEST'"
 
   local local_hashes remote_hashes
   local_hashes="$(printf '%s\n' "$tracked" | while IFS= read -r file; do shasum -a 256 "$file"; done)"

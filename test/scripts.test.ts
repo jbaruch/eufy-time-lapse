@@ -197,6 +197,22 @@ describe("scripts/deploy.sh", () => {
     assert.match(result.stderr, /didn't report revision/);
   });
 
+  it("records what it shipped under a versioned header", async () => {
+    const { repo, host, env } = await world();
+    assert.equal((await bash([script, "somehost", "app"], { cwd: repo, env })).code, 0);
+    assert.equal(await readFile(join(host, ".deployed-files"), "utf8"), "# eufy-time-lapse deployed files, schema_version=1\ncompose.yaml\nsrc/cli.ts\n");
+  });
+
+  it("refuses a manifest it doesn't understand, and touches nothing", async () => {
+    const { repo, host, log, env } = await world();
+    await writeFile(join(host, ".deployed-files"), "# eufy-time-lapse deployed files, schema_version=2\ncompose.yaml\n");
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /doesn't understand/);
+    assert.deepEqual(await readdir(host), [".deployed-files"]);
+    assert.equal(await readFile(log, "utf8"), "");
+  });
+
   it("does nothing when only sourced", async () => {
     const { repo, host, env } = await world();
     const result = await bash(["-c", `source '${script}'; echo sourced`], { cwd: repo, env });
