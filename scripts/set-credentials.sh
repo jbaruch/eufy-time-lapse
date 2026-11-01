@@ -4,22 +4,29 @@
 # only writes headers and query parameters. See the README.
 set -euo pipefail
 
-secrets_dir="${TIMELAPSE_SECRETS_DIR:-$HOME/.config/eufy-time-lapse}"
+main() {
+  local secrets_dir="${TIMELAPSE_SECRETS_DIR:-$HOME/.config/eufy-time-lapse}"
+  local email password
 
-read -r -p "Eufy account email: " email
-read -r -s -p "Eufy account password (not shown): " password
-echo
+  read -r -p "Eufy account email: " email
+  read -r -s -p "Eufy account password (not shown): " password
+  echo
 
-if [[ -z "$email" || -z "$password" ]]; then
-  echo "Both the email and the password are required. Nothing was changed." >&2
-  exit 1
+  if [[ -z "$email" || -z "$password" ]]; then
+    echo "Both the email and the password are required. Nothing was changed." >&2
+    exit 1
+  fi
+
+  umask 077
+  mkdir -p "$secrets_dir"
+  chmod 700 "$secrets_dir"
+  printf '%s\n' "$email" > "$secrets_dir/eufy_email"
+  printf '%s\n' "$password" > "$secrets_dir/eufy_password"
+  chmod 600 "$secrets_dir/eufy_email" "$secrets_dir/eufy_password"
+
+  echo "Saved to $secrets_dir"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-
-umask 077
-mkdir -p "$secrets_dir"
-chmod 700 "$secrets_dir"
-printf '%s\n' "$email" > "$secrets_dir/eufy_email"
-printf '%s\n' "$password" > "$secrets_dir/eufy_password"
-chmod 600 "$secrets_dir/eufy_email" "$secrets_dir/eufy_password"
-
-echo "Saved to $secrets_dir"

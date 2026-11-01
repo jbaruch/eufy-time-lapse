@@ -1,45 +1,74 @@
 #!/usr/bin/env bash
 # Ships the committed tree to a capture host over SSH, restarts the service, and waits until it reports the new
 # revision. Usage: scripts/deploy.sh [ssh-host] [remote-directory]
-# Stop before a capture is due if you can: a restart mid-capture marks that slot missed. The data directory, .env
-# and the secrets aren't in the tree, so this never touches them.
+# Run it just after a capture if you can: a restart mid-capture marks that slot missed. The data directory and .env
+# aren't in the tree, so this never touches them. Refuses to restart unless the host holds exactly this commit.
 set -euo pipefail
 
-host="${1:-nas}"
-directory="${2:-eufy-time-lapse}"
-wait_seconds=60
-
-if [[ -n "$(git status --porcelain)" ]]; then
-  echo "Uncommitted changes wouldn't ship, so nothing was deployed. Commit or stash them first." >&2
-  exit 1
-fi
-revision="$(git rev-parse --short HEAD)"
+readonly MANIFEST=".deployed-files"
 
 on_host() {
   # shellcheck disable=SC2029 # The directory is meant to expand here, on this side of the connection.
   ssh "$host" "cd '$directory' && $1"
 }
 
-# Replaced wholesale, so a file deleted from the repo can't linger on the host.
-on_host "rm -rf src lab test scripts .github"
-git archive HEAD | on_host "tar -xf -"
+main() {
+  host="${1:-nas}"
+  directory="${2:-eufy-time-lapse}"
+  local wait_seconds="${DEPLOY_WAIT_SECONDS:-60}"
 
-local_hashes="$(git ls-files | LC_ALL=C sort | while read -r file; do shasum -a 256 "$file"; done)"
-remote_hashes="$(git ls-files | LC_ALL=C sort | on_host "xargs -d '\\n' sha256sum")"
-if [[ "$local_hashes" != "$remote_hashes" ]]; then
-  echo "The files on $host don't match this commit, so the service wasn't restarted:" >&2
-  diff <(printf '%s\n' "$local_hashes") <(printf '%s\n' "$remote_hashes") >&2
-  exit 1
-fi
-
-on_host "TIMELAPSE_REVISION='$revision' docker compose build --quiet timelapse && docker compose up -d timelapse"
-
-for ((waited = 0; waited < wait_seconds; waited += 2)); do
-  if on_host "docker compose exec -T timelapse node src/cli.ts status --json" | grep -q "\"revision\": \"$revision\""; then
-    echo "$host is running $revision."
-    exit 0
+  if [[ -n "$(git status --porcelain)" ]]; then
+    echo "Uncommitted changes wouldn't ship, so nothing was deployed. Commit or stash them first." >&2
+    exit 1
   fi
-  sleep 2
-done
-echo "$host didn't report revision $revision within ${wait_seconds}s. Check: ssh $host 'cd $directory && docker compose logs --tail 50 timelapse'" >&2
-exit 1
+  local revision tracked previous stale
+  revision="$(git rev-parse --short HEAD)"
+  tracked="$(git ls-files | LC_ALL=C sort)"
+
+  # What the last deploy shipped and this commit no longer has. The code directories go wholesale, for the same reason.
+  previous="$(on_host "if [ -f '$MANIFEST' ]; then cat '$MANIFEST'; fi")"
+  stale="$(comm -23 <(printf '%s\n' "$previous" | LC_ALL=C sort) <(printf '%s\n' "$tracked"))"
+  if [[ -n "$stale" ]]; then
+    # shellcheck disable=SC2016 # These expand on the host.
+    printf '%s\n' "$stale" | on_host 'while IFS= read -r file; do rm -f "$file"; done'
+  fi
+  on_host "rm -rf src lab test scripts .github"
+  git archive HEAD | on_host "tar -xf -"
+  printf '%s\n' "$tracked" | on_host "cat > '$MANIFEST'"
+
+  local local_hashes remote_hashes
+  local_hashes="$(printf '%s\n' "$tracked" | while IFS= read -r file; do shasum -a 256 "$file"; done)"
+  # shellcheck disable=SC2016 # These expand on the host.
+  remote_hashes="$(printf '%s\n' "$tracked" | on_host 'while IFS= read -r file; do sha256sum "$file"; done')"
+  if [[ "$local_hashes" != "$remote_hashes" ]]; then
+    echo "The files on $host don't match this commit, so the service wasn't restarted:" >&2
+    diff <(printf '%s\n' "$local_hashes") <(printf '%s\n' "$remote_hashes") >&2
+    exit 1
+  fi
+
+  local present extras
+  present="$(on_host "find . -type f -not -path './data/*' -not -name .env -not -name '$MANIFEST' | sed 's|^\./||' | LC_ALL=C sort")"
+  extras="$(comm -13 <(printf '%s\n' "$tracked") <(printf '%s\n' "$present"))"
+  if [[ -n "$extras" ]]; then
+    echo "$host has files this commit doesn't, so the service wasn't restarted. Look at them, then remove them:" >&2
+    printf '%s\n' "$extras" >&2
+    exit 1
+  fi
+
+  on_host "TIMELAPSE_REVISION='$revision' docker compose build --quiet timelapse && docker compose up -d timelapse"
+
+  local waited
+  for ((waited = 0; waited < wait_seconds; waited += 2)); do
+    if on_host "docker compose exec -T timelapse node src/cli.ts status --json" | grep -q "\"revision\": \"$revision\""; then
+      echo "$host is running $revision."
+      return 0
+    fi
+    sleep 2
+  done
+  echo "$host didn't report revision $revision within ${wait_seconds}s. Check: ssh $host 'cd $directory && docker compose logs --tail 50 timelapse'" >&2
+  exit 1
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
