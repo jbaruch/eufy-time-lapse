@@ -824,6 +824,38 @@ describe("CaptureService", () => {
       state.close();
     });
 
+    it("leaves nothing running when it dies again partway through recovering", async () => {
+      const h = await diedDuringTeardown();
+      const first = h.restart();
+      first.state.insertCapture = () => {
+        throw died;
+      };
+      await assert.rejects(first.service.reconcile(), RangeError);
+      assert.equal(first.state.allCaptures().length, 0, "it died with the frame published and its row unsaved");
+      first.state.close();
+      const { service, state } = h.restart();
+      await service.reconcile();
+      assert.equal(state.getSlot(SLOT_0800)?.state, "captured");
+      assert.equal(state.allCaptures().length, 1);
+      assert.equal(state.attemptsSince("2000-01-01T00:00:00Z").some((attempt) => attempt.status === "running"), false);
+      state.close();
+    });
+
+    it("settles its tries once, however often a crash makes it start over", async () => {
+      const h = await diedDuringTeardown();
+      const first = h.restart();
+      first.state.setSlot = () => {
+        throw died;
+      };
+      await assert.rejects(first.service.reconcile(), RangeError);
+      first.state.close();
+      const { service, state } = h.restart();
+      await service.reconcile();
+      assert.equal(state.getSlot(SLOT_0800)?.state, "captured");
+      assert.deepEqual(state.attemptsSince("2000-01-01T00:00:00Z").map((attempt) => attempt.attempt_id), [WORK_KEY]);
+      state.close();
+    });
+
     it("ignores another slot's directories, however alike they look", async () => {
       const h = await diedDuringTeardown();
       await mkdir(join(h.dataDir, "work", `${WORK_KEY}9`));
@@ -924,6 +956,34 @@ describe("CaptureService", () => {
       const h = await harness();
       await withCameraLock(join(h.dataDir, "camera-lock.sqlite"), async () => assert.rejects(h.service.captureManual(h.signal), CameraLockHeldError), { now: () => h.clock.ms });
       assert.equal(h.state.sessionUsedMs("2026-07-01"), 0);
+      h.state.close();
+    });
+
+    it("doesn't wake the camera with the disk at its floor, and says what to do", async () => {
+      const h = await harness();
+      h.disk.mb = DEFAULT_SERVICE_CONFIG.storage.min_free_disk_mb;
+      const result = await h.service.captureManual(h.signal);
+      assert.ok(result instanceof CaptureFailure);
+      assert.equal(result.reason, "storage_full");
+      assert.match(result.message, /Free some space/);
+      assert.equal(h.adapter.opens, 0);
+      assert.equal(h.state.attemptsSince("2000-01-01T00:00:00Z").length, 0, "nothing reserved");
+      h.state.close();
+    });
+
+    it("keeps the frame and says so when closing the connection reports a fault", async () => {
+      const h = await harness({ teardown: async () => ({ status: "error", detail: "stop refused" }) });
+      const result = await h.service.captureManual(h.signal);
+      assert.equal(result instanceof CaptureFailure, false);
+      assert.equal(h.state.allCaptures().length, 1);
+      assert.ok(h.notices.some((notice) => notice.includes("may not have closed") && notice.includes("stop refused")), h.notices.join("; "));
+      h.state.close();
+    });
+
+    it("says nothing about the connection when it closed", async () => {
+      const h = await harness();
+      await h.service.captureManual(h.signal);
+      assert.equal(h.notices.some((notice) => notice.includes("may not have closed")), false, h.notices.join("; "));
       h.state.close();
     });
   });
@@ -1572,252 +1632,6 @@ describe("CaptureService", () => {
       h.adapter.setDiscoverFailure(cloudDown);
       await runAt(h, [5]);
       assert.equal(h.state.getSlot(AT(5))?.reason, "battery_unknown");
-      h.state.close();
-    });
-  });
-
-  describe("a process that dies between the stream stopping and the frame being saved", () => {
-    const died = new RangeError("the process died here");
-    const WORK_KEY = "20260701T130000000Z";
-
-    /** Leaves on disk exactly what such a death leaves: the stream, its record, and a slot still marked running. */
-    async function diedDuringTeardown(options: Parameters<typeof harness>[0] = {}): Promise<Awaited<ReturnType<typeof harness>>> {
-      const h = await harness({
-        teardown: async () => {
-          throw died;
-        },
-        ...options,
-      });
-      await assert.rejects(h.service.tick(h.signal), RangeError);
-      assert.equal(h.state.getSlot(SLOT_0800)?.state, "running");
-      h.state.close();
-      return h;
-    }
-
-    it("finishes the frame at the next start, and doesn't wake the camera for it", async () => {
-      const h = await diedDuringTeardown();
-      const opens = h.adapter.opens;
-      const { service, state } = h.restart();
-      await service.reconcile();
-      assert.equal(state.getSlot(SLOT_0800)?.state, "captured");
-      const [capture] = state.allCaptures();
-      assert.ok(capture !== undefined);
-      assert.equal(capture.slot_id, SLOT_0800);
-      await service.tick(h.signal);
-      assert.equal(h.adapter.opens, opens);
-      state.close();
-    });
-
-    it("records that the connection's end is unknown, and when the frame really arrived", async () => {
-      const h = await diedDuringTeardown();
-      const { service, state } = h.restart();
-      h.clock.ms = AT_0800 + 180 * MINUTE;
-      await service.reconcile();
-      const [capture] = state.allCaptures();
-      assert.ok(capture !== undefined);
-      const metadata = JSON.parse(await readFile(join(h.dataDir, capture.relative_dir, "metadata.json"), "utf8")) as CaptureMetadata;
-      assert.equal(metadata.cleanup_status, "unknown_after_crash");
-      assert.equal(metadata.frame_received_at, new Date(AT_0800).toISOString());
-      assert.equal(metadata.every_minutes, 5);
-      assert.equal(metadata.battery_percent, null, "no reading was taken for it");
-      state.close();
-    });
-
-    it("leaves a frame the audit calls sound, and clears its work files", async () => {
-      const h = await diedDuringTeardown();
-      const { service, state } = h.restart();
-      await service.reconcile();
-      await service.auditStoredFrames(h.signal);
-      assert.equal(h.notices.some((notice) => notice.includes("no longer match")), false, h.notices.join("; "));
-      assert.deepEqual(await readdir(join(h.dataDir, "work")), []);
-      state.close();
-    });
-
-    it("recovers once, however many times it restarts", async () => {
-      const h = await diedDuringTeardown();
-      for (const _ of [1, 2]) {
-        const { service, state } = h.restart();
-        await service.reconcile();
-        assert.equal(state.allCaptures().length, 1);
-        state.close();
-      }
-    });
-
-    const unrecoverable: Array<[string, (workDir: string) => Promise<void>]> = [
-      ["a stream that won't decode", async (workDir) => writeFile(join(workDir, "stream.bin"), "not video")],
-      ["no stream", async (workDir) => rm(join(workDir, "stream.bin"))],
-      ["no record", async (workDir) => rm(join(workDir, "pending.json"))],
-      ["a record that isn't JSON", async (workDir) => writeFile(join(workDir, "pending.json"), "{ nope")],
-      [
-        "a record of a version this build doesn't know",
-        async (workDir) => {
-          const path = join(workDir, "pending.json");
-          await writeFile(path, JSON.stringify({ ...(JSON.parse(await readFile(path, "utf8")) as object), schema_version: 2 }));
-        },
-      ],
-      [
-        "a record of another attempt",
-        async (workDir) => {
-          const path = join(workDir, "pending.json");
-          await writeFile(path, JSON.stringify({ ...(JSON.parse(await readFile(path, "utf8")) as object), attempt_id: "another-attempt" }));
-        },
-      ],
-    ];
-    for (const [name, damage] of unrecoverable) {
-      it(`counts the slot as missed, as any other crash, with ${name}`, async () => {
-        const h = await diedDuringTeardown();
-        await damage(join(h.dataDir, "work", WORK_KEY));
-        const { service, state } = h.restart();
-        await service.reconcile();
-        const slot = state.getSlot(SLOT_0800);
-        assert.deepEqual([slot?.state, slot?.reason], ["missed", "unknown_after_crash"]);
-        assert.equal(state.allCaptures().length, 0);
-        state.close();
-      });
-    }
-
-    /** The first try fails cleanly, and the process dies tearing down the second. */
-    async function diedOnSecondTry(options: Parameters<typeof harness>[0] = {}): Promise<Awaited<ReturnType<typeof harness>>> {
-      let opens = 0;
-      const h = await harness({
-        open: async () => {
-          opens += 1;
-          return opens === 1 ? await hangUp() : await fresh();
-        },
-        teardown: async () => {
-          if (opens === 1) return { status: "ok", detail: null };
-          throw died;
-        },
-        ...options,
-      });
-      await assert.rejects(h.service.tick(h.signal), RangeError);
-      h.state.close();
-      return h;
-    }
-
-    it("finds a later try's stream, and counts the try before it", async () => {
-      const h = await diedOnSecondTry();
-      const { service, state } = h.restart();
-      await service.reconcile();
-      assert.equal(state.getSlot(SLOT_0800)?.state, "captured");
-      const [capture] = state.allCaptures();
-      assert.ok(capture !== undefined);
-      const metadata = JSON.parse(await readFile(join(h.dataDir, capture.relative_dir, "metadata.json"), "utf8")) as CaptureMetadata;
-      assert.equal(metadata.attempt_count, 2);
-      state.close();
-    });
-
-    it("replaces the reservation with the tries, so the wake is counted and nothing stays running", async () => {
-      const h = await diedOnSecondTry();
-      const { service, state } = h.restart();
-      await service.reconcile();
-      const attempts = state.attemptsSince("2000-01-01T00:00:00Z");
-      assert.deepEqual(attempts.map((attempt) => attempt.attempt_id).sort(), [WORK_KEY, `${WORK_KEY}-retry-1`]);
-      assert.equal(attempts.some((attempt) => attempt.status === "running"), false);
-      const first = attempts.find((attempt) => attempt.attempt_id === WORK_KEY);
-      assert.deepEqual([first?.status, first?.reason, first?.cleanup_status], ["failed", "unknown_after_crash", "unknown_after_crash"]);
-      const second = attempts.find((attempt) => attempt.attempt_id === `${WORK_KEY}-retry-1`);
-      assert.deepEqual([second?.status, second?.cleanup_status], ["captured", "unknown_after_crash"]);
-      const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup } = DEFAULT_SERVICE_CONFIG.capture;
-      assert.ok(state.sessionUsedMs("2026-07-01") >= (acquire + cleanup) * 1000, "the try whose details died is charged in full");
-      assert.equal(state.recentFirstTries(5).length, 1, "and the first try counts as one");
-      state.close();
-    });
-
-    it("finds a try from before the setting was lowered", async () => {
-      const h = await diedOnSecondTry();
-      const lowered = serviceConfig({ capture: { ...DEFAULT_SERVICE_CONFIG.capture, max_attempts: 1 } });
-      const state = new State(join(h.dataDir, "state.sqlite"), () => new Date(h.clock.ms));
-      const service = new CaptureService({ config: lowered, state, createAdapter: () => h.adapter, dataDir: h.dataDir, minWidth: 1280, minHeight: 720, link: "cellular", operator: null, log: () => {}, notify: async () => {}, now: () => new Date(h.clock.ms), sleep: async () => {}, diskFreeMb: async () => 50_000 });
-      await service.reconcile();
-      assert.equal(state.getSlot(SLOT_0800)?.state, "captured");
-      state.close();
-    });
-
-    it("ignores another slot's directories, however alike they look", async () => {
-      const h = await diedDuringTeardown();
-      await mkdir(join(h.dataDir, "work", `${WORK_KEY}9`));
-      await mkdir(join(h.dataDir, "work", `${WORK_KEY}-retry-x`));
-      const { service, state } = h.restart();
-      await service.reconcile();
-      assert.equal(state.attemptsSince("2000-01-01T00:00:00Z").length, 1);
-      state.close();
-    });
-
-    const altered = (change: Record<string, unknown>) => async (workDir: string): Promise<void> => {
-      const path = join(workDir, "pending.json");
-      await writeFile(path, JSON.stringify({ ...(JSON.parse(await readFile(path, "utf8")) as object), ...change }));
-    };
-    const unusable: Array<[string, (workDir: string) => Promise<void>, RegExp]> = [
-      ["a fractional byte count", altered({ video_bytes: 1.5 }), /isn't one this build writes/],
-      ["a fractional retry count", altered({ connect_retries: 0.5 }), /isn't one this build writes/],
-      ["a time that isn't the writer's format", altered({ stream_stopped_at: "July 1 2026 13:00" }), /isn't one this build writes/],
-      ["times out of order", altered({ stream_started_at: "2026-07-01T14:00:00.000Z" }), /isn't one this build writes/],
-      ["a stream that won't decode", async (workDir) => writeFile(join(workDir, "stream.bin"), "not video"), /won't decode/],
-      ["a record it can't read", async (workDir) => { await rm(join(workDir, "pending.json")); await mkdir(join(workDir, "pending.json")); }, /can't be read \(EISDIR\)/],
-    ];
-    for (const [name, damage, reason] of unusable) {
-      it(`says a frame was lost, and why, with ${name}`, async () => {
-        const h = await diedDuringTeardown();
-        await damage(join(h.dataDir, "work", WORK_KEY));
-        const { service, state } = h.restart();
-        await service.reconcile();
-        assert.deepEqual([state.getSlot(SLOT_0800)?.state, state.getSlot(SLOT_0800)?.reason], ["missed", "unknown_after_crash"]);
-        assert.ok(h.notices.some((notice) => notice.includes("couldn't be recovered")), h.notices.join("; "));
-        const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"));
-        const event = raw.prepare("SELECT detail FROM events WHERE kind = 'capture_unrecoverable'").get() as { detail: string } | undefined;
-        raw.close();
-        assert.match(event?.detail ?? "", reason);
-        await access(join(h.dataDir, "work", WORK_KEY), undefined);
-        state.close();
-      });
-    }
-
-    it("raises no alarm when a try died before there was anything to lose", async () => {
-      const h = await diedDuringTeardown();
-      await rm(join(h.dataDir, "work", WORK_KEY, "pending.json"));
-      const { service, state } = h.restart();
-      await service.reconcile();
-      assert.equal(h.notices.some((notice) => notice.includes("couldn't be recovered")), false, h.notices.join("; "));
-      state.close();
-    });
-
-    it("leaves a slot alone when nothing arrived before the crash", async () => {
-      const h = await harness();
-      h.state.materialize([{ scheduledAt: new Date(AT_0800), localDate: "2026-07-01", localTime: "08:00", localMinutes: 480, nonexistent: false }], "construction/site-overview", "revision");
-      h.state.setSlot(SLOT_0800, "running", { everyMinutes: 5 });
-      await h.service.reconcile();
-      assert.deepEqual([h.state.getSlot(SLOT_0800)?.state, h.state.getSlot(SLOT_0800)?.reason], ["missed", "unknown_after_crash"]);
-      h.state.close();
-    });
-  });
-
-  describe("a manual capture", () => {
-    it("doesn't wake the camera with the disk at its floor, and says what to do", async () => {
-      const h = await harness();
-      h.disk.mb = DEFAULT_SERVICE_CONFIG.storage.min_free_disk_mb;
-      const result = await h.service.captureManual(h.signal);
-      assert.ok(result instanceof CaptureFailure);
-      assert.equal(result.reason, "storage_full");
-      assert.match(result.message, /Free some space/);
-      assert.equal(h.adapter.opens, 0);
-      assert.equal(h.state.attemptsSince("2000-01-01T00:00:00Z").length, 0, "nothing reserved");
-      h.state.close();
-    });
-
-    it("keeps the frame and says so when closing the connection reports a fault", async () => {
-      const h = await harness({ teardown: async () => ({ status: "error", detail: "stop refused" }) });
-      const result = await h.service.captureManual(h.signal);
-      assert.equal(result instanceof CaptureFailure, false);
-      assert.equal(h.state.allCaptures().length, 1);
-      assert.ok(h.notices.some((notice) => notice.includes("may not have closed") && notice.includes("stop refused")), h.notices.join("; "));
-      h.state.close();
-    });
-
-    it("says nothing about the connection when it closed", async () => {
-      const h = await harness();
-      await h.service.captureManual(h.signal);
-      assert.equal(h.notices.some((notice) => notice.includes("may not have closed")), false, h.notices.join("; "));
       h.state.close();
     });
   });

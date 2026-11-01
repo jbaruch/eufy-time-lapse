@@ -260,9 +260,15 @@ export class CaptureService {
       const [first] = recovered;
       if (first === undefined) continue;
       const chosen = chooseBest(recovered.map((attempt) => attempt.record));
+      // Before the frame, as any capture does. Dying after this finds the same tries again, and settling them twice changes
+      // nothing. Dying after the publish leaves a frame that adoption finishes, and by then nothing is left to settle.
+      this.settleRecoveredTries(slot, tries, recovered);
       const captureId = randomUUID();
       const relativeDir = await this.publish(captureId, chosen, tries.length, { adapter: first.adapter, kind: "scheduled", slot, camera: { firmware: null }, reading: null, everyMinutes: slot.every_minutes });
-      this.settleRecoveredSlot(slot, chosen, captureId, tries, recovered);
+      this.state.inTransaction(() => {
+        this.state.setSlot(slot.slot_id, chosen.status === "captured" ? "captured" : "captured_degraded", { captureId, everyMinutes: slot.every_minutes });
+        this.state.addEvent("capture_recovered", captureId);
+      });
       this.options.log(`${slot.local_date} ${slot.local_time}: recovered the frame a crash interrupted (${relativeDir})`);
       for (const attempt of recovered) await rm(join(this.options.dataDir, "work", attempt.record.attempt_id), { recursive: true, force: true });
     }
@@ -277,7 +283,7 @@ export class CaptureService {
   }
 
   /** The tries replace the reservation, as they do after any capture. One whose details died with the process is charged what it could have cost. */
-  private settleRecoveredSlot(slot: SlotRow, chosen: AttemptRecord, captureId: string, tries: string[], recovered: RecoveredAttempt[]): void {
+  private settleRecoveredTries(slot: SlotRow, tries: string[], recovered: RecoveredAttempt[]): void {
     const budgetDay = slot.local_date;
     const known = new Map(recovered.map((attempt) => [attempt.record.attempt_id, attempt.record]));
     const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup } = this.config.capture;
@@ -286,11 +292,7 @@ export class CaptureService {
       if (record !== undefined) return this.attemptRow(record, slot.slot_id, budgetDay);
       return { attempt_id: attemptId, slot_id: slot.slot_id, started_at: slot.scheduled_at_utc, status: "failed", reason: "unknown_after_crash", phase: null, connection_path: null, connect_ms: null, session_ms: null, reserved_ms: (acquire + cleanup) * 1000, video_bytes: 0, audio_bytes: 0, cleanup_status: "unknown_after_crash", stream_stop: null, width: null, height: null, budget_day: budgetDay, budget_month: budgetDay.slice(0, 7) };
     });
-    this.state.inTransaction(() => {
-      this.state.settleReservation(`reservation-${workKeyFor(slot)}`, rows);
-      this.state.setSlot(slot.slot_id, chosen.status === "captured" ? "captured" : "captured_degraded", { captureId, everyMinutes: slot.every_minutes });
-      this.state.addEvent("capture_recovered", captureId);
-    });
+    this.state.settleReservation(`reservation-${workKeyFor(slot)}`, rows);
   }
 
   /**
