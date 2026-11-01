@@ -3,8 +3,9 @@
 Records a construction time-lapse from a solar-powered eufy 4G LTE Cam S330 (T86P2) on its built-in SIM.
 The design lives in [`eufy_s330_timelapse_spec.md`](eufy_s330_timelapse_spec.md).
 
-**Status: Phase 1.** Only the native-LTE feasibility probe exists. The continuous service stays blocked
-until the probe passes on the real camera, from the host that will run it.
+**Status: pre-production.** The probe and the capture service both run against the real camera. Not built
+yet: the offsite S3 archive and the monthly preview render. Frames stay on local storage until the archive
+exists, and nothing deletes them.
 
 ## Requirements
 
@@ -77,7 +78,48 @@ Each run writes to `data/probe/<run-id>/`. A retry's files go in `attempt-N-retr
 | `attempt-N/stream.bin` | The raw video |
 | `library.log` | Redacted library log at debug level, including the P2P lookup and relay steps |
 
-Exit code 0 means the probe passed. Anything else means Phase 2 stays blocked: read `verdict` in the report.
+Exit code 0 means the probe passed. Anything else: read `verdict` in the report.
+
+## Run the service
+
+```bash
+docker compose up -d
+```
+
+It captures on the slot grid in the site's time zone, publishes each frame atomically to
+`data/spool/<project>/<camera>/YYYY/MM/DD/<capture-id>/` with an immutable `metadata.json`, and tracks
+everything in `data/state.sqlite`. A restart resumes safely: past slots stay missed rather than being made
+up, and a frame saved just before a crash isn't captured again.
+
+Run anything else alongside it with `docker compose run --rm timelapse <command>`:
+
+| Command | Does |
+| --- | --- |
+| `status [--json]` | Last frame, next slot, completeness, battery, pauses, budgets, reliability by connection path |
+| `calibration [--hours N]` | Battery, solar input and capture load, hour by hour |
+| `capture` | One manual frame now. Never counts toward completeness |
+| `pause` / `resume` | Stop and restart new captures. `resume --battery-checked` overrides a low-battery pause |
+| `render --from YYYY-MM-DD --to YYYY-MM-DD` | Builds an MP4 from stored frames, with a manifest. Never touches the camera |
+| `export-manifest` | Every capture, one JSON object per line |
+| `login` | Log in again when the service reports `auth_required`. A running service picks it up |
+
+The service also answers on `127.0.0.1:8787`. `/status` has the full report. `/healthz` means only that the
+process is alive, so check `/status` to know frames are arriving.
+
+### Configuration
+
+Settings live in `data/config.json`. Anything you leave out keeps its default, and a misspelled key is an
+error. [`config.example.json`](config.example.json) lists them all. Restart the service after a change.
+
+**Cadence** comes from battery tiers. A slot exists every `grid_minutes`, and the battery decides which ones
+run. Skipped slots are recorded with the reason `battery_tier` and stay visible in `status`, so the capture
+rate never changes silently. Below `pause_at_or_below_percent` capture stops until the battery reaches
+`resume_at_or_above_percent`.
+
+**Rendering** leaves out frames below the required size and lists them in the manifest, because one 720p frame
+would otherwise pull a whole 4K video down to 720p. `--include-degraded` puts them back.
+
+**Alerts** post to the webhook in `alerts.webhook_url_file`. Without one they only reach the service log.
 
 ## Development
 
