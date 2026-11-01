@@ -127,9 +127,12 @@ describe("createNotifier", () => {
     status = 200;
   });
 
-  it("logs an unreachable webhook without quoting its URL, which holds a credential", async () => {
+  it("logs an unreachable webhook without quoting its URL, which holds a credential", async (t) => {
+    t.mock.method(globalThis, "fetch", async () => {
+      throw new TypeError("fetch failed");
+    });
     const logged: string[] = [];
-    const notify = createNotifier(await urlFile("http://127.0.0.1:1/secret-token"), (message) => logged.push(message));
+    const notify = createNotifier(await urlFile("https://example.com/secret-token"), (message) => logged.push(message));
     await notify("hello");
     assert.ok(logged.some((line) => line.includes("webhook failed")));
     assert.equal(logged.join("\n").includes("secret-token"), false);
