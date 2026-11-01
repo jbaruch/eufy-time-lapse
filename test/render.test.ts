@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { promisify } from "node:util";
-import { outputSize, render, RenderError, selectFrames } from "../src/render.ts";
+import { ffmpegVersionLine, outputSize, render, RenderError, selectFrames } from "../src/render.ts";
 import { State } from "../src/state.ts";
 import type { CaptureRow } from "../src/state.ts";
 import { tempDir } from "./helpers/fixtures.ts";
@@ -30,6 +30,47 @@ function capture(id: string, overrides: Partial<CaptureRow> = {}): CaptureRow {
     ...overrides,
   };
 }
+
+describe("ffmpegVersionLine", () => {
+  let dir: { path: string; remove: () => Promise<void> };
+
+  before(async () => {
+    dir = await tempDir();
+  });
+  after(async () => {
+    await dir.remove();
+  });
+
+  async function pathWithFfmpeg(name: string, body: string): Promise<NodeJS.ProcessEnv> {
+    const stubs = join(dir.path, name);
+    await mkdir(stubs);
+    await writeFile(join(stubs, "ffmpeg"), `#!/bin/sh\n${body}\n`);
+    await chmod(join(stubs, "ffmpeg"), 0o755);
+    return { PATH: stubs };
+  }
+
+  it("reads the first line", async () => {
+    assert.equal(await ffmpegVersionLine(await pathWithFfmpeg("works", 'echo "ffmpeg version 9.0.2"; echo "built with something"')), "ffmpeg version 9.0.2");
+  });
+
+  it("explains FFmpeg failing, as a render failure", async () => {
+    const env = await pathWithFfmpeg("fails", 'echo "broken install" >&2; exit 3');
+    await assert.rejects(ffmpegVersionLine(env), (error: Error) => error instanceof RenderError && /broken install/.test(error.message));
+  });
+
+  it("explains FFmpeg not being there", async () => {
+    await assert.rejects(ffmpegVersionLine({ PATH: join(dir.path, "nothing-here") }), RenderError);
+  });
+
+  it("gives up on an FFmpeg that hangs, and says so", async () => {
+    const env = await pathWithFfmpeg("hangs", "exec /bin/sleep 60");
+    await assert.rejects(ffmpegVersionLine(env, 50), (error: Error) => error instanceof RenderError && /didn't answer within 50 ms/.test(error.message));
+  });
+
+  it("lets a bug on the way there through as itself", async () => {
+    await assert.rejects(ffmpegVersionLine({ PATH: "a\0b" }), (error: Error) => error instanceof TypeError && !(error instanceof RenderError));
+  });
+});
 
 describe("selectFrames", () => {
   it("takes scheduled frames at quality, and lists everything it leaves out", () => {

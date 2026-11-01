@@ -11,6 +11,8 @@ const run = promisify(execFile);
 
 const SECONDS_PER_FRAME_BUDGET = 2;
 const MINIMUM_TIMEOUT_MS = 120_000;
+const VERSION_TIMEOUT_MS = 15_000;
+const VERSION_MAX_OUTPUT_BYTES = 1024 * 1024;
 
 export class RenderError extends Error {
   constructor(message: string, options?: ErrorOptions) {
@@ -84,6 +86,18 @@ async function verifyFrames(chosen: ReturnType<typeof selectFrames>, options: Re
   return { selected, exclusions };
 }
 
+/** The line a render's manifest records. It's one more process that can hang or fail, so it gets the same limits as the other. */
+export async function ffmpegVersionLine(env: NodeJS.ProcessEnv = process.env, timeoutMs: number = VERSION_TIMEOUT_MS): Promise<string> {
+  try {
+    const { stdout } = await run("ffmpeg", ["-hide_banner", "-version"], { env, timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: VERSION_MAX_OUTPUT_BYTES });
+    return stdout.split("\n")[0] ?? "unknown";
+  } catch (error) {
+    if (!isToolFailure(error)) throw error;
+    const detail = error.killed === true ? `it didn't answer within ${timeoutMs} ms` : error.stderr?.trim() || error.message;
+    throw new RenderError(`FFmpeg's version couldn't be read for the video's manifest: ${detail}. Check the FFmpeg install, then render again.`, { cause: error });
+  }
+}
+
 /** Where writing to a path would really land, following symlinks, including one that points at nothing yet. */
 async function whereItLeads(path: string): Promise<string> {
   try {
@@ -148,7 +162,7 @@ export async function render(options: RenderOptions): Promise<RenderManifest> {
     throw new RenderError(`FFmpeg failed to render ${options.outputPath}: ${error.stderr?.trim() || error.message}. The source frames are untouched.`, { cause: error });
   }
 
-  const { stdout } = await run("ffmpeg", ["-hide_banner", "-version"]);
+  const ffmpegVersion = await ffmpegVersionLine();
   const degraded = selected.filter((frame) => frame.quality_status !== "ok");
   const warnings: string[] = [];
   if (degraded.length > 0) warnings.push(`${degraded.length} frame(s) below the required size are included`);
@@ -166,7 +180,7 @@ export async function render(options: RenderOptions): Promise<RenderManifest> {
     height,
     frame_count: selected.length,
     duration_seconds: selected.length / options.fps,
-    ffmpeg_version: stdout.split("\n")[0] ?? "unknown",
+    ffmpeg_version: ffmpegVersion,
     transformations: filters,
     warnings,
     inputs: selected.map((frame) => ({ capture_id: frame.capture_id, slot_id: frame.slot_id, frame_received_at: frame.frame_received_at, quality_status: frame.quality_status, width: frame.width, height: frame.height, sha256: frame.sha256 })),
