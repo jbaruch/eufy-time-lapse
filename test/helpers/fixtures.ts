@@ -51,6 +51,58 @@ export const CAMERA: CameraInfo = {
   telemetry: { cellularRSSI: -85 },
 };
 
+/** A complete stored record, as a publish writes it. Manual, until a test says otherwise. */
+export function storedMetadata(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    schema_version: 1,
+    capture_id: "id",
+    project_id: "construction",
+    camera_id: "site-overview",
+    kind: "manual",
+    slot_id: null,
+    attempt_id: "attempt",
+    schedule_revision: null,
+    scheduled_at_utc: null,
+    request_started_at: "2026-05-01T12:59:50.000Z",
+    stream_started_at: "2026-05-01T12:59:55.000Z",
+    frame_received_at: "2026-05-01T13:00:00.000Z",
+    camera_captured_at: null,
+    camera_captured_at_note: "no trustworthy exposure time",
+    site_time_zone: "America/Chicago",
+    local_date: "2026-05-01",
+    source: "live_p2p",
+    capture_session_id: "session",
+    freshness_basis: "live stream",
+    cold_connection: true,
+    retained: false,
+    adapter: "mock",
+    adapter_version: "0.0.0",
+    camera_firmware: null,
+    connection_type: "cellular",
+    connection_path: "relay",
+    cellular_operator: null,
+    width: 3840,
+    height: 2160,
+    source_codec: "h265",
+    jpeg_bytes: 10,
+    sha256: "a".repeat(64),
+    quality_status: "ok",
+    attempt_count: 1,
+    connect_ms: 9000,
+    session_ms: 12000,
+    cleanup_status: "ok",
+    cleanup_detail: null,
+    battery_percent: 80,
+    battery_observed_at: "2026-05-01T12:50:00.000Z",
+    battery_note: null,
+    every_minutes: 5,
+    media_video_bytes: 450000,
+    media_audio_bytes: 0,
+    traffic_measurement_basis: "media payload only",
+    ...overrides,
+  };
+}
+
 export interface MockBehavior {
   open?: (signal: AbortSignal) => Promise<LiveSession>;
   teardown?: () => Promise<CleanupResult>;

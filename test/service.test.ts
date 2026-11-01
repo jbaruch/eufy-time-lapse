@@ -15,7 +15,7 @@ import type { CaptureMetadata } from "../src/stored-capture.ts";
 import { State } from "../src/state.ts";
 import type { AttemptRow, SlotState } from "../src/state.ts";
 import { buildCalibration, buildStatus } from "../src/status.ts";
-import { CAMERA, liveSession, MockAdapter, rawVideo, tempDir } from "./helpers/fixtures.ts";
+import { CAMERA, liveSession, MockAdapter, rawVideo, storedMetadata, tempDir } from "./helpers/fixtures.ts";
 import type { MockBehavior } from "./helpers/fixtures.ts";
 
 const SLOT_0800 = "construction/site-overview/2026-07-01T13:00:00.000Z";
@@ -733,7 +733,7 @@ describe("CaptureService", () => {
     const SCHEDULED_AT = "2026-05-01T13:00:00.000Z";
     const STORED_SLOT = `construction/site-overview/${SCHEDULED_AT}`;
     const STORED_REVISION = "revision-one";
-    const metadataFor = (captureId: string, overrides: Record<string, unknown> = {}) => ({ schema_version: 1, capture_id: captureId, project_id: "construction", camera_id: "site-overview", slot_id: null, schedule_revision: null, scheduled_at_utc: null, kind: "manual", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: FRAME.length, sha256: HASH, quality_status: "ok", ...overrides });
+    const metadataFor = (captureId: string, overrides: Record<string, unknown> = {}) => storedMetadata({ capture_id: captureId, jpeg_bytes: FRAME.length, sha256: HASH, ...overrides });
 
     const scheduledFor = (captureId: string, overrides: Record<string, unknown> = {}) => metadataFor(captureId, { kind: "scheduled", slot_id: STORED_SLOT, schedule_revision: STORED_REVISION, scheduled_at_utc: SCHEDULED_AT, frame_received_at: "2026-05-01T13:00:12.000Z", ...overrides });
 
@@ -757,6 +757,8 @@ describe("CaptureService", () => {
       ["metadata that isn't JSON", async (h) => spooled(h, "bad", "{ nope")],
       ["a capture id that isn't its directory's", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("elsewhere")))],
       ["a date that isn't its directory's", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { local_date: "2026-05-02" })))],
+      ["metadata claiming a retained frame", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { retained: true })))],
+      ["metadata that's lost part of its record", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { capture_session_id: undefined })))],
       ["metadata copied from another project", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { project_id: "other-site" })))],
       ["metadata copied from another camera", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { camera_id: "other-camera" })))],
       ["a manual frame claiming a slot", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { slot_id: STORED_SLOT })))],
@@ -1087,6 +1089,8 @@ describe("CaptureService", () => {
       ["metadata naming another slot", async (directory) => editMetadata(directory, { slot_id: "construction/site-overview/2026-07-01T14:00:00.000Z" })],
       ["metadata with another receive time", async (directory) => editMetadata(directory, { frame_received_at: "2026-07-01T13:00:09.000Z" })],
       ["metadata that isn't JSON", async (directory) => writeFile(join(directory, "metadata.json"), "{ nope")],
+      ["metadata claiming a retained frame", async (directory) => editMetadata(directory, { retained: true })],
+      ["metadata that's lost part of its record", async (directory) => editMetadata(directory, { attempt_id: undefined })],
       ["a frame that can't be read", async (directory) => { await rm(join(directory, "frame.jpg")); await mkdir(join(directory, "frame.jpg")); }],
       ["a frame linked in from elsewhere", async (directory) => { const away = `${directory}-away.jpg`; await rename(join(directory, "frame.jpg"), away); await symlink(away, join(directory, "frame.jpg")); }],
     ];
@@ -1372,7 +1376,7 @@ describe("CaptureService", () => {
   });
 
   describe("parseCaptureMetadata", () => {
-    const good = { schema_version: 1, capture_id: "id", project_id: "construction", camera_id: "site-overview", slot_id: "slot", schedule_revision: "revision-one", scheduled_at_utc: "2026-05-01T13:00:00.000Z", kind: "scheduled", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 10, sha256: "a".repeat(64), quality_status: "ok" };
+    const good = storedMetadata({ kind: "scheduled", slot_id: "slot", schedule_revision: "revision-one", scheduled_at_utc: "2026-05-01T13:00:00.000Z" });
 
     it("accepts what this build wrote", () => {
       assert.equal(parseCaptureMetadata(JSON.stringify(good))?.capture_id, "id");
@@ -1385,6 +1389,16 @@ describe("CaptureService", () => {
       ["an unknown quality", JSON.stringify({ ...good, quality_status: "great" })],
       ["a slot id of the wrong type", JSON.stringify({ ...good, slot_id: 5 })],
       ["an empty capture id", JSON.stringify({ ...good, capture_id: "" })],
+      ["only the fields recovery reads", JSON.stringify({ schema_version: 1, capture_id: "id", project_id: "construction", camera_id: "site-overview", slot_id: "slot", schedule_revision: "revision-one", scheduled_at_utc: "2026-05-01T13:00:00.000Z", kind: "scheduled", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 10, sha256: "a".repeat(64), quality_status: "ok" })],
+      ["no attempt id", JSON.stringify({ ...good, attempt_id: undefined })],
+      ["no capture session", JSON.stringify({ ...good, capture_session_id: undefined })],
+      ["no adapter", JSON.stringify({ ...good, adapter: undefined })],
+      ["a retained frame, which isn't a fresh one", JSON.stringify({ ...good, retained: true })],
+      ["another source", JSON.stringify({ ...good, source: "cloud_thumbnail" })],
+      ["an exposure time this stream can't know", JSON.stringify({ ...good, camera_captured_at: "2026-05-01T13:00:00.000Z" })],
+      ["a connection type that doesn't exist", JSON.stringify({ ...good, connection_type: "carrier-pigeon" })],
+      ["a try count of zero", JSON.stringify({ ...good, attempt_count: 0 })],
+      ["a session time that isn't a number", JSON.stringify({ ...good, session_ms: "soon" })],
       ["no schedule revision", JSON.stringify({ ...good, schedule_revision: undefined })],
       ["a schedule revision of the wrong type", JSON.stringify({ ...good, schedule_revision: 5 })],
       ["no scheduled time", JSON.stringify({ ...good, scheduled_at_utc: undefined })],

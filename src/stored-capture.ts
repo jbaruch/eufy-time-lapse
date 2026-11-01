@@ -5,6 +5,8 @@ import { isFileSystemError } from "./config.ts";
 import type { CameraLink } from "./probe/report.ts";
 import type { CaptureRow } from "./state.ts";
 
+const LOCAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
 /** Whose frames these are. A file copied in from elsewhere can be perfectly well formed. */
 export interface CaptureOwner {
   projectId: string;
@@ -60,42 +62,81 @@ export interface CaptureMetadata {
   traffic_measurement_basis: string;
 }
 
-/** The part of a capture's stored metadata that recovery reads, which is all this code vouches for. */
-export type AdoptableCapture = Pick<CaptureMetadata, "capture_id" | "project_id" | "camera_id" | "slot_id" | "schedule_revision" | "scheduled_at_utc" | "kind" | "local_date" | "frame_received_at" | "width" | "height" | "jpeg_bytes" | "sha256" | "quality_status">;
+type Check = (value: unknown) => boolean;
 
-/** Reads what recovery needs from stored metadata, or null if it isn't a version and shape this build understands. */
-export function parseCaptureMetadata(text: string): AdoptableCapture | null {
+const text: Check = (value) => typeof value === "string" && value.length > 0;
+const anyText: Check = (value) => typeof value === "string";
+const time: Check = (value) => typeof value === "string" && !Number.isNaN(Date.parse(value));
+const amount: Check = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0;
+const positiveWhole: Check = (value) => Number.isInteger(value) && (value as number) > 0;
+const orNull = (check: Check): Check => (value) => value === null || check(value);
+const oneOf = (...choices: readonly unknown[]): Check => (value) => choices.includes(value);
+
+/** Every field of the record. Typed by the interface, so a field added there won't compile until it's checked here. */
+const METADATA_SHAPE: Record<keyof CaptureMetadata, Check> = {
+  schema_version: oneOf(1),
+  capture_id: text,
+  project_id: text,
+  camera_id: text,
+  kind: oneOf("scheduled", "manual"),
+  slot_id: orNull(anyText),
+  attempt_id: text,
+  schedule_revision: orNull(anyText),
+  scheduled_at_utc: orNull(time),
+  request_started_at: time,
+  stream_started_at: orNull(time),
+  frame_received_at: time,
+  camera_captured_at: oneOf(null),
+  camera_captured_at_note: text,
+  site_time_zone: text,
+  local_date: (value) => typeof value === "string" && LOCAL_DATE.test(value),
+  source: oneOf("live_p2p"),
+  capture_session_id: text,
+  freshness_basis: text,
+  cold_connection: oneOf(true, false, null),
+  retained: oneOf(false),
+  adapter: text,
+  adapter_version: text,
+  camera_firmware: orNull(anyText),
+  connection_type: oneOf("cellular", "wifi", null),
+  connection_path: orNull(anyText),
+  cellular_operator: orNull(anyText),
+  width: positiveWhole,
+  height: positiveWhole,
+  source_codec: orNull(anyText),
+  jpeg_bytes: positiveWhole,
+  sha256: (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value),
+  quality_status: oneOf("ok", "degraded"),
+  attempt_count: positiveWhole,
+  connect_ms: orNull(amount),
+  session_ms: amount,
+  cleanup_status: text,
+  cleanup_detail: orNull(anyText),
+  battery_percent: orNull(amount),
+  battery_observed_at: orNull(time),
+  battery_note: orNull(anyText),
+  every_minutes: orNull(amount),
+  media_video_bytes: amount,
+  media_audio_bytes: amount,
+  traffic_measurement_basis: text,
+};
+
+/** The stored record, or null if it isn't a version and complete shape this build understands. */
+export function parseCaptureMetadata(content: string): CaptureMetadata | null {
   let value: unknown;
   try {
-    value = JSON.parse(text);
+    value = JSON.parse(content);
   } catch (error) {
     if (error instanceof SyntaxError) return null;
     throw error;
   }
   if (typeof value !== "object" || value === null) return null;
   const record = value as Record<string, unknown>;
-  const field = (key: string): string => (typeof record[key] === "string" ? record[key] : "");
-  const counts = ["width", "height", "jpeg_bytes"].every((key) => Number.isInteger(record[key]) && (record[key] as number) > 0);
-  const valid =
-    record.schema_version === 1 &&
-    field("capture_id").length > 0 &&
-    field("project_id").length > 0 &&
-    field("camera_id").length > 0 &&
-    /^\d{4}-\d{2}-\d{2}$/.test(field("local_date")) &&
-    !Number.isNaN(Date.parse(field("frame_received_at"))) &&
-    /^[0-9a-f]{64}$/.test(field("sha256")) &&
-    counts &&
-    (record.slot_id === null || typeof record.slot_id === "string") &&
-    (record.schedule_revision === null || typeof record.schedule_revision === "string") &&
-    (record.scheduled_at_utc === null || !Number.isNaN(Date.parse(field("scheduled_at_utc")))) &&
-    (record.kind === "scheduled" || record.kind === "manual") &&
-    (record.quality_status === "ok" || record.quality_status === "degraded");
-  return valid ? (record as unknown as AdoptableCapture) : null;
+  return Object.entries(METADATA_SHAPE).every(([field, check]) => check(record[field])) ? (record as unknown as CaptureMetadata) : null;
 }
 
 /** A name that can only be one directory. Dots and separators are how a stored value climbs out of the spool. */
 const SAFE_NAME = /^[\w-][\w.-]*$/;
-const LOCAL_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 export function spoolDay(owner: CaptureOwner, localDate: string): string {
   const [year, month, day] = localDate.split("-") as [string, string, string];
@@ -133,7 +174,7 @@ function frameMatches(frame: Buffer, facts: { jpeg_bytes: number; sha256: string
 }
 
 /** What's stored at a place in the spool, if its record, that place and its frame all agree, and it's this camera's. */
-export async function readStoredCapture(dataDir: string, relativeDir: string, captureId: string, localDate: string, owner: CaptureOwner): Promise<AdoptableCapture | null> {
+export async function readStoredCapture(dataDir: string, relativeDir: string, captureId: string, localDate: string, owner: CaptureOwner): Promise<CaptureMetadata | null> {
   if (!isItsOwnLocation(relativeDir, captureId, localDate, owner)) return null;
   const metadataFile = await readStoredFile(dataDir, join(relativeDir, "metadata.json"), "metadata");
   if ("problem" in metadataFile) return null;

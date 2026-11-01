@@ -15,7 +15,7 @@ import type { PolicyInput } from "./policy.ts";
 import type { CameraLink } from "./probe/report.ts";
 import { addDays, formatClock, isActiveForInterval, localParts, planDay } from "./schedule.ts";
 import { readStoredCapture, spoolDirectory, storedCaptureProblem } from "./stored-capture.ts";
-import type { AdoptableCapture, CaptureMetadata, CaptureOwner } from "./stored-capture.ts";
+import type { CaptureMetadata, CaptureOwner } from "./stored-capture.ts";
 import type { ScheduleConfig } from "./schedule.ts";
 import type { ServiceConfig } from "./service-config.ts";
 import type { AttemptRow, CaptureRow, SlotRow, State } from "./state.ts";
@@ -148,7 +148,7 @@ export class CaptureService {
   }
 
   /** Rebuilds a frame's slot if its row is gone, and marks the slot as having that frame. */
-  private finishRecoveredSlot(metadata: AdoptableCapture): void {
+  private finishRecoveredSlot(metadata: CaptureMetadata): void {
     const { slot_id: slotId, schedule_revision: revision, scheduled_at_utc: scheduled } = metadata;
     if (slotId === null || revision === null || scheduled === null) return;
     const scheduledAt = new Date(scheduled);
@@ -168,7 +168,7 @@ export class CaptureService {
   }
 
   /** What a frame's own record can show about its claim on a slot: a manual frame has none, and a scheduled one claims its own time's, after that time. */
-  private claimIsWellFormed(metadata: AdoptableCapture): boolean {
+  private claimIsWellFormed(metadata: CaptureMetadata): boolean {
     const { slot_id: slotId, schedule_revision: revision, scheduled_at_utc: scheduledAt } = metadata;
     if (metadata.kind === "manual") return slotId === null && revision === null && scheduledAt === null;
     if (slotId === null || revision === null || scheduledAt === null) return false;
@@ -182,7 +182,7 @@ export class CaptureService {
    * only leaves a frame unrecorded by dying while that slot is running. A slot with no row at all has nothing to compare
    * with: its row is rebuilt from the frame, so a lost row can't send the camera after a slot that already has one.
    */
-  private slotClaimHolds(metadata: AdoptableCapture): boolean {
+  private slotClaimHolds(metadata: CaptureMetadata): boolean {
     if (!this.claimIsWellFormed(metadata)) return false;
     const { slot_id: slotId, schedule_revision: revision, scheduled_at_utc: scheduledAt } = metadata;
     if (slotId === null) return true;
@@ -584,7 +584,7 @@ export class CaptureService {
     };
   }
 
-  private insertCaptureRow(metadata: AdoptableCapture, relativeDir: string): CaptureRow {
+  private insertCaptureRow(metadata: CaptureMetadata, relativeDir: string): CaptureRow {
     const row: CaptureRow = {
       capture_id: metadata.capture_id,
       slot_id: metadata.slot_id,

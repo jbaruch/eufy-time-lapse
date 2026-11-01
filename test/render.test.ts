@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { ffmpegVersionLine, outputSize, render, RenderError, selectFrames } from "../src/render.ts";
 import { State } from "../src/state.ts";
 import type { CaptureRow } from "../src/state.ts";
-import { tempDir } from "./helpers/fixtures.ts";
+import { storedMetadata, tempDir } from "./helpers/fixtures.ts";
 
 const run = promisify(execFile);
 
@@ -115,7 +115,7 @@ describe("render", () => {
 
   /** Stores a capture's record beside its frame and in the database, as the service does. */
   async function keep(target: State, row: CaptureRow): Promise<void> {
-    const metadata = { schema_version: 1, project_id: OWNER.projectId, camera_id: OWNER.cameraId, schedule_revision: null, scheduled_at_utc: null, capture_id: row.capture_id, slot_id: row.slot_id, kind: row.kind, local_date: row.local_date, frame_received_at: row.frame_received_at, width: row.width, height: row.height, jpeg_bytes: row.jpeg_bytes, sha256: row.sha256, quality_status: row.quality_status };
+    const metadata = storedMetadata({ project_id: OWNER.projectId, camera_id: OWNER.cameraId, capture_id: row.capture_id, slot_id: row.slot_id, kind: row.kind, local_date: row.local_date, frame_received_at: row.frame_received_at, width: row.width, height: row.height, jpeg_bytes: row.jpeg_bytes, sha256: row.sha256, quality_status: row.quality_status });
     await writeFile(join(dir.path, row.relative_dir, "metadata.json"), JSON.stringify(metadata));
     target.insertCapture(row);
   }
@@ -302,6 +302,8 @@ describe("render", () => {
       ["has metadata from another project", async (path) => editMetadata(path, { project_id: "other-site" }), /metadata file doesn't match/],
       ["has metadata from another camera", async (path) => editMetadata(path, { camera_id: "other-camera" }), /metadata file doesn't match/],
       ["has metadata naming another slot", async (path) => editMetadata(path, { slot_id: "another-slot" }), /metadata file doesn't match/],
+      ["has metadata claiming a retained frame", async (path) => editMetadata(path, { retained: true }), /metadata file doesn't match/],
+      ["has metadata that's lost part of its record", async (path) => editMetadata(path, { source: undefined }), /metadata file doesn't match/],
       ["has metadata with another receive time", async (path) => editMetadata(path, { frame_received_at: "2026-07-01T13:00:09.000Z" }), /metadata file doesn't match/],
       ["has its frame linked in from elsewhere", async (path) => { const away = `${outside()}/frame-${verified}.jpg`; await rename(path, away); await symlink(away, path); }, /frame file leads outside/],
       ["has its metadata linked in from elsewhere", async (path) => { const here = join(dirname(path), "metadata.json"); const away = `${outside()}/metadata-${verified}.json`; await rename(here, away); await symlink(away, here); }, /metadata file leads outside/],
