@@ -127,7 +127,8 @@ but spend battery where no slot count would show it.
 ### Deploy
 
 `scripts/deploy.sh [ssh-host] [remote-directory]` ships the committed tree, proves the copy by checksum, rebuilds,
-restarts, and waits for the host to report the new revision. `status` shows the running revision at any time.
+restarts, and waits for the host to report the new revision. `status` shows the running revision at any time. Before
+it changes anything, it refuses any file on the host the last deploy didn't ship, and names it.
 
 ## How it reaches the camera
 

@@ -138,6 +138,8 @@ describe("scripts/deploy.sh", () => {
     // The retry wait, so a test of it takes no real time.
     await executable(join(stubs, "sleep"), "exit 0");
     await executable(join(stubs, "sha256sum"), options.corrupt === true ? 'echo "0000  $1"' : 'exec shasum -a 256 "$@"');
+    // The real tar, then whatever a test wants to go wrong right after it.
+    await executable(join(stubs, "tar"), `PATH='${process.env.PATH ?? ""}' tar "$@"\nif [ -n "\${AFTER_TAR:-}" ]; then eval "$AFTER_TAR"; fi`);
     // Which locales a machine has installed varies, so every deploy test checks the one comm's input is sorted in.
     await executable(join(stubs, "comm"), `if [ "\${LC_ALL:-}" != "C" ]; then echo "comm ran outside the locale its input is sorted in" >&2; exit 1; fi\nPATH='${process.env.PATH ?? ""}' exec comm "$@"`);
     return { repo, host, log, env: { PATH: `${stubs}:${process.env.PATH ?? ""}`, DEPLOY_WAIT_SECONDS: "2" }, revision };
@@ -197,22 +199,109 @@ describe("scripts/deploy.sh", () => {
     assert.equal(await readFile(log, "utf8"), "");
   });
 
-  it("doesn't restart when the host has a file it can't account for, and names it", async () => {
+  it("refuses a file the last deploy didn't ship, names it, and changes nothing", async () => {
     const { repo, host, log, env } = await world();
     await writeFile(join(host, "surprise.txt"), "?");
     const result = await bash([script, "somehost", "app"], { cwd: repo, env });
     assert.equal(result.code, 1);
     assert.match(result.stderr, /surprise\.txt/);
+    assert.deepEqual(await readdir(host), ["surprise.txt"]);
     assert.equal(await readFile(log, "utf8"), "");
   });
 
-  it("doesn't restart when the host has a stray symlink, and names it", async () => {
+  it("refuses a file nested in a code directory, and neither loses it nor ships anything", async () => {
+    const { repo, host, log, env } = await world();
+    assert.equal((await bash([script, "somehost", "app"], { cwd: repo, env })).code, 0);
+    await mkdir(join(host, "src", "notes"));
+    await writeFile(join(host, "src", "notes", "mine.txt"), "keep me");
+    await writeFile(join(repo, "src", "cli.ts"), "// changed\n");
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-q", "-m", "change");
+    const calls = await readFile(log, "utf8");
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /src\/notes\/mine\.txt/);
+    assert.equal(await readFile(join(host, "src", "notes", "mine.txt"), "utf8"), "keep me");
+    assert.equal(await readFile(join(host, "src", "cli.ts"), "utf8"), "// code\n");
+    assert.equal(await readFile(log, "utf8"), calls);
+  });
+
+  it("refuses to overwrite a file at a shipped path that the last deploy didn't ship", async () => {
+    const { repo, host, log, env } = await world();
+    await writeFile(join(host, "compose.yaml"), "edited by hand\n");
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /compose\.yaml/);
+    assert.equal(await readFile(join(host, "compose.yaml"), "utf8"), "edited by hand\n");
+    assert.equal(await readFile(log, "utf8"), "");
+  });
+
+  it("doesn't restart when a file turns up during the deploy, and names it", async () => {
+    const { repo, log, env } = await world();
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env: { ...env, AFTER_TAR: 'echo "?" > arrived-late.txt' } });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /arrived-late\.txt/);
+    assert.equal(await readFile(log, "utf8"), "");
+  });
+
+  it("can run again after dying partway through unpacking", async () => {
+    const { repo, host, log, env } = await world();
+    await writeFile(join(repo, "going-away.txt"), "old\n");
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-q", "-m", "add");
+    assert.equal((await bash([script, "somehost", "app"], { cwd: repo, env })).code, 0);
+    await rm(join(repo, "going-away.txt"));
+    await writeFile(join(repo, "arriving.txt"), "new\n");
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-q", "-m", "swap");
+
+    const interrupted = await bash([script, "somehost", "app"], { cwd: repo, env: { ...env, AFTER_TAR: 'echo "the connection dropped" >&2; exit 1' } });
+    assert.notEqual(interrupted.code, 0);
+    assert.equal(await readFile(join(host, "arriving.txt"), "utf8"), "new\n", "unpacked before it died");
+
+    await writeFile(log, "");
+    const retried = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(retried.code, 0, retried.stderr);
+    assert.equal((await readdir(host)).includes("going-away.txt"), false);
+    assert.equal(await readFile(join(host, ".deployed-files"), "utf8"), "# eufy-time-lapse deployed files, schema_version=1\narriving.txt\ncompose.yaml\nsrc/cli.ts\n");
+    assert.match(await readFile(log, "utf8"), /compose up -d/);
+  });
+
+  it("removes a directory the removed files leave empty, and keeps one still in use", async () => {
+    const { repo, host, env } = await world();
+    await mkdir(join(repo, "src", "gone", "deeper"), { recursive: true });
+    await writeFile(join(repo, "src", "gone", "deeper", "old.ts"), "// old\n");
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-q", "-m", "add");
+    assert.equal((await bash([script, "somehost", "app"], { cwd: repo, env })).code, 0);
+    await rm(join(repo, "src", "gone"), { recursive: true });
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-q", "-m", "remove");
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 0, result.stderr);
+    assert.deepEqual(await readdir(join(host, "src")), ["cli.ts"]);
+  });
+
+  it("refuses a stray symlink, names it, and changes nothing", async () => {
     const { repo, host, log, env } = await world();
     await writeFile(join(host, "..", "override.yaml"), "services: {}\n");
     await symlink(join(host, "..", "override.yaml"), join(host, "compose.override.yaml"));
     const result = await bash([script, "somehost", "app"], { cwd: repo, env });
     assert.equal(result.code, 1);
     assert.match(result.stderr, /compose\.override\.yaml/);
+    assert.deepEqual(await readdir(host), ["compose.override.yaml"]);
+    assert.equal(await readFile(log, "utf8"), "");
+  });
+
+  it("refuses a commit that tracks a symlink, before reaching the host", async () => {
+    const { repo, host, log, env } = await world();
+    await symlink("compose.yaml", join(repo, "shortcut.yaml"));
+    await git(repo, "add", "-A");
+    await git(repo, "commit", "-q", "-m", "link");
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /shortcut\.yaml/);
+    assert.deepEqual(await readdir(host), []);
     assert.equal(await readFile(log, "utf8"), "");
   });
 
@@ -239,21 +328,55 @@ describe("scripts/deploy.sh", () => {
     assert.equal(await readFile(log, "utf8"), "");
   });
 
-  it("refuses a manifest entry that leads out through a symlink, and leaves what it points at", async () => {
+  for (const [name, entries] of [["an entry that leads through it", "link/keep.txt\n"], ["the link itself and a path through it", "link\nlink/keep.txt\n"]] as const) {
+    it(`refuses a symlink even when the manifest lists ${name}, and leaves what it points at`, async () => {
+      const { repo, host, log, env } = await world();
+      const outside = join(host, "..", "elsewhere");
+      await mkdir(outside);
+      await writeFile(join(outside, "keep.txt"), "keep me");
+      await symlink(outside, join(host, "link"));
+      await writeFile(join(host, ".deployed-files"), `# eufy-time-lapse deployed files, schema_version=1\n${entries}`);
+      const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+      assert.equal(result.code, 1);
+      assert.match(result.stderr, /symlinks or special files/);
+      assert.equal(await readFile(join(outside, "keep.txt"), "utf8"), "keep me");
+      assert.deepEqual((await readdir(host)).sort(), [".deployed-files", "link"]);
+      assert.equal(await readFile(log, "utf8"), "");
+    });
+  }
+
+  it("refuses a manifest that's a symlink, and writes nothing through it", async () => {
     const { repo, host, log, env } = await world();
-    const outside = join(host, "..", "elsewhere");
-    await mkdir(outside);
-    await writeFile(join(outside, "keep.txt"), "keep me");
-    await symlink(outside, join(host, "link"));
-    await writeFile(join(host, ".deployed-files"), "# eufy-time-lapse deployed files, schema_version=1\nlink/keep.txt\n");
+    const outside = join(host, "..", "someone-elses-file");
+    await writeFile(outside, "keep me");
+    await symlink(outside, join(host, ".deployed-files"));
     const result = await bash([script, "somehost", "app"], { cwd: repo, env });
     assert.equal(result.code, 1);
-    assert.match(result.stderr, /leads outside the project/);
-    assert.equal(await readFile(join(outside, "keep.txt"), "utf8"), "keep me");
+    assert.match(result.stderr, /isn't a regular file/);
+    assert.equal(await readFile(outside, "utf8"), "keep me");
+    assert.deepEqual(await readdir(host), [".deployed-files"]);
     assert.equal(await readFile(log, "utf8"), "");
   });
 
-  for (const [name, entry] of [["climbs out of the project", "../outside.txt"], ["reads as an option", "-rf"], ["is absolute", "/etc/hostname"], ["is in the data directory", "data/state.sqlite"], ["is the environment file", ".env"], ["is the manifest itself", ".deployed-files"]] as const) {
+  it("refuses a manifest that's a symlink to nowhere", async () => {
+    const { repo, host, log, env } = await world();
+    await symlink(join(host, "..", "not-there"), join(host, ".deployed-files"));
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /isn't a regular file/);
+    assert.equal(await readFile(log, "utf8"), "");
+  });
+
+  it("refuses a manifest that's a directory", async () => {
+    const { repo, host, log, env } = await world();
+    await mkdir(join(host, ".deployed-files"));
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /isn't a regular file/);
+    assert.equal(await readFile(log, "utf8"), "");
+  });
+
+  for (const [name, entry] of [["climbs out of the project", "../outside.txt"], ["reads as an option", "-rf"], ["is absolute", "/etc/hostname"], ["is in the data directory", "data/state.sqlite"], ["is the environment file", ".env"], ["is the manifest itself", ".deployed-files"], ["is the manifest's replacement", ".deployed-files.tmp"]] as const) {
     it(`refuses a manifest entry that ${name}, and touches nothing`, async () => {
       const { repo, host, log, env } = await world();
       const outside = join(host, "..", "outside.txt");
