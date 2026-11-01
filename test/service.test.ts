@@ -707,7 +707,7 @@ describe("CaptureService", () => {
   describe("crash recovery over the whole spool", () => {
     const FRAME = Buffer.from("not really a jpeg, but it has bytes");
     const HASH = createHash("sha256").update(FRAME).digest("hex");
-    const metadataFor = (captureId: string, overrides: Record<string, unknown> = {}) => ({ schema_version: 1, capture_id: captureId, slot_id: null, kind: "manual", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: FRAME.length, sha256: HASH, quality_status: "ok", ...overrides });
+    const metadataFor = (captureId: string, overrides: Record<string, unknown> = {}) => ({ schema_version: 1, capture_id: captureId, project_id: "construction", camera_id: "site-overview", slot_id: null, kind: "manual", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: FRAME.length, sha256: HASH, quality_status: "ok", ...overrides });
 
     async function spooled(h: { dataDir: string }, captureId: string, metadata: string, frame: Buffer | null = FRAME): Promise<void> {
       const directory = join(h.dataDir, "spool", "construction", "site-overview", "2026", "05", "01", captureId);
@@ -729,6 +729,8 @@ describe("CaptureService", () => {
       ["metadata that isn't JSON", async (h) => spooled(h, "bad", "{ nope")],
       ["a capture id that isn't its directory's", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("elsewhere")))],
       ["a date that isn't its directory's", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { local_date: "2026-05-02" })))],
+      ["metadata copied from another project", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { project_id: "other-site" })))],
+      ["metadata copied from another camera", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad", { camera_id: "other-camera" })))],
       ["no frame", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad")), null)],
       ["a frame of the wrong size", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad")), Buffer.from("short"))],
       ["a frame with the wrong hash", async (h) => spooled(h, "bad", JSON.stringify(metadataFor("bad")), Buffer.alloc(FRAME.length, 1))],
@@ -800,7 +802,7 @@ describe("CaptureService", () => {
   });
 
   describe("parseCaptureMetadata", () => {
-    const good = { schema_version: 1, capture_id: "id", slot_id: "slot", kind: "scheduled", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 10, sha256: "a".repeat(64), quality_status: "ok" };
+    const good = { schema_version: 1, capture_id: "id", project_id: "construction", camera_id: "site-overview", slot_id: "slot", kind: "scheduled", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 10, sha256: "a".repeat(64), quality_status: "ok" };
 
     it("accepts what this build wrote", () => {
       assert.equal(parseCaptureMetadata(JSON.stringify(good))?.capture_id, "id");
@@ -813,6 +815,8 @@ describe("CaptureService", () => {
       ["an unknown quality", JSON.stringify({ ...good, quality_status: "great" })],
       ["a slot id of the wrong type", JSON.stringify({ ...good, slot_id: 5 })],
       ["an empty capture id", JSON.stringify({ ...good, capture_id: "" })],
+      ["no project id", JSON.stringify({ ...good, project_id: undefined })],
+      ["a camera id of the wrong type", JSON.stringify({ ...good, camera_id: 5 })],
       ["a date in another format", JSON.stringify({ ...good, local_date: "May 1" })],
       ["a receive time that isn't a time", JSON.stringify({ ...good, frame_received_at: "soon" })],
       ["a hash that isn't SHA-256", JSON.stringify({ ...good, sha256: "abc" })],

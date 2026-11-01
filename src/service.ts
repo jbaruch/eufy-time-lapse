@@ -89,7 +89,7 @@ export interface CaptureMetadata {
 }
 
 /** The part of a capture's stored metadata that recovery reads, which is all this code vouches for. */
-export type AdoptableCapture = Pick<CaptureMetadata, "capture_id" | "slot_id" | "kind" | "local_date" | "frame_received_at" | "width" | "height" | "jpeg_bytes" | "sha256" | "quality_status">;
+export type AdoptableCapture = Pick<CaptureMetadata, "capture_id" | "project_id" | "camera_id" | "slot_id" | "kind" | "local_date" | "frame_received_at" | "width" | "height" | "jpeg_bytes" | "sha256" | "quality_status">;
 
 /** Reads what recovery needs from stored metadata, or null if it isn't a version and shape this build understands. */
 export function parseCaptureMetadata(text: string): AdoptableCapture | null {
@@ -107,6 +107,8 @@ export function parseCaptureMetadata(text: string): AdoptableCapture | null {
   const valid =
     record.schema_version === 1 &&
     field("capture_id").length > 0 &&
+    field("project_id").length > 0 &&
+    field("camera_id").length > 0 &&
     /^\d{4}-\d{2}-\d{2}$/.test(field("local_date")) &&
     !Number.isNaN(Date.parse(field("frame_received_at"))) &&
     /^[0-9a-f]{64}$/.test(field("sha256")) &&
@@ -234,6 +236,7 @@ export class CaptureService {
     try {
       const metadata = parseCaptureMetadata(await readFile(join(directory, "metadata.json"), "utf8"));
       if (metadata === null || metadata.capture_id !== captureId || metadata.local_date !== localDate) return null;
+      if (metadata.project_id !== this.config.project.id || metadata.camera_id !== this.config.camera.id) return null;
       const frame = await readFile(join(directory, "frame.jpg"));
       const matches = frame.length === metadata.jpeg_bytes && createHash("sha256").update(frame).digest("hex") === metadata.sha256;
       return matches ? metadata : null;
