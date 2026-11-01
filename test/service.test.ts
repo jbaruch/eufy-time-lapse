@@ -777,10 +777,39 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
-    it("says nothing before the window closes", async () => {
+    it("says nothing before the last slot's turn", async () => {
       const h = await harness();
-      await idleAt(h, AT_1800 - 3 * MINUTE);
+      await idleAt(h, AT_1800 - 6 * MINUTE);
       assert.deepEqual(reports(h), []);
+      h.state.close();
+    });
+
+    it("waits for the evening on a day with no slots, when nothing else holds it back", async () => {
+      const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
+      const today = WEEKDAYS[new Date(AT_0800).getUTCDay()];
+      const config = serviceConfig();
+      config.schedule = { ...config.schedule, days: config.schedule.days.filter((day) => day !== today) };
+      const h = await harness({ config });
+      await idleAt(h, AT_0800);
+      assert.deepEqual(reports(h), []);
+      await idleAt(h, AT_1800 - 4 * MINUTE);
+      assert.match(reports(h)[0] ?? "", /Frames: none planned\./);
+      h.state.close();
+    });
+
+    it("goes out as soon as the last slot is done", async () => {
+      const h = await harness();
+      await idleAt(h, AT_1800 - 5 * MINUTE + 30_000);
+      assert.equal(reports(h).length, 1);
+      h.state.close();
+    });
+
+    it("still goes out when the window runs to midnight, whose end the clock never reaches", async () => {
+      const config = serviceConfig();
+      config.schedule = { ...config.schedule, window_end_exclusive: "24:00" };
+      const h = await harness({ config });
+      await idleAt(h, AT_0800 + (15 * 60 + 56) * MINUTE);
+      assert.equal(reports(h).length, 1);
       h.state.close();
     });
 

@@ -150,7 +150,7 @@ in `data/config.json` keeps the flags and the verdicts in `status`, but never mo
 
 ## The daily report
 
-Once a day, after the last slot of the window, the service sends one message to the alert destination:
+Once a day, as soon as the window's last slot is done, the service sends one message to the alert destination:
 
 ```text
 Time-lapse, Mon Nov 2

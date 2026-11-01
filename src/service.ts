@@ -502,7 +502,8 @@ export class CaptureService {
     if (!this.config.alerts.daily_report) return;
     const now = this.now();
     const local = localParts(now, this.zone);
-    if (local.minutes < parseClock(this.config.schedule.window_end_exclusive)) return;
+    // From the last slot's turn, not the window's end: the clock never reaches a window ending at 24:00.
+    if (local.minutes < parseClock(this.config.schedule.window_end_exclusive) - this.config.schedule.grid_minutes) return;
     if (this.state.getFlag("daily_report_date") === local.date || this.state.hasUnfinishedSlotsOn(local.date)) return;
     if (this.dailyReportReadFor !== local.date) {
       // Cloud only, so it doesn't wake the camera. Without it, a day with no slots would have no reading at all.
