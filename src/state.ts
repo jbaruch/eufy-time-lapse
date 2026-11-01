@@ -306,12 +306,15 @@ export class State {
     return this.all<AttemptRow>("SELECT * FROM attempts WHERE started_at >= ? ORDER BY started_at", since);
   }
 
-  insertCapture(row: CaptureRow): void {
+  /** Saves a frame's row, or leaves the one already there under its id, and answers what's stored. Another frame taking the same slot still fails. */
+  insertCapture(row: CaptureRow): CaptureRow {
     this.db
       .prepare(`
         INSERT INTO captures (capture_id, slot_id, kind, local_date, frame_received_at, width, height, jpeg_bytes, sha256, quality_status, relative_dir, archive_status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (capture_id) DO NOTHING`)
       .run(row.capture_id, row.slot_id, row.kind, row.local_date, row.frame_received_at, row.width, row.height, row.jpeg_bytes, row.sha256, row.quality_status, row.relative_dir, row.archive_status, row.created_at);
+    return this.one<CaptureRow>("SELECT * FROM captures WHERE capture_id = ?", row.capture_id) as CaptureRow;
   }
 
   hasCapture(captureId: string): boolean {

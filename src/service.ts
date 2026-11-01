@@ -22,6 +22,8 @@ import type { AttemptRow, CaptureRow, SlotRow, State } from "./state.ts";
 
 const IDLE_WAKE_MS = 60_000;
 const SPOOL_TMP_KEEP_DAYS = 1;
+/** Everything that says what a frame is. When a row was written, and its archive state, don't. */
+const CAPTURE_ROW_IDENTITY = ["slot_id", "kind", "local_date", "frame_received_at", "width", "height", "jpeg_bytes", "sha256", "quality_status", "relative_dir"] as const;
 const ARCHIVE_DISABLED = "not_configured";
 
 export interface ServiceOptions {
@@ -600,7 +602,12 @@ export class CaptureService {
       archive_status: ARCHIVE_DISABLED,
       created_at: this.now().toISOString(),
     };
-    this.state.insertCapture(row);
+    // A service starting right now can adopt a frame in the moment after another process publishes it. The same frame gets
+    // the same row, and either order is fine. A different row under one id is something else entirely.
+    const stored = this.state.insertCapture(row);
+    if (CAPTURE_ROW_IDENTITY.some((field) => stored[field] !== row[field])) {
+      throw new Error(`Capture ${row.capture_id} already has a different row in the database, so its record wasn't saved. The frame is at ${relativeDir}.`);
+    }
     return row;
   }
 

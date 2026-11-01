@@ -13,7 +13,7 @@ import { CaptureService, scheduleRevision } from "../src/service.ts";
 import { parseCaptureMetadata } from "../src/stored-capture.ts";
 import type { CaptureMetadata } from "../src/stored-capture.ts";
 import { State } from "../src/state.ts";
-import type { AttemptRow, SlotState } from "../src/state.ts";
+import type { AttemptRow, CaptureRow, SlotState } from "../src/state.ts";
 import { buildCalibration, buildStatus } from "../src/status.ts";
 import { CAMERA, liveSession, MockAdapter, rawVideo, storedMetadata, tempDir } from "./helpers/fixtures.ts";
 import type { MockBehavior } from "./helpers/fixtures.ts";
@@ -1332,6 +1332,62 @@ describe("CaptureService", () => {
       h.adapter.setDiscoverFailure(cloudDown);
       await runAt(h, [5]);
       assert.equal(h.state.getSlot(AT(5))?.reason, "battery_unknown");
+      h.state.close();
+    });
+  });
+
+  describe("a service adopting a frame in the moment after another process published it", () => {
+    /** Runs `adopt` with the row at the point the publisher is about to save it: after the rename, before the insert. */
+    function interleave(h: Awaited<ReturnType<typeof harness>>, adopt: (row: CaptureRow, insert: (row: CaptureRow) => CaptureRow) => void): void {
+      const insert = h.state.insertCapture.bind(h.state);
+      h.state.insertCapture = (row) => {
+        h.state.insertCapture = insert;
+        adopt(row, insert);
+        return insert(row);
+      };
+    }
+
+    it("finishes the capture normally when the other row is the same frame's", async () => {
+      const h = await harness();
+      interleave(h, (row, insert) => {
+        insert({ ...row, created_at: "2026-07-01T13:00:30.000Z" });
+      });
+      const result = await h.service.captureManual(h.signal);
+      assert.equal(result instanceof CaptureFailure, false);
+      assert.equal(h.state.allCaptures().length, 1);
+      assert.deepEqual(await readdir(join(h.dataDir, "work")), [], "and its work files are gone");
+      h.state.close();
+    });
+
+    it("finishes a scheduled slot the same way", async () => {
+      const h = await harness();
+      interleave(h, (row, insert) => {
+        insert({ ...row, created_at: "2026-07-01T13:00:30.000Z" });
+      });
+      await runAt(h, [0]);
+      assert.equal(h.state.getSlot(SLOT_0800)?.state, "captured");
+      assert.equal(h.state.allCaptures().length, 1);
+      h.state.close();
+    });
+
+    it("takes a really different row under that id as the alarm it is, and leaves the frame", async () => {
+      const h = await harness();
+      interleave(h, (row, insert) => {
+        insert({ ...row, sha256: "b".repeat(64) });
+      });
+      await assert.rejects(h.service.captureManual(h.signal), /already has a different row/);
+      const [row] = h.state.allCaptures();
+      assert.ok(row !== undefined);
+      await access(join(h.dataDir, row.relative_dir, "frame.jpg"));
+      h.state.close();
+    });
+
+    it("still refuses a second frame for one slot", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      const [row] = h.state.allCaptures();
+      assert.ok(row !== undefined);
+      assert.throws(() => h.state.insertCapture({ ...row, capture_id: "another-frame" }), /UNIQUE/);
       h.state.close();
     });
   });
