@@ -16,9 +16,19 @@ jobs:
         with:
           # The secret scan reads the whole history.
           fetch-depth: 0
+      # The Dockerfile holds the one Node pin, and Dependabot renews it there.
+      - name: Read the production Node version
+        id: node
+        run: |
+          version="$(sed -n 's/^FROM node:\([0-9.]*\)-.*/\1/p' Dockerfile)"
+          if [ -z "$version" ]; then
+            echo "Couldn't find the Node version in the Dockerfile." >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 26.12.1
+          node-version: ${{ steps.node.outputs.version }}
           cache: npm
       - name: Scan for secrets
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
