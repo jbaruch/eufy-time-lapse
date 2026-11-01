@@ -1,15 +1,16 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { access, mkdir, readdir, readFile, utimes, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
 import type { AuthState, CameraInfo, LiveSession } from "../src/adapters/adapter.ts";
 import { DEFAULT_SERVICE_CONFIG } from "../src/service-config.ts";
 import type { ServiceConfig } from "../src/service-config.ts";
-import { CaptureService, scheduleRevision } from "../src/service.ts";
+import { CaptureService, parseCaptureMetadata, scheduleRevision } from "../src/service.ts";
 import type { CaptureMetadata } from "../src/service.ts";
 import { State } from "../src/state.ts";
+import type { AttemptRow } from "../src/state.ts";
 import { buildCalibration, buildStatus } from "../src/status.ts";
 import { CAMERA, liveSession, MockAdapter, rawVideo, tempDir } from "./helpers/fixtures.ts";
 
@@ -63,7 +64,7 @@ describe("CaptureService", () => {
     restart: () => { service: CaptureService; state: State };
   }
 
-  async function harness(options: { open?: () => Promise<LiveSession>; camera?: CameraInfo; auth?: AuthState[]; config?: ServiceConfig; startMs?: number } = {}): Promise<Harness> {
+  async function harness(options: { open?: (signal: AbortSignal) => Promise<LiveSession>; camera?: CameraInfo; auth?: AuthState[]; config?: ServiceConfig; startMs?: number } = {}): Promise<Harness> {
     run += 1;
     const dataDir = join(root.path, `data-${run}`);
     await mkdir(dataDir, { recursive: true });
@@ -279,7 +280,7 @@ describe("CaptureService", () => {
 
     it("marks a slot interrupted mid-capture as unknown, and doesn't retake it", async () => {
       const h = await harness();
-      await h.service.tick(h.signal).catch(() => {});
+      await h.service.tick(h.signal);
       h.state.setSlot(SLOT_0800, "running");
       h.state.close();
 
@@ -461,6 +462,205 @@ describe("CaptureService", () => {
     });
   });
 
+  describe("a battery override", () => {
+    const fresh20 = (): CameraInfo => reading(20, new Date(AT_0800).toISOString());
+
+    it("doesn't survive to cancel a later pause", async () => {
+      const h = await harness({ camera: fresh20() });
+      h.state.setFlag("battery_override", "2026-06-01T00:00:00Z");
+      await runAt(h, [0]);
+      assert.equal(h.adapter.opens, 0, "the pause is enforced");
+      assert.equal(h.state.getSlot(SLOT_0800)?.reason, "battery_low");
+      assert.equal(h.state.getFlag("battery_override"), undefined);
+      assert.ok(h.notices.some((notice) => notice.includes("low battery")));
+      h.state.close();
+    });
+
+    it("still covers the pause it was given for", async () => {
+      const h = await harness({ camera: fresh20() });
+      await runAt(h, [0]);
+      h.state.setFlag("battery_override", "2026-07-01T13:01:00Z");
+      // At this charge, the tier runs one slot an hour.
+      await runAt(h, [60]);
+      assert.equal(h.adapter.opens, 1);
+      assert.equal(h.state.getFlag("battery_override"), "2026-07-01T13:01:00Z");
+      h.state.close();
+    });
+  });
+
+  describe("a slot's deadline", () => {
+    it("counts from the scheduled time, so a late slot that can't finish doesn't touch the camera", async () => {
+      const h = await harness();
+      h.state.setFlag("first_started_at", new Date(AT_0800 - MINUTE).toISOString());
+      h.clock.ms = AT_0800 + 150_000;
+      await h.service.tick(h.signal);
+      assert.equal(h.adapter.opens, 0);
+      assert.deepEqual([h.state.getSlot(SLOT_0800)?.state, h.state.getSlot(SLOT_0800)?.reason], ["missed", "deadline_passed"]);
+      assert.deepEqual(h.state.attemptsSince("2000-01-01"), [], "and charges nothing");
+      h.state.close();
+    });
+
+    it("gives a late slot only the retries that fit", async () => {
+      let h: Awaited<ReturnType<typeof harness>> | undefined;
+      const slow = async (): Promise<LiveSession> => {
+        if (h !== undefined) h.clock.ms += 40_000;
+        return await hangUp();
+      };
+      h = await harness({ open: slow });
+      h.state.setFlag("first_started_at", new Date(AT_0800 - MINUTE).toISOString());
+      h.clock.ms = AT_0800 + 100_000;
+      await h.service.tick(h.signal);
+      assert.equal(h.adapter.opens, 1, "another try needs 45 s, and 40 s are left");
+      h.state.close();
+    });
+  });
+
+  describe("camera-contact accounting", () => {
+    it("keeps the reservation charged when a capture dies unexpectedly", async () => {
+      const h = await harness({
+        open: async () => {
+          throw new TypeError("a bug, not a camera problem");
+        },
+      });
+      await assert.rejects(h.service.tick(h.signal), TypeError);
+      assert.equal(h.state.sessionUsedMs("2026-07-01"), 120_000);
+      h.state.close();
+    });
+
+    it("gives the reservation back when the lock proves no try began", async () => {
+      const h = await harness();
+      await writeFile(join(h.dataDir, "camera.lock"), "another-holder");
+      await utimes(join(h.dataDir, "camera.lock"), new Date(), new Date());
+      await h.service.tick(h.signal);
+      assert.equal(h.adapter.opens, 0);
+      assert.equal(h.state.getSlot(SLOT_0800)?.reason, "camera_busy");
+      assert.equal(h.state.sessionUsedMs("2026-07-01"), 0);
+      h.state.close();
+    });
+
+    it("swaps a reservation for its tries in one step", () => {
+      const state = new State(join(root.path, "settle.sqlite"));
+      const row = (attempt_id: string, session_ms: number | null): AttemptRow => ({ attempt_id, slot_id: "slot", started_at: "2026-07-01T13:00:00.000Z", status: session_ms === null ? "running" : "captured", reason: null, phase: null, connection_path: null, connect_ms: null, session_ms, reserved_ms: 120_000, video_bytes: 0, audio_bytes: 0, cleanup_status: null, stream_stop: null, width: null, height: null, budget_day: "2026-07-01", budget_month: "2026-07" });
+      state.insertAttempt(row("reservation", null));
+      assert.equal(state.sessionUsedMs("2026-07-01"), 120_000);
+      state.settleReservation("reservation", [row("first", 9_000), row("first-retry-1", 10_000)]);
+      assert.equal(state.sessionUsedMs("2026-07-01"), 19_000);
+      // A failure inside the swap leaves the reservation standing.
+      state.insertAttempt(row("reservation-2", null));
+      assert.throws(() => state.settleReservation("reservation-2", [row("next", 1), { ...row("bad", 1), status: null as unknown as string }]));
+      assert.equal(state.sessionUsedMs("2026-07-01"), 139_000);
+      state.close();
+    });
+
+    it("stops the capture and keeps the charge when the camera lock is lost", async (t) => {
+      t.mock.timers.enable({ apis: ["setInterval"] });
+      let dataDir = "";
+      const h = await harness({
+        open: async (signal) => {
+          await rm(join(dataDir, "camera.lock"));
+          t.mock.timers.tick(5_000);
+          while (!signal.aborted) await new Promise((resolve) => setImmediate(resolve));
+          throw new CaptureFailure("aborted", "connect", "stopped");
+        },
+      });
+      dataDir = h.dataDir;
+      await h.service.tick(h.signal);
+      assert.deepEqual([h.state.getSlot(SLOT_0800)?.state, h.state.getSlot(SLOT_0800)?.reason], ["missed", "lock_lost"]);
+      assert.equal(h.state.sessionUsedMs("2026-07-01"), 120_000);
+      h.state.close();
+    });
+  });
+
+  describe("a schedule change", () => {
+    it("retires what the old plan left pending, and keeps what already happened", () => {
+      const state = new State(join(root.path, "plan.sqlite"));
+      const planned = (minute: number) => ({ scheduledAt: new Date(AT_0800 + minute * MINUTE), localDate: "2026-07-01", localTime: `08:${String(minute).padStart(2, "0")}`, localMinutes: 480 + minute, nonexistent: false });
+      state.materialize([planned(0), planned(1), planned(2)], "p/c", "old");
+      const [done] = [`p/c/${planned(0).scheduledAt.toISOString()}`];
+      state.setSlot(done, "captured");
+      state.materialize([planned(0), planned(5)], "p/c", "new");
+      assert.equal(state.getSlot(`p/c/${planned(1).scheduledAt.toISOString()}`), undefined, "not in the new plan");
+      assert.equal(state.getSlot(done)?.state, "captured");
+      assert.equal(state.getSlot(`p/c/${planned(5).scheduledAt.toISOString()}`)?.state, "pending");
+      state.close();
+    });
+  });
+
+  describe("crash recovery over the whole spool", () => {
+    const metadataFor = (captureId: string, overrides: Record<string, unknown> = {}) => ({ schema_version: 1, capture_id: captureId, slot_id: null, kind: "manual", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 10, sha256: "abc", quality_status: "ok", ...overrides });
+
+    async function spooled(h: { dataDir: string }, captureId: string, content: string): Promise<void> {
+      const directory = join(h.dataDir, "spool", "construction", "site-overview", "2026", "05", "01", captureId);
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "metadata.json"), content);
+    }
+
+    it("adopts a frame published two months before the restart", async () => {
+      const h = await harness();
+      await spooled(h, "from-may", JSON.stringify(metadataFor("from-may")));
+      await h.service.reconcile();
+      assert.equal(h.state.hasCapture("from-may"), true);
+      h.state.close();
+    });
+
+    it("leaves unreadable metadata alone, alerts about it, and carries on", async () => {
+      const h = await harness();
+      await spooled(h, "newer-schema", JSON.stringify(metadataFor("newer-schema", { schema_version: 2 })));
+      await spooled(h, "not-json", "{ nope");
+      await spooled(h, "good", JSON.stringify(metadataFor("good")));
+      await h.service.reconcile();
+      assert.equal(h.state.hasCapture("newer-schema"), false);
+      assert.equal(h.state.hasCapture("not-json"), false);
+      assert.equal(h.state.hasCapture("good"), true);
+      assert.ok(h.notices.some((notice) => notice.includes("2 frame(s) in the spool have unreadable metadata")), h.notices.join("; "));
+      h.state.close();
+    });
+  });
+
+  describe("parseCaptureMetadata", () => {
+    const good = { schema_version: 1, capture_id: "id", slot_id: "slot", kind: "scheduled", local_date: "2026-05-01", frame_received_at: "2026-05-01T13:00:00.000Z", width: 3840, height: 2160, jpeg_bytes: 10, sha256: "abc", quality_status: "ok" };
+
+    it("accepts what this build wrote", () => {
+      assert.equal(parseCaptureMetadata(JSON.stringify(good))?.capture_id, "id");
+    });
+
+    const bad: Array<[string, string]> = [
+      ["another schema version", JSON.stringify({ ...good, schema_version: 2 })],
+      ["no schema version", JSON.stringify({ ...good, schema_version: undefined })],
+      ["a width that isn't a number", JSON.stringify({ ...good, width: "3840" })],
+      ["an unknown quality", JSON.stringify({ ...good, quality_status: "great" })],
+      ["a slot id of the wrong type", JSON.stringify({ ...good, slot_id: 5 })],
+      ["JSON that isn't an object", "[1]"],
+      ["null", "null"],
+      ["text that isn't JSON", "{ nope"],
+    ];
+    for (const [name, text] of bad) {
+      it(`refuses ${name}`, () => {
+        assert.equal(parseCaptureMetadata(text), null);
+      });
+    }
+  });
+
+  describe("an unexpected crash", () => {
+    it("says so before dying, and says when it's over", async () => {
+      let healthy = false;
+      const h = await harness({
+        open: async () => {
+          if (healthy) return await fresh();
+          throw new TypeError("a bug");
+        },
+      });
+      await assert.rejects(h.service.run(h.signal), TypeError);
+      assert.ok(h.notices.some((notice) => notice.includes("TypeError") && notice.includes("restarts by itself")), h.notices.join("; "));
+      assert.equal(h.notices.join().includes("a bug"), false, "no error text, which could quote anything, in a notification");
+      healthy = true;
+      h.clock.ms = AT_0800 + 5 * MINUTE;
+      await h.service.tick(h.signal);
+      assert.ok(h.notices.some((notice) => notice.includes("recovered") && notice.includes("restarts by itself")), h.notices.join("; "));
+      h.state.close();
+    });
+  });
+
   describe("first-try drift", () => {
     const small = { alerts: { ...DEFAULT_SERVICE_CONFIG.alerts, first_try_window: 4 } };
 
@@ -490,6 +690,16 @@ describe("CaptureService", () => {
       await runAt(h, [0]);
       assert.equal(h.notices.some((notice) => notice.includes("first try")), false);
       h.state.close();
+    });
+
+    it("judges only scheduled slots, so a manual capture can't move it", () => {
+      const state = new State(join(root.path, "first-tries.sqlite"));
+      const row = (attempt_id: string, slot_id: string | null): AttemptRow => ({ attempt_id, slot_id, started_at: "2026-07-01T13:00:00.000Z", status: "failed", reason: null, phase: null, connection_path: null, connect_ms: null, session_ms: 1, reserved_ms: 1, video_bytes: 0, audio_bytes: 0, cleanup_status: null, stream_stop: null, width: null, height: null, budget_day: "2026-07-01", budget_month: "2026-07" });
+      state.insertAttempt(row("slot-try", "slot"));
+      state.insertAttempt(row("slot-try-retry-1", "slot"));
+      state.insertAttempt(row("manual-try", null));
+      assert.deepEqual(state.recentFirstTries(10).map((attempt) => attempt.attempt_id), ["slot-try"]);
+      state.close();
     });
   });
 

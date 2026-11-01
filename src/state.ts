@@ -181,8 +181,23 @@ export class State {
     return this.db.prepare(sql).get(...params) as T | undefined;
   }
 
-  /** Adds plan entries that don't exist yet. A slot's id never changes, so rerunning this is harmless. */
+  private inTransaction(work: () => void): void {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      work();
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    this.db.exec("COMMIT");
+  }
+
+  /**
+   * Adds plan entries that don't exist yet. A slot's id never changes, so rerunning this is harmless.
+   * A schedule change retires what the old plan left pending, so the service never acts on a slot the current plan lacks.
+   */
   materialize(slots: readonly PlannedSlot[], slotIdPrefix: string, scheduleRevision: string): void {
+    this.db.prepare("DELETE FROM slots WHERE state = 'pending' AND schedule_revision != ?").run(scheduleRevision);
     const insert = this.db.prepare(`
       INSERT OR IGNORE INTO slots (slot_id, scheduled_at_utc, local_date, local_time, local_minutes, schedule_revision, state, reason, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`);
@@ -235,6 +250,14 @@ export class State {
 
   deleteAttempt(attemptId: string): void {
     this.db.prepare("DELETE FROM attempts WHERE attempt_id = ?").run(attemptId);
+  }
+
+  /** Swaps a reservation for the tries it paid for in one step, so no crash can leave the day's budget uncharged. */
+  settleReservation(reservationId: string, attempts: readonly AttemptRow[]): void {
+    this.inTransaction(() => {
+      this.deleteAttempt(reservationId);
+      for (const attempt of attempts) this.insertAttempt(attempt);
+    });
   }
 
   /** An attempt with no recorded time was interrupted, so it's charged its full reservation. A restart can't reset this. */
@@ -303,9 +326,9 @@ export class State {
   }
 
   /** Scheduled slots whose time has come, newest first. Grid slots a battery tier passed over don't count as outcomes here. */
-  /** Newest first. A retry's attempt id carries a -retry- suffix. */
+  /** Scheduled slots' first tries, newest first. A retry's attempt id carries a -retry- suffix, and a manual capture has no slot. */
   recentFirstTries(limit: number): AttemptRow[] {
-    return this.all<AttemptRow>("SELECT * FROM attempts WHERE attempt_id NOT LIKE '%-retry-%' AND status != 'running' ORDER BY started_at DESC LIMIT ?", limit);
+    return this.all<AttemptRow>("SELECT * FROM attempts WHERE slot_id IS NOT NULL AND attempt_id NOT LIKE '%-retry-%' AND status != 'running' ORDER BY started_at DESC LIMIT ?", limit);
   }
 
   recentOutcomes(limit: number): SlotRow[] {

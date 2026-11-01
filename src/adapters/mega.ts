@@ -34,6 +34,9 @@ const CAMERA_MODEL_PREFIX = "T86P2";
 const P2P_IDLE_MS = 5_000;
 const CLOSE_POLL_MS = 100;
 const SWEEP_INTERVAL_MS = 5_000;
+const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set(["ENETUNREACH", "ENETDOWN", "EHOSTUNREACH", "EHOSTDOWN", "ENOTFOUND", "EAI_AGAIN", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE"]);
+/** What the pinned SDK says when it can't set up a session. test/mega-adapter.test.ts holds these wordings. */
+const SDK_CONNECT_FAILURE = /^P2P connect timeout for |^station .* is not in the device list$|^no P2P endpoint \(p2p_did\) for station /;
 const TELEMETRY_NAME = /signal|rssi|band|cellular|network|lte|charging|solar|power|quality/i;
 const TELEMETRY_EXCLUDED = /imei|iccid|imsi|mac|ssid|serial|ip_?addr/i;
 
@@ -135,8 +138,26 @@ function readTelemetry(device: MegaDevice): Record<string, string | number | boo
   return telemetry;
 }
 
+function cloudUnreachable(error: Error, phase: FailurePhase): CaptureFailure {
+  return new CaptureFailure("camera_unreachable", phase, `Eufy's cloud can't be reached right now (${error.message}). Check this host's internet connection. The next slot tries again by itself.`, { cause: error });
+}
+
 function authFailure(error: Error): CaptureFailure {
   return new CaptureFailure("auth_required", "auth", `Eufy login failed: ${error.message}. Check the Eufy credentials, then run the login command.`, { cause: error });
+}
+
+/** The network being down, however Node reports it. */
+function isNetworkError(error: unknown): error is Error {
+  // fetch's own report. The cause varies, the message doesn't.
+  if (error instanceof TypeError && error.message === "fetch failed") return true;
+  return error instanceof Error && NETWORK_ERROR_CODES.has((error as NodeJS.ErrnoException).code ?? "");
+}
+
+/** Eufy's cloud having a bad moment, as opposed to refusing this account. */
+function isTransientApiError(error: unknown): error is MegaApiError {
+  if (!(error instanceof MegaApiError)) return false;
+  const { status } = error;
+  return status === undefined || status >= 500 || status === 408 || status === 429;
 }
 
 function isCameraError(error: unknown): error is Error {
@@ -146,10 +167,9 @@ function isCameraError(error: unknown): error is Error {
     error instanceof StationKeyUnavailableError ||
     error instanceof CameraDisabledError ||
     error instanceof MegaApiError ||
-    // How fetch reports the network being down. The cause varies, the message doesn't.
-    (error instanceof TypeError && error.message === "fetch failed") ||
-    // The SDK rejects a timed-out connect with a plain Error. Bugs arrive as TypeError and the like.
-    (error instanceof Error && error.name === "Error")
+    isNetworkError(error) ||
+    // The SDK rejects these as plain Errors, so their wording is all there is to go on. A bug propagates instead.
+    (error instanceof Error && error.name === "Error" && SDK_CONNECT_FAILURE.test(error.message))
   );
 }
 
@@ -196,6 +216,8 @@ export class MegaAdapter implements CameraAdapter {
       else if ("verifyCode" in input) result = await this.client.submitVerifyCode(input.verifyCode);
       else result = await this.client.solveCaptcha(input.captcha.code);
     } catch (error) {
+      // Only a real refusal means a person has to log in. An outage mustn't stop captures until someone does.
+      if (isNetworkError(error) || isTransientApiError(error)) throw cloudUnreachable(error, "auth");
       if (error instanceof MegaApiError || error instanceof SessionExpiredError) throw authFailure(error);
       throw error;
     }
@@ -215,6 +237,16 @@ export class MegaAdapter implements CameraAdapter {
     this.loginNeeded = false;
   }
 
+  private async deviceFor(key: string): Promise<MegaDevice> {
+    try {
+      return await this.client.getDevice(key);
+    } catch (error) {
+      if (error instanceof SessionExpiredError) throw authFailure(error);
+      if (isCameraError(error)) throw cloudUnreachable(error, "discovery");
+      throw error;
+    }
+  }
+
   async discoverCamera(preferredKey?: string): Promise<CameraInfo> {
     await this.restoreLogin();
     let listed: Array<{ sn: string; model: string }>;
@@ -222,23 +254,26 @@ export class MegaAdapter implements CameraAdapter {
       listed = await this.client.getDevices();
     } catch (error) {
       if (error instanceof SessionExpiredError) throw authFailure(error);
+      if (isCameraError(error)) throw cloudUnreachable(error, "discovery");
       throw error;
     }
     const matches = listed.filter((device) => (preferredKey === undefined ? device.model.startsWith(CAMERA_MODEL_PREFIX) : device.sn === preferredKey));
     const seen = listed.map((device) => device.model).join(", ") || "no devices";
     const [match, ...others] = matches;
     if (match === undefined) {
+      // The SDK reports an empty list when it can't reach the cloud at all, not an error.
+      const offline = listed.length === 0 ? "Check this host's internet connection first: an outage looks the same as an empty account. " : "";
       throw new CaptureFailure(
         "camera_not_found",
         "discovery",
-        `No matching ${CAMERA_MODEL_PREFIX} on this account (it sees: ${seen}). If this is a separate account, share the camera to it from the owner account, then accept the invitation in the eufy app while logged in as that account.`,
+        `${offline}No matching ${CAMERA_MODEL_PREFIX} on this account (it sees: ${seen}). If this is a separate account, share the camera to it from the owner account, then accept the invitation in the eufy app while logged in as that account.`,
       );
     }
     if (others.length > 0) {
       throw new CaptureFailure("camera_not_found", "discovery", `This account sees ${matches.length} ${CAMERA_MODEL_PREFIX} cameras. Set EUFY_CAMERA_SERIAL to pick one.`);
     }
     this.registerSecret(match.sn);
-    const device = await this.client.getDevice(match.sn);
+    const device = await this.deviceFor(match.sn);
     this.registerSecret(device.stationSn);
     return {
       key: match.sn,
@@ -267,7 +302,7 @@ export class MegaAdapter implements CameraAdapter {
     this.relayUsed = false;
     await this.restoreLogin();
 
-    const device = await this.client.getDevice(cameraKey);
+    const device = await this.deviceFor(cameraKey);
     const camera = device.camera?.();
     if (camera?.live === undefined) {
       throw new CaptureFailure("camera_unreachable", "stream_start", "The SDK exposes no live video path for this camera.");

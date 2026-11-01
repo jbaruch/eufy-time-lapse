@@ -8,17 +8,16 @@ import type { Notify } from "./alerts.ts";
 import { TRAFFIC_BASIS } from "./capture/acquire.ts";
 import type { AttemptRecord } from "./capture/acquire.ts";
 import { abortableSleep, captureSlot } from "./capture/slot.ts";
-import { CameraLockHeldError, withCameraLock } from "./lock.ts";
+import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "./lock.ts";
 import { dataBudgetSpent, decide, nextBatteryPaused, reservedSessionMs, sessionBudgetSpent } from "./policy.ts";
 import type { PolicyInput } from "./policy.ts";
 import type { CameraLink } from "./probe/report.ts";
 import { addDays, isActiveForInterval, localParts, planDay } from "./schedule.ts";
 import type { ScheduleConfig } from "./schedule.ts";
 import type { ServiceConfig } from "./service-config.ts";
-import type { CaptureRow, SlotRow, State } from "./state.ts";
+import type { AttemptRow, CaptureRow, SlotRow, State } from "./state.ts";
 
 const IDLE_WAKE_MS = 60_000;
-const SPOOL_ADOPT_DAYS = 3;
 const ARCHIVE_DISABLED = "not_configured";
 
 export interface ServiceOptions {
@@ -87,6 +86,29 @@ export interface CaptureMetadata {
   traffic_measurement_basis: string;
 }
 
+/** Reads a capture's stored metadata, or null if it isn't a version and shape this build understands. */
+export function parseCaptureMetadata(text: string): CaptureMetadata | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    if (error instanceof SyntaxError) return null;
+    throw error;
+  }
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const strings = ["capture_id", "local_date", "frame_received_at", "sha256"].every((key) => typeof record[key] === "string");
+  const numbers = ["width", "height", "jpeg_bytes"].every((key) => typeof record[key] === "number");
+  const valid =
+    record.schema_version === 1 &&
+    strings &&
+    numbers &&
+    (record.slot_id === null || typeof record.slot_id === "string") &&
+    (record.kind === "scheduled" || record.kind === "manual") &&
+    (record.quality_status === "ok" || record.quality_status === "degraded");
+  return valid ? (record as unknown as CaptureMetadata) : null;
+}
+
 export function scheduleConfigOf(config: ServiceConfig): ScheduleConfig {
   return {
     siteTimeZone: config.project.site_time_zone,
@@ -146,27 +168,52 @@ export class CaptureService {
     await this.pruneDiagnostics();
   }
 
+  /** The whole spool, however long the service was down. A year of frames is one directory walk at startup. */
   private async adoptPublishedFrames(): Promise<void> {
-    const today = localParts(this.now(), this.zone).date;
-    for (let back = 0; back < SPOOL_ADOPT_DAYS; back += 1) {
-      const relativeDay = this.spoolDay(addDays(today, -back));
-      let entries: string[];
-      try {
-        entries = await readdir(join(this.options.dataDir, relativeDay));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw error;
-      }
-      for (const captureId of entries) {
-        if (this.state.hasCapture(captureId)) continue;
-        const relativeDir = join(relativeDay, captureId);
-        const metadata = JSON.parse(await readFile(join(this.options.dataDir, relativeDir, "metadata.json"), "utf8")) as CaptureMetadata;
-        this.insertCaptureRow(metadata, relativeDir);
-        if (metadata.slot_id !== null) {
-          this.state.setSlot(metadata.slot_id, metadata.quality_status === "ok" ? "captured" : "captured_degraded", { captureId });
+    const root = join("spool", this.config.project.id, this.config.camera.id);
+    const unreadable: string[] = [];
+    for (const year of await this.subdirectories(root)) {
+      for (const month of await this.subdirectories(join(root, year))) {
+        for (const day of await this.subdirectories(join(root, year, month))) {
+          const relativeDay = join(root, year, month, day);
+          for (const captureId of await this.subdirectories(relativeDay)) {
+            if (this.state.hasCapture(captureId)) continue;
+            const relativeDir = join(relativeDay, captureId);
+            const metadata = await this.readMetadata(relativeDir);
+            if (metadata === null) {
+              unreadable.push(relativeDir);
+              continue;
+            }
+            this.insertCaptureRow(metadata, relativeDir);
+            if (metadata.slot_id !== null) {
+              this.state.setSlot(metadata.slot_id, metadata.quality_status === "ok" ? "captured" : "captured_degraded", { captureId });
+            }
+            this.state.addEvent("capture_adopted", captureId);
+          }
         }
-        this.state.addEvent("capture_adopted", captureId);
       }
+    }
+    // Left in place for a person: one bad file must not stop capture, and frames are never deleted.
+    for (const relativeDir of unreadable) this.state.addEvent("capture_unreadable", relativeDir);
+    await this.alerts.set("spool_unreadable", unreadable.length > 0, `${unreadable.length} frame(s) in the spool have unreadable metadata and aren't in the database, starting with ${unreadable[0] ?? ""}`);
+  }
+
+  private async subdirectories(relativePath: string): Promise<string[]> {
+    try {
+      const entries = await readdir(join(this.options.dataDir, relativePath), { withFileTypes: true });
+      return entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+  }
+
+  private async readMetadata(relativeDir: string): Promise<CaptureMetadata | null> {
+    try {
+      return parseCaptureMetadata(await readFile(join(this.options.dataDir, relativeDir, "metadata.json"), "utf8"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
     }
   }
 
@@ -225,6 +272,7 @@ export class CaptureService {
     const due = this.state.duePending(now);
     if (due !== undefined) {
       await this.processSlot(due, signal);
+      await this.alerts.clear("service_crashed");
       return 0;
     }
     const next = this.state.nextPending(now);
@@ -232,12 +280,18 @@ export class CaptureService {
   }
 
   async run(signal: AbortSignal): Promise<void> {
-    await this.reconcile();
-    while (!signal.aborted) {
-      // No catch-all: an unexpected error should crash this process. The restart policy brings it back,
-      // and reconcile records the interrupted slot, which beats limping on in an unknown state.
-      const waitMs = await this.tick(signal);
-      if (waitMs > 0) await this.sleep(waitMs, signal);
+    try {
+      await this.reconcile();
+      while (!signal.aborted) {
+        // No swallowing here: an unexpected error should crash this process. The restart policy brings it back,
+        // and reconcile records the interrupted slot, which beats limping on in an unknown state.
+        const waitMs = await this.tick(signal);
+        if (waitMs > 0) await this.sleep(waitMs, signal);
+      }
+    } catch (error) {
+      // A crash that keeps recurring would otherwise die before any slot's alert. The tracker dedupes across restarts.
+      await this.alerts.raise("service_crashed", `the service stopped on an unexpected ${error instanceof Error ? error.name : "error"} and restarts by itself. If this repeats, read the container log`);
+      throw error;
     }
     await this.adapter?.shutdown();
   }
@@ -261,13 +315,14 @@ export class CaptureService {
       this.camera = await this.adapter.discoverCamera(this.camera?.key ?? this.options.cameraSerial);
       return this.camera.battery;
     } catch (error) {
-      if (error instanceof CaptureFailure && error.reason === "auth_required") {
+      // Anything but a failure the adapter recognised is a bug, and should crash rather than limp on.
+      if (!(error instanceof CaptureFailure)) throw error;
+      if (error.reason === "auth_required") {
         this.state.setFlag("auth_required", error.message);
         await this.adapter?.shutdown();
         this.adapter = undefined;
         return null;
       }
-      if (!(error instanceof Error)) throw error;
       // The cloud being unreachable is a reason to skip a reading. The capture attempt reports its own failure.
       this.state.addEvent("camera_read_failed", error.message);
       this.options.log(`could not read camera state: ${error.message}`);
@@ -292,7 +347,8 @@ export class CaptureService {
     const batteryPaused = nextBatteryPaused(wasPaused, percent, this.config.battery);
     if (batteryPaused !== wasPaused) {
       this.state.setFlag("battery_paused", batteryPaused ? String(percent) : null);
-      if (!batteryPaused) this.state.setFlag("battery_override", null);
+      // An override covers the pause it was given for. A later pause has to be enforced.
+      this.state.setFlag("battery_override", null);
       this.state.addEvent(batteryPaused ? "battery_pause" : "battery_resume", String(percent));
     }
 
@@ -335,6 +391,15 @@ export class CaptureService {
   private async captureForSlot(slot: SlotRow, adapter: CameraAdapter, camera: CameraInfo, reading: BatteryReading | null, everyMinutes: number, signal: AbortSignal): Promise<void> {
     const startedAt = this.now();
     const local = localParts(startedAt, this.zone);
+    const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup, slot_deadline_seconds: deadline } = this.config.capture;
+    // The deadline counts from the slot's scheduled time, not from whenever the service got to it.
+    const remainingMs = Date.parse(slot.scheduled_at_utc) + deadline * 1000 - startedAt.getTime();
+    if (remainingMs < (acquire + cleanup) * 1000) {
+      this.state.setSlot(slot.slot_id, "missed", { reason: "deadline_passed", everyMinutes });
+      this.options.log(`${slot.local_date} ${slot.local_time}: missed: too late for a try to finish inside the slot's deadline`);
+      await this.syncFailureAlert();
+      return;
+    }
     const workKey = slot.scheduled_at_utc.replace(/[^0-9A-Z]/g, "");
     const reservationId = `reservation-${workKey}`;
     // Charged in full if the process dies mid-capture, so a crash can't reset the day's budget.
@@ -363,36 +428,43 @@ export class CaptureService {
     let result: Awaited<ReturnType<typeof captureSlot>>;
     try {
       await mkdir(join(this.options.dataDir, "work"), { recursive: true });
-      result = await withCameraLock(this.lockPath, () =>
+      result = await withCameraLock(this.lockPath, (lockLost) =>
         captureSlot({
           adapter,
           cameraKey: camera.key,
           slotDir,
-          acquisitionTimeoutMs: this.config.capture.acquisition_timeout_seconds * 1000,
-          cleanupTimeoutMs: this.config.capture.cleanup_timeout_seconds * 1000,
+          acquisitionTimeoutMs: acquire * 1000,
+          cleanupTimeoutMs: cleanup * 1000,
           targetKeyframes: this.config.capture.target_keyframes,
           minWidth: this.options.minWidth,
           minHeight: this.options.minHeight,
           maxTries: this.config.capture.max_attempts,
           retryDelayMs: this.config.capture.retry_delay_seconds * 1000,
-          slotDeadlineMs: this.config.capture.slot_deadline_seconds * 1000,
-          signal,
+          slotDeadlineMs: remainingMs,
+          signal: AbortSignal.any([signal, lockLost]),
           log: this.options.log,
           sleep: this.sleep,
           now: this.now,
         }),
       );
     } catch (error) {
-      this.state.deleteAttempt(reservationId);
-      if (!(error instanceof CameraLockHeldError)) throw error;
-      this.state.setSlot(slot.slot_id, "skipped_policy", { reason: "camera_busy" });
-      this.options.log(`skipped ${slot.local_date} ${slot.local_time}: the camera lock is held`);
+      if (error instanceof CameraLockHeldError) {
+        // The one case that proves no try began, so the only one that gives the reservation back.
+        this.state.deleteAttempt(reservationId);
+        this.state.setSlot(slot.slot_id, "skipped_policy", { reason: "camera_busy" });
+        this.options.log(`skipped ${slot.local_date} ${slot.local_time}: the camera lock is held`);
+        return;
+      }
+      if (!(error instanceof CameraLockLostError)) throw error;
+      this.state.setSlot(slot.slot_id, "missed", { reason: "lock_lost", everyMinutes });
+      this.state.addEvent("lock_lost", error.message);
+      this.options.log(`${slot.local_date} ${slot.local_time}: missed: ${error.message}`);
+      await this.syncFailureAlert();
       return;
     }
 
-    this.state.deleteAttempt(reservationId);
     const { chosen, otherTries } = result;
-    for (const record of [chosen, ...otherTries]) this.recordAttempt(record, slot.slot_id, local.date);
+    this.state.settleReservation(reservationId, [chosen, ...otherTries].map((record) => this.attemptRow(record, slot.slot_id, local.date)));
 
     const cleanupFault = [chosen, ...otherTries].find((record) => record.cleanup.status !== "ok");
     await this.alerts.set("cleanup_failed", cleanupFault !== undefined, `the camera connection may not have closed: ${cleanupFault?.cleanup.detail ?? ""}`);
@@ -420,8 +492,8 @@ export class CaptureService {
     await this.syncFailureAlert();
   }
 
-  private recordAttempt(record: AttemptRecord, slotId: string | null, localDate: string): void {
-    this.state.insertAttempt({
+  private attemptRow(record: AttemptRecord, slotId: string | null, localDate: string): AttemptRow {
+    return {
       attempt_id: record.attempt_id,
       slot_id: slotId,
       started_at: record.timing.request_started_at,
@@ -440,7 +512,7 @@ export class CaptureService {
       height: record.frame?.height ?? null,
       budget_day: localDate,
       budget_month: localDate.slice(0, 7),
-    });
+    };
   }
 
   private insertCaptureRow(metadata: CaptureMetadata, relativeDir: string): CaptureRow {
@@ -569,13 +641,15 @@ export class CaptureService {
   async captureManual(signal: AbortSignal): Promise<CaptureRow | CaptureFailure> {
     const reading = await this.readCamera();
     if (this.adapter === undefined || this.camera === undefined) {
-      return new CaptureFailure("auth_required", "auth", this.state.getFlag("auth_required") ?? "The camera can't be reached right now.");
+      const needsLogin = this.state.getFlag("auth_required");
+      if (needsLogin !== undefined) return new CaptureFailure("auth_required", "auth", needsLogin);
+      return new CaptureFailure("camera_unreachable", "discovery", "The camera can't be reached right now. The log line above says why.");
     }
     const adapter = this.adapter;
     const camera = this.camera;
     const local = localParts(this.now(), this.zone);
     const key = `manual-${randomUUID()}`;
-    const result = await withCameraLock(this.lockPath, () =>
+    const result = await withCameraLock(this.lockPath, (lockLost) =>
       captureSlot({
         adapter,
         cameraKey: camera.key,
@@ -588,13 +662,13 @@ export class CaptureService {
         maxTries: 1,
         retryDelayMs: 0,
         slotDeadlineMs: this.config.capture.slot_deadline_seconds * 1000,
-        signal,
+        signal: AbortSignal.any([signal, lockLost]),
         log: this.options.log,
         sleep: this.sleep,
         now: this.now,
       }),
     );
-    this.recordAttempt(result.chosen, null, local.date);
+    this.state.insertAttempt(this.attemptRow(result.chosen, null, local.date));
     if (result.chosen.frame === null) {
       return new CaptureFailure(result.chosen.failure?.reason ?? "capture_timeout", result.chosen.failure?.phase ?? "first_media", result.chosen.failure?.message ?? "No frame arrived.");
     }

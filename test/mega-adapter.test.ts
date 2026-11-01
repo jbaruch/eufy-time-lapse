@@ -489,3 +489,97 @@ describe("the pinned SDK still has what the adapter calls", () => {
     assert.deepEqual([LoginStatus.Ok, LoginStatus.Captcha, LoginStatus.TwoFactor], ["ok", "captcha", "2fa"]);
   });
 });
+
+describe("MegaAdapter, telling an outage from a refusal from a bug", () => {
+  const rejectLogin = (error: Error): { client: FakeClient; adapter: MegaAdapter } => {
+    const { client, adapter } = setup();
+    client.login = async () => {
+      throw error;
+    };
+    return { client, adapter };
+  };
+  const reasonOf = async (work: Promise<unknown>): Promise<string> => {
+    try {
+      await work;
+    } catch (error) {
+      if (error instanceof CaptureFailure) return error.reason;
+      throw error;
+    }
+    return "no failure";
+  };
+
+  for (const status of [500, 502, 503, 429, 408]) {
+    it(`doesn't ask for a login over a ${status} from Eufy, since that would stop captures until someone logged in`, async () => {
+      const { adapter } = rejectLogin(new MegaApiError("login failed", 1, status));
+      assert.equal(await reasonOf(adapter.authenticate()), "camera_unreachable");
+    });
+  }
+
+  for (const status of [400, 401, 403]) {
+    it(`asks for a login over a ${status}`, async () => {
+      const { adapter } = rejectLogin(new MegaApiError("login failed", 1, status));
+      assert.equal(await reasonOf(adapter.authenticate()), "auth_required");
+    });
+  }
+
+  it("treats a dead network at login as an outage", async () => {
+    const { adapter } = rejectLogin(new TypeError("fetch failed"));
+    assert.equal(await reasonOf(adapter.authenticate()), "camera_unreachable");
+  });
+
+  it("treats a socket-level network error at login as an outage", async () => {
+    const { adapter } = rejectLogin(Object.assign(new Error("getaddrinfo"), { code: "EAI_AGAIN" }));
+    assert.equal(await reasonOf(adapter.authenticate()), "camera_unreachable");
+  });
+
+  it("lets a bug at login propagate", async () => {
+    const { adapter } = rejectLogin(new RangeError("a bug"));
+    await assert.rejects(adapter.authenticate(), RangeError);
+  });
+
+  it("names the internet connection first when the device list comes back empty, which is how the SDK reports being offline", async () => {
+    const { client, adapter } = setup();
+    client.devices = [];
+    await assert.rejects(adapter.discoverCamera(), (error: CaptureFailure) => error.reason === "camera_not_found" && error.message.startsWith("Check this host's internet connection"));
+  });
+
+  it("doesn't blame the connection when the account can see other devices", async () => {
+    const { client, adapter } = setup();
+    client.devices = [{ sn: "OTHER", model: "T8200" }];
+    await assert.rejects(adapter.discoverCamera(), (error: CaptureFailure) => error.reason === "camera_not_found" && !error.message.includes("internet"));
+  });
+
+  it("treats an unreachable cloud during discovery as an outage", async () => {
+    const { client, adapter } = setup();
+    client.getDevices = async () => {
+      throw new TypeError("fetch failed");
+    };
+    assert.equal(await reasonOf(adapter.discoverCamera()), "camera_unreachable");
+  });
+
+  it("treats a dead network between attempts as an outage, not a crash", async () => {
+    const { client, adapter } = setup();
+    client.getDevice = async () => {
+      throw new TypeError("fetch failed");
+    };
+    assert.equal(await reasonOf(adapter.openLiveSession(SERIAL, openSignal())), "camera_unreachable");
+  });
+
+  for (const message of ["P2P connect timeout for SN (relay: request)", "station SN is not in the device list", "no P2P endpoint (p2p_did) for station SN"]) {
+    it(`recognises the SDK's plain error "${message}" as a camera failure`, async () => {
+      const { client, adapter } = setup();
+      client.connect = async () => {
+        throw new Error(message);
+      };
+      assert.equal(await reasonOf(adapter.openLiveSession(SERIAL, openSignal())), "camera_unreachable");
+    });
+  }
+
+  it("lets any other plain error from a connect propagate, because that's a bug", async () => {
+    const { client, adapter } = setup();
+    client.connect = async () => {
+      throw new Error("something nobody expected");
+    };
+    await assert.rejects(adapter.openLiveSession(SERIAL, openSignal()), /something nobody expected/);
+  });
+});

@@ -11,7 +11,7 @@ import { createMegaClient, MegaAdapter } from "./adapters/mega.ts";
 import { createNotifier } from "./alerts.ts";
 import { ConfigError, loadConfig, loadSettings } from "./config.ts";
 import type { AppConfig, AppSettings } from "./config.ts";
-import { CameraLockHeldError, withCameraLock } from "./lock.ts";
+import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "./lock.ts";
 import { runLogin } from "./login.ts";
 import { createRedactingLogger, Redactor } from "./logging.ts";
 import { runProbe } from "./probe/probe.ts";
@@ -175,7 +175,7 @@ async function commandProbe(paths: Paths, args: string[]): Promise<number> {
   const signal = terminationSignal();
 
   try {
-    const report = await withCameraLock(join(paths.dataDir, "camera.lock"), () =>
+    const report = await withCameraLock(join(paths.dataDir, "camera.lock"), (lockLost) =>
       runProbe({
         adapter,
         runId,
@@ -194,7 +194,7 @@ async function commandProbe(paths: Paths, args: string[]): Promise<number> {
         minHeight: config.minHeight,
         link: config.link,
         operator: config.operator,
-        signal,
+        signal: AbortSignal.any([signal, lockLost]),
         log,
       }),
     );
@@ -318,9 +318,13 @@ function commandResume(paths: Paths, args: string[]): number {
   const state = new State(paths.databasePath);
   state.setFlag("operator_paused", null);
   if (values["battery-checked"] === true) {
-    // An explicit override, logged as one. It doesn't turn an old reading into a fresh one.
-    state.setFlag("battery_override", new Date().toISOString());
-    state.addEvent("battery_override", "operator checked the charge and resumed");
+    if (state.getFlag("battery_paused") === undefined) {
+      log("no low-battery pause is active, so there's nothing to override");
+    } else {
+      // An explicit override, logged as one. It doesn't turn an old reading into a fresh one.
+      state.setFlag("battery_override", new Date().toISOString());
+      state.addEvent("battery_override", "operator checked the charge and resumed");
+    }
   }
   state.addEvent("operator_resume", "resumed by operator");
   state.close();
@@ -415,7 +419,7 @@ if (import.meta.main) {
     // The SDK can leave sockets and timers behind after shutdown, so the exit has to be explicit.
     process.exit(await main(process.argv.slice(2)));
   } catch (error) {
-    if (!(error instanceof ConfigError || error instanceof CaptureFailure || error instanceof CameraLockHeldError || error instanceof RenderError)) throw error;
+    if (!(error instanceof ConfigError || error instanceof CaptureFailure || error instanceof CameraLockHeldError || error instanceof CameraLockLostError || error instanceof RenderError)) throw error;
     process.stderr.write(`${error.message}\n`);
     process.exit(error instanceof ConfigError ? EXIT_USAGE : EXIT_FAILURE);
   }
