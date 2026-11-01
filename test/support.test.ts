@@ -526,12 +526,19 @@ describe("runLogin", () => {
     await dir.remove();
   });
 
-  it("spends a login's own code on making the device trusted", async () => {
+  it("asks for a second code to earn trust, because the login's own can't", async () => {
     const adapter = new MockAdapter({ auth: [{ status: "tfa_required" }, { status: "authenticated" }], trusted: false });
-    const result = await runLogin({ adapter, dataDir: dir.path, prompt: async () => "123456", log: () => {} });
-    assert.deepEqual(adapter.trustCodes, ["123456"]);
-    assert.equal(adapter.renewals, 0, "the code is already spent on the login it came with");
+    const codes = ["111111", "222222"];
+    const result = await runLogin({ adapter, dataDir: dir.path, prompt: async () => codes.shift() ?? "", log: () => {} });
+    assert.deepEqual(adapter.trustCodes, ["222222"]);
     assert.equal(result.device_trusted, true);
+  });
+
+  it("says so when the trust step fails, and still shows the camera", async () => {
+    const adapter = new MockAdapter({ trusted: false, trustOutcome: false });
+    const result = await runLogin({ adapter, dataDir: dir.path, prompt: async () => "123456", log: () => {} });
+    assert.equal(result.device_trusted, false);
+    assert.equal(result.camera.model, "T86P2");
   });
 
   it("asks nothing of a restored login on a trusted device", async () => {
@@ -544,11 +551,11 @@ describe("runLogin", () => {
       },
       log: () => {},
     });
-    assert.equal(adapter.renewals, 0);
+    assert.deepEqual(adapter.trustCodes, []);
     assert.equal(result.device_trusted, true);
   });
 
-  it("logs in afresh to earn trust when a restored login never used a code", async () => {
+  it("earns trust for a restored login too", async () => {
     const adapter = new MockAdapter({ trusted: false });
     const prompts: string[] = [];
     const result = await runLogin({
@@ -560,7 +567,7 @@ describe("runLogin", () => {
       },
       log: () => {},
     });
-    assert.equal(adapter.renewals, 1);
+    assert.deepEqual(adapter.trustCodes, ["654321"]);
     assert.equal(prompts.length, 1);
     assert.equal(result.device_trusted, true);
   });
@@ -568,7 +575,7 @@ describe("runLogin", () => {
   it("carries on without trust when Eufy can't say", async () => {
     const adapter = new MockAdapter({ trusted: null });
     const result = await runLogin({ adapter, dataDir: dir.path, prompt: async () => "", log: () => {} });
-    assert.equal(adapter.renewals, 0);
+    assert.deepEqual(adapter.trustCodes, []);
     assert.equal(result.device_trusted, null);
   });
 

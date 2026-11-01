@@ -15,6 +15,7 @@ import {
   StationUnreachableError,
 } from "@mega-yfue/eufy-sdk";
 import { CaptureFailure } from "./adapter.ts";
+import { earnDeviceTrust } from "./device-trust.ts";
 import { CELLULAR_POLICY, CONNECT_POLICY_VERSION, setConnectPolicy } from "./p2p-policy.ts";
 import type {
   AbortCause,
@@ -48,20 +49,13 @@ export type MegaLoginResult = { status: "ok" } | { status: "captcha"; image: str
 
 const SESSION_FILE = "eufy-sdk-session.json";
 const RENEWAL_DIR_PREFIX = "renewal-";
-const MAX_RENEWAL_STEPS = 5;
 const TRUST_LIST_TIMEOUT_MS = 20_000;
 
 /** The SDK's HTTP client, for the trusted-device calls it doesn't wrap. test/mega-adapter.test.ts checks these against the real class. */
 export interface SecurityApi {
-  securityAppPost(path: string, body: Record<string, unknown>): Promise<unknown>;
   securityAppHost(): string;
   baseHeaders(): Record<string, string>;
   authTokenHeaders(): Record<string, string>;
-}
-
-/** Eufy checks the code here too, and answers 26050 for a wrong one. */
-export async function addTrustedDevice(api: SecurityApi, code: string): Promise<void> {
-  await api.securityAppPost("/v1/app/trust_device/add", { verify_code: code, transaction: `${Date.now()}` });
 }
 
 /** A plain GET, unlike the add. Going around the SDK also keeps a surprise 401 from clearing the session. */
@@ -108,7 +102,7 @@ export interface MegaClient {
   connectStation(serial: string, signal?: AbortSignal): Promise<void>;
   getP2pSessions(): Map<string, unknown>;
   deviceState(serial: string): { lastSeenMs?: number };
-  addTrustedDevice(code: string): Promise<void>;
+  earnTrust(answer: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<void>;
   isTrustedDevice(): Promise<boolean>;
   disconnect(): Promise<void>;
 }
@@ -164,7 +158,12 @@ export function createMegaClient(options: MegaClientOptions): MegaClient {
   const api = client.api as unknown as SecurityApi;
   // Device's capability accessors are generated at runtime, which TypeScript can't relate to this shape.
   return Object.assign(client, {
-    addTrustedDevice: (code: string): Promise<void> => addTrustedDevice(api, code),
+    earnTrust: (answer: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<void> => {
+      const { openudid: deviceId, phone_model: phoneModel } = api.baseHeaders();
+      // Trust earned under any other id would land on a device that doesn't exist.
+      if (deviceId === undefined || phoneModel === undefined) throw new Error("The SDK's headers no longer say which device this is. Check test/mega-adapter.test.ts against the pinned SDK.");
+      return earnDeviceTrust({ host: api.securityAppHost(), email: options.email, password: options.password, country: options.country, deviceId, phoneModel }, answer);
+    },
     isTrustedDevice: (): Promise<boolean> => isTrustedDevice(api),
   }) as unknown as MegaClient;
 }
@@ -362,26 +361,18 @@ export class MegaAdapter implements CameraAdapter {
     }
   }
 
-  async renewLogin(answer?: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<LoginRenewal> {
+  async renewLogin(): Promise<LoginRenewal> {
     if (this.loginStore === undefined) throw new Error("This adapter has no login store to renew.");
     const { sessionDir, createClient } = this.loginStore;
     await this.removeLeftoverRenewals(sessionDir);
     const directory = await mkdtemp(join(sessionDir, RENEWAL_DIR_PREFIX));
     const spare = createClient(directory);
     try {
-      let input: AuthInput | undefined;
-      for (let step = 0; step < MAX_RENEWAL_STEPS; step += 1) {
-        const state = await this.loginStep(spare, input);
-        if (state.status === "authenticated") {
-          const trusted = input !== undefined && "verifyCode" in input ? await this.trust(spare, input.verifyCode) : null;
-          await this.closeClient(spare);
-          await rename(join(directory, SESSION_FILE), join(sessionDir, SESSION_FILE));
-          return { status: "renewed", trusted };
-        }
-        if (answer === undefined) return { status: "needs_person" };
-        input = await answer(state);
-      }
-      return { status: "needs_person" };
+      const state = await this.loginStep(spare);
+      if (state.status !== "authenticated") return { status: "needs_person" };
+      await this.closeClient(spare);
+      await rename(join(directory, SESSION_FILE), join(sessionDir, SESSION_FILE));
+      return { status: "renewed" };
     } finally {
       await this.closeClient(spare);
       await rm(directory, { recursive: true, force: true });
@@ -398,17 +389,13 @@ export class MegaAdapter implements CameraAdapter {
     }
   }
 
-  async trustDevice(code: string): Promise<boolean> {
-    return this.trust(this.client, code);
-  }
-
-  private async trust(client: MegaClient, code: string): Promise<boolean> {
+  async trustDevice(answer: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<boolean> {
     try {
-      await client.addTrustedDevice(code);
-      return await client.isTrustedDevice();
+      await this.client.earnTrust(answer);
+      return await this.client.isTrustedDevice();
     } catch (error) {
       if (!isTrustFailure(error)) throw error;
-      this.warn(`logged in, but Eufy didn't make this device trusted, so renewing the login will ask for a code again: ${this.scrub(error.message)}`);
+      this.warn(`logged in, but Eufy didn't make this device trusted, so renewing the login will ask for a code again. Run login again to retry: ${this.scrub(error.message)}`);
       return false;
     }
   }

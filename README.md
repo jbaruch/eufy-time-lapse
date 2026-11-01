@@ -49,7 +49,8 @@ The probe has to run on the host that will run the service, because P2P behavior
    ```
 
 2. Log in. This handles 2FA and captcha, stores the session, adds this service to the account's trusted devices, and
-   shows the camera it found. Without that trust, Eufy asks for a code every time the 30-day login is renewed:
+   shows the camera it found. Eufy runs two login systems, so a first login can email two codes and show a captcha, and
+   each code lasts 5 minutes. Without that trust, Eufy asks for a code every time the 30-day login is renewed:
 
    ```bash
    docker compose run --rm timelapse login
