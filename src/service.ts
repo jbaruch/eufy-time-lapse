@@ -890,7 +890,7 @@ export class CaptureService {
     const capture = this.state.getCapture(captureId);
     if (capture === undefined) throw new Error(`capture ${captureId} was published but has no row`);
     const { reference, verdict } = await this.judgeFrame(capture);
-    this.state.recordFramingCheck({ capture_id: captureId, checked_at: this.now().toISOString(), status: verdict.status, reference_capture_id: reference?.capture_id ?? null, dx: verdict.dx, dy: verdict.dy, detail: verdict.detail });
+    this.state.recordFramingCheck({ capture_id: captureId, checked_at: this.now().toISOString(), status: verdict.status, reference_capture_id: reference?.capture_id ?? null, dx: verdict.dx, dy: verdict.dy, offset_dx: verdict.offset?.dx ?? null, offset_dy: verdict.offset?.dy ?? null, detail: verdict.detail });
     if (verdict.status === "unsure") return;
     if (verdict.status === "on_target") {
       await this.alerts.clear("framing_off_target");
@@ -904,13 +904,13 @@ export class CaptureService {
     const at = new Date(capture.frame_received_at);
     const references = this.state.framingReferences(new Date(at.getTime() - FRAMING_REFERENCE_DAYS * DAY_MS).toISOString(), this.state.getFlag("framing_position_saved_at") ?? "");
     const reference = chooseReference(references, at);
-    if (reference === undefined) return { reference, verdict: { status: "unsure", dx: null, dy: null, detail: "there's no earlier on-target frame to compare with" } };
+    if (reference === undefined) return { reference, verdict: { status: "unsure", dx: null, dy: null, offset: null, detail: "there's no earlier on-target frame to compare with" } };
     try {
       const comparison = await (this.options.compareFrames ?? compareStoredFrames)(join(this.options.dataDir, reference.relative_dir, "frame.jpg"), join(this.options.dataDir, capture.relative_dir, "frame.jpg"));
-      return { reference, verdict: judgeFraming(comparison, { referenceAgeMs: at.getTime() - Date.parse(reference.frame_received_at), tolerancePixels: this.config.framing.tolerance_pixels }) };
+      return { reference, verdict: judgeFraming(comparison, { referenceAgeMs: at.getTime() - Date.parse(reference.frame_received_at), referenceOffset: { dx: reference.offset_dx ?? 0, dy: reference.offset_dy ?? 0 }, tolerancePixels: this.config.framing.tolerance_pixels }) };
     } catch (error) {
       if (!(error instanceof CaptureFailure)) throw error;
-      return { reference, verdict: { status: "unsure", dx: null, dy: null, detail: `couldn't compare the frames: ${error.message}` } };
+      return { reference, verdict: { status: "unsure", dx: null, dy: null, offset: null, detail: `couldn't compare the frames: ${error.message}` } };
     }
   }
 
@@ -983,7 +983,7 @@ export class CaptureService {
       return positionId;
     });
     if (saved instanceof CaptureFailure) return saved;
-    this.state.recordFramingCheck({ capture_id: frame.capture_id, checked_at: this.now().toISOString(), status: "on_target", reference_capture_id: null, dx: 0, dy: 0, detail: "this frame was taken when the position was saved" });
+    this.state.recordFramingCheck({ capture_id: frame.capture_id, checked_at: this.now().toISOString(), status: "on_target", reference_capture_id: null, dx: 0, dy: 0, offset_dx: 0, offset_dy: 0, detail: "this frame was taken when the position was saved" });
     this.state.setFlag("framing_position_id", String(saved));
     this.state.setFlag("framing_position_saved_at", frame.frame_received_at);
     this.state.setFlag("framing_returned_at", null);

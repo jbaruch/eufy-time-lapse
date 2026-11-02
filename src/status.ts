@@ -16,7 +16,7 @@ export interface StatusReport {
   disk_free_mb: number;
   reliability_24h: Reliability;
   active_alerts: string[];
-  framing: { position_saved: boolean; last_check: { status: string; at: string; dx: number | null; dy: number | null; detail: string } | null; off_target_slots_in_a_row: number };
+  framing: { position_saved: boolean; last_check: { status: string; at: string; dx: number | null; dy: number | null; offset_dx: number | null; offset_dy: number | null; detail: string } | null; off_target_slots_in_a_row: number };
 }
 
 export interface Completeness {
@@ -146,7 +146,7 @@ export function buildStatus(state: State, config: ServiceConfig, now: Date, disk
     active_alerts: state.listAlerts().map((alert) => alert.key),
     framing: {
       position_saved: state.getFlag("framing_position_id") !== undefined,
-      last_check: lastFraming === undefined ? null : { status: lastFraming.status, at: lastFraming.checked_at, dx: lastFraming.dx, dy: lastFraming.dy, detail: lastFraming.detail },
+      last_check: lastFraming === undefined ? null : { status: lastFraming.status, at: lastFraming.checked_at, dx: lastFraming.dx, dy: lastFraming.dy, offset_dx: lastFraming.offset_dx, offset_dy: lastFraming.offset_dy, detail: lastFraming.detail },
       off_target_slots_in_a_row: state.offTargetSlotsInARow(),
     },
   };

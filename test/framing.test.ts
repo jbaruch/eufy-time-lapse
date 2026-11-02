@@ -95,7 +95,7 @@ describe("compareFrames", () => {
 describe("judgeFraming", () => {
   const measured: FrameComparison = { texturedPatches: 12, agreeing: 12, dx: 0, dy: 0, matchingInPlace: 12, frameTexturedPatches: 12, referenceBrightness: 110, frameBrightness: 112 };
   const noMatch: FrameComparison = { texturedPatches: 12, agreeing: 1, dx: 0, dy: 0, matchingInPlace: 0, frameTexturedPatches: 12, referenceBrightness: 110, frameBrightness: 112 };
-  const recent = { referenceAgeMs: 5 * MINUTE, tolerancePixels: TOLERANCE };
+  const recent = { referenceAgeMs: 5 * MINUTE, referenceOffset: { dx: 0, dy: 0 }, tolerancePixels: TOLERANCE };
 
   it("calls agreement within the tolerance on target", () => {
     assert.equal(judgeFraming(measured, recent).status, "on_target");
@@ -105,6 +105,27 @@ describe("judgeFraming", () => {
   it("treats the tolerance as a distance, not one axis at a time", () => {
     assert.equal(judgeFraming({ ...measured, dx: 32, dy: 0 }, recent).status, "on_target");
     assert.equal(judgeFraming({ ...measured, dx: 32, dy: 32 }, recent).status, "off_target");
+  });
+
+  it("goes by the distance from the saved position, not from the reference, when a frame comes back", () => {
+    // Real frames from Nov 2, 2026: 36 pixels from a reference that had itself drifted, and 16 from where the camera belongs.
+    const verdict = judgeFraming({ ...measured, dx: 16, dy: 32 }, { ...recent, referenceOffset: { dx: -16, dy: -16 } });
+    assert.equal(verdict.status, "on_target");
+    assert.deepEqual(verdict.offset, { dx: 0, dy: 16 });
+    assert.deepEqual([verdict.dx, verdict.dy], [16, 32], "still says how far from the reference");
+    assert.match(verdict.detail, /within 16 pixels of the saved position/);
+  });
+
+  it("adds up small moves that would each pass alone", () => {
+    const verdict = judgeFraming({ ...measured, dx: 24, dy: 0 }, { ...recent, referenceOffset: { dx: 24, dy: 0 } });
+    assert.equal(verdict.status, "off_target");
+    assert.deepEqual(verdict.offset, { dx: 48, dy: 0 });
+    assert.match(verdict.detail, /48 pixels from the saved position/);
+  });
+
+  it("gives no distance from the saved position when it couldn't measure one", () => {
+    assert.equal(judgeFraming(noMatch, recent).offset, null);
+    assert.equal(judgeFraming({ ...noMatch, matchingInPlace: 1 }, recent).offset, null);
   });
 
   it("calls agreement on a real shift off target, and says how far", () => {

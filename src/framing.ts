@@ -43,9 +43,11 @@ export type FramingStatus = "on_target" | "off_target" | "unsure";
 
 export interface FramingVerdict {
   status: FramingStatus;
-  /** How far, in 4K pixels. Null when the view has moved too far to measure, or nothing could be measured. */
+  /** How far from the reference frame, in 4K pixels. Null when the view has moved too far to measure, or nothing could be measured. */
   dx: number | null;
   dy: number | null;
+  /** How far from the saved position, on the same terms. */
+  offset: { dx: number; dy: number } | null;
   detail: string;
 }
 
@@ -169,18 +171,20 @@ export function compareFrames(reference: Uint8Array, frame: Uint8Array): FrameCo
 }
 
 /** Off target moves a motor, so anything short of good evidence is unsure, and unsure does nothing. */
-export function judgeFraming(comparison: FrameComparison, context: { referenceAgeMs: number; tolerancePixels: number }): FramingVerdict {
+export function judgeFraming(comparison: FrameComparison, context: { referenceAgeMs: number; referenceOffset: { dx: number; dy: number }; tolerancePixels: number }): FramingVerdict {
   const { agreeing, dx, dy, texturedPatches, frameTexturedPatches, matchingInPlace, referenceBrightness, frameBrightness } = comparison;
   if (agreeing >= MIN_AGREEING) {
-    const moved = Math.hypot(dx, dy);
-    if (moved <= context.tolerancePixels) return { status: "on_target", dx, dy, detail: `${agreeing} areas agree the view is within ${Math.round(moved)} pixels` };
-    return { status: "off_target", dx, dy, detail: `${agreeing} areas agree the view moved ${Math.round(moved)} pixels` };
+    // The reference can sit a little off the saved position itself, and going by it alone would let small moves add up unseen.
+    const offset = { dx: context.referenceOffset.dx + dx, dy: context.referenceOffset.dy + dy };
+    const moved = Math.hypot(offset.dx, offset.dy);
+    if (moved <= context.tolerancePixels) return { status: "on_target", dx, dy, offset, detail: `${agreeing} areas agree the view is within ${Math.round(moved)} pixels of the saved position` };
+    return { status: "off_target", dx, dy, offset, detail: `${agreeing} areas agree the view is ${Math.round(moved)} pixels from the saved position` };
   }
   const brightnessChange = Math.abs(frameBrightness - referenceBrightness) / Math.max(referenceBrightness, 1);
   const enoughDetail = texturedPatches >= MIN_PATCHES_TO_JUDGE && frameTexturedPatches >= MIN_PATCHES_TO_JUDGE;
   const sameLight = context.referenceAgeMs <= MISMATCH_MAX_REFERENCE_AGE_MS && brightnessChange <= MISMATCH_MAX_BRIGHTNESS_CHANGE;
-  if (enoughDetail && sameLight && matchingInPlace === 0) return { status: "off_target", dx: null, dy: null, detail: "nothing in this frame matches the last good one, taken in similar light" };
-  return { status: "unsure", dx: null, dy: null, detail: `only ${agreeing} areas agree, and ${matchingInPlace} match in place, which isn't enough to say` };
+  if (enoughDetail && sameLight && matchingInPlace === 0) return { status: "off_target", dx: null, dy: null, offset: null, detail: "nothing in this frame matches the last good one, taken in similar light" };
+  return { status: "unsure", dx: null, dy: null, offset: null, detail: `only ${agreeing} areas agree, and ${matchingInPlace} match in place, which isn't enough to say` };
 }
 
 const MINUTES_PER_DAY = 1440;
