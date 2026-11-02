@@ -411,8 +411,8 @@ describe("MegaAdapter saved positions", () => {
           calls.push(`save ${id}`);
           used.push(id);
         },
-        goto: async (id) => {
-          calls.push(`goto ${id}`);
+        preview: async (id) => {
+          calls.push(`preview ${id}`);
         },
         delete: async (id) => {
           calls.push(`delete ${id}`);
@@ -459,11 +459,11 @@ describe("MegaAdapter saved positions", () => {
     const c = camera([0, 3]);
     const { adapter } = withPositions(c.positions);
     assert.equal(await adapter.returnToPosition(SERIAL, 3), "returned");
-    assert.deepEqual(c.calls, ["list", "goto 3"]);
+    assert.deepEqual(c.calls, ["list", "preview 3"]);
     await adapter.shutdown();
   });
 
-  it("won't send a go-to to an empty slot, because that same command would save the current view there", async () => {
+  it("won't go to an empty slot, because that position is gone", async () => {
     const c = camera([0]);
     const { adapter } = withPositions(c.positions);
     assert.equal(await adapter.returnToPosition(SERIAL, 3), "gone");
@@ -515,7 +515,7 @@ describe("MegaAdapter saved positions", () => {
 
   it("lets a bug through as itself, and still closes up", async () => {
     const c = camera([0, 3]);
-    c.positions.goto = async () => {
+    c.positions.preview = async () => {
       throw new TypeError("not a function");
     };
     const { adapter, client } = withPositions(c.positions);
