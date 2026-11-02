@@ -286,6 +286,33 @@ describe("acquireFrame", () => {
     assert.equal(await exists(join(outputDir, "frame.jpg")), false);
   });
 
+  it("calls a stream the camera ended with no video lost, not a timeout, and still releases the camera", async () => {
+    const hungUp = (): ReturnType<typeof liveSession> => {
+      const video = new PassThrough();
+      video.end();
+      return { ...liveSession(Buffer.alloc(0)), video, audio: new PassThrough() };
+    };
+    const { adapter, result } = attempt({ open: async () => hungUp() });
+    const record = await result;
+    assert.equal(record.status, "failed");
+    assert.equal(record.failure?.reason, "stream_lost");
+    assert.equal(record.failure?.phase, "first_media");
+    assert.equal(record.stream_stop, "stream_ended");
+    assert.equal(adapter.teardowns, 1);
+  });
+
+  it("calls a video stream that broke before any video lost too", async () => {
+    const broken = (): ReturnType<typeof liveSession> => {
+      const video = new PassThrough();
+      setImmediate(() => video.destroy(new Error("relay reset")));
+      return { ...liveSession(Buffer.alloc(0)), video, audio: new PassThrough() };
+    };
+    const { result } = attempt({ open: async () => broken() });
+    const record = await result;
+    assert.equal(record.failure?.reason, "stream_lost");
+    assert.match(record.failure?.message ?? "", /relay reset/);
+  });
+
   it("uses what arrived when the deadline hits mid-stream", async (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const video = new PassThrough();

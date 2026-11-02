@@ -4,7 +4,7 @@ import { acquireFrame } from "./acquire.ts";
 import type { AcquireOptions, AttemptRecord } from "./acquire.ts";
 
 /** Transient connectivity and media errors. Auth, stale sources and shutdowns must never loop. */
-const RETRYABLE: ReadonlySet<FailureReason> = new Set<FailureReason>(["camera_unreachable", "capture_timeout", "decode_failed"]);
+const RETRYABLE: ReadonlySet<FailureReason> = new Set<FailureReason>(["camera_unreachable", "capture_timeout", "stream_lost", "decode_failed"]);
 
 export interface SlotOptions extends Omit<AcquireOptions, "outputDir"> {
   /** Tries write to `<slotDir>` and then `<slotDir>-retry-N`, so every frame stays on disk. */

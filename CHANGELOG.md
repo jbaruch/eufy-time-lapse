@@ -9,6 +9,7 @@ First version of the service, proven against the real camera on its built-in SIM
 - Passes the formal three-attempt probe, and got 46 of 47 slots at 4K over a night at 5 minutes on cable.
 - Recovers from restarts, tracks camera-contact and data budgets, and alerts on repeated misses, first-try drift, low battery, and logins that need a person.
 - Restarts itself with an alert if the capture loop stops making progress, instead of staying up and silent.
+- Records a stream that ends with no video as `stream_lost`, not `capture_timeout`, so the failures in `status` say whether the camera hung up or time ran out.
 - Finishes a capture that a crash interrupted from what's already on disk, and audits stored frames in the background after each start.
 - Renews its 30-day Eufy login a week before it ends. If Eufy asks for a code, the old login keeps working and an alert gives a person the date.
 - The `login` command adds the service to the account's trusted devices, through the older of Eufy's two login systems, since only its codes can do that. After that, renewing the login takes no code.
