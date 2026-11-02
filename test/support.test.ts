@@ -525,7 +525,7 @@ describe("State migrations", () => {
 
 describe("State framing checks", () => {
   const capture = (id: string, at: string, date = at.slice(0, 10)): CaptureRow => ({ capture_id: id, slot_id: null, kind: "scheduled", local_date: date, frame_received_at: at, width: 3840, height: 2160, jpeg_bytes: 1, sha256: "x", quality_status: "ok", relative_dir: `spool/${id}`, archive_status: "disabled", created_at: at });
-  const check = (id: string, at: string, status: FramingCheckStatus): FramingCheckRow => ({ capture_id: id, checked_at: at, status, reference_capture_id: null, dx: null, dy: null, detail: "test" });
+  const check = (id: string, at: string, status: FramingCheckStatus): FramingCheckRow => ({ capture_id: id, checked_at: at, status, reference_capture_id: null, dx: null, dy: null, offset_dx: null, offset_dy: null, detail: "test" });
 
   async function opened(): Promise<{ state: State; done: () => Promise<void> }> {
     const dir = await tempDir();
@@ -585,6 +585,15 @@ describe("State framing checks", () => {
     state.recordFramingCheck(check("bad", "2026-11-03T15:00:01.000Z", "off_target"));
     assert.deepEqual(state.framingReferences("2026-11-01T00:00:00.000Z", "").map((row) => row.capture_id), ["old"]);
     assert.deepEqual(state.framingReferences("2026-09-15T00:00:00.000Z", "").map((row) => row.capture_id), ["old"]);
+    await done();
+  });
+
+  it("gives back how far a reference sat from the saved position", async () => {
+    const { state, done } = await opened();
+    state.insertCapture(capture("good", "2026-11-03T15:00:00.000Z"));
+    state.recordFramingCheck({ ...check("good", "2026-11-03T15:00:01.000Z", "on_target"), offset_dx: -16, offset_dy: 8 });
+    const [reference] = state.framingReferences("2026-11-01T00:00:00.000Z", "");
+    assert.deepEqual([reference?.offset_dx, reference?.offset_dy], [-16, 8]);
     await done();
   });
 

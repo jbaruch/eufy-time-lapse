@@ -199,7 +199,7 @@ describe("render", () => {
     const day = { local_date: "2026-07-03" };
     await keep(state, capture("10", { ...(await frame("10", 640, 360, "2026-07-03")), ...day, frame_received_at: "2026-07-03T13:00:00.000Z" }));
     await keep(state, capture("11", { ...(await frame("11", 640, 360, "2026-07-03")), ...day, frame_received_at: "2026-07-03T13:05:00.000Z" }));
-    state.recordFramingCheck({ capture_id: "11", checked_at: "2026-07-03T13:05:01.000Z", status: "off_target", reference_capture_id: "10", dx: 400, dy: 0, detail: "test" });
+    state.recordFramingCheck({ capture_id: "11", checked_at: "2026-07-03T13:05:01.000Z", status: "off_target", reference_capture_id: "10", dx: 400, dy: 0, offset_dx: 400, offset_dy: 0, detail: "test" });
     const range = { from: "2026-07-03", to: "2026-07-03" };
     const left = await render({ ...base, ...range, state, dataDir: dir.path, outputPath: join(dir.path, "renders", "on-target.mp4") });
     assert.deepEqual(left.inputs.map((input) => input.capture_id), ["10"]);

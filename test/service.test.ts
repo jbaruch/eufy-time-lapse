@@ -477,6 +477,43 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("adds up small moves until they're off target, and acts on the total", async () => {
+      const nudged: FrameComparison = { ...steady, dx: 24, dy: 0, matchingInPlace: 6 };
+      const h = await guarded([nudged, nudged, nudged]);
+      await runAt(h, [0, 5, 10]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["on_target", "off_target", "off_target"]);
+      assert.deepEqual(h.adapter.positionReturns, [3]);
+      h.state.close();
+    });
+
+    it("calls a frame back near the saved position on target, even far from a reference that had drifted", async () => {
+      const h = await guarded([{ ...steady, dx: -24, dy: -16 }, { ...steady, dx: 24, dy: 32 }]);
+      await runAt(h, [0, 5]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["on_target", "on_target"]);
+      const { offset_dx: offsetX, offset_dy: offsetY } = h.state.latestFramingCheck() ?? {};
+      assert.deepEqual([offsetX, offsetY], [0, 16]);
+      h.state.close();
+    });
+
+    it("counts an older check with no distance on record as on the saved position", async () => {
+      const h = await guarded([{ ...steady, dx: 16, dy: 0 }]);
+      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"));
+      raw.exec("UPDATE framing_checks SET offset_dx = NULL, offset_dy = NULL");
+      raw.close();
+      await runAt(h, [0]);
+      assert.equal(checks(h)[0]?.status, "on_target");
+      assert.equal(h.state.latestFramingCheck()?.offset_dx, 16);
+      h.state.close();
+    });
+
+    it("keeps no distance for a frame it couldn't measure", async () => {
+      const h = await guarded([murky]);
+      await runAt(h, [0]);
+      assert.equal(h.state.latestFramingCheck()?.offset_dx, null);
+      assert.equal(h.state.latestFramingCheck()?.offset_dy, null);
+      h.state.close();
+    });
+
     it("never moves on unsure, however long that goes on", async () => {
       const h = await guarded([murky, murky, murky, murky]);
       await runAt(h, [0, 5, 10, 15]);
@@ -671,6 +708,7 @@ describe("CaptureService", () => {
       const { framing } = buildStatus(h.state, serviceConfig(), new Date(AT_0800 + MINUTE), 50_000);
       assert.equal(framing.last_check?.status, "off_target");
       assert.equal(framing.last_check?.dx, 400);
+      assert.deepEqual([framing.last_check?.offset_dx, framing.last_check?.offset_dy], [400, -16]);
       assert.equal(framing.off_target_slots_in_a_row, 1);
       h.state.close();
     });
