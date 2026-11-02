@@ -529,7 +529,6 @@ export class MegaAdapter implements CameraAdapter {
 
   async openLiveSession(cameraKey: string, signal: AbortSignal): Promise<LiveSession> {
     this.attemptActive = true;
-    this.relayUsed = false;
     await this.restoreLogin();
 
     this.identify(cameraKey);
@@ -540,6 +539,8 @@ export class MegaAdapter implements CameraAdapter {
       throw new CaptureFailure("camera_unreachable", "stream_start", "The SDK exposes no live video path for this camera.");
     }
     const coldConnection = !this.client.getP2pSessions().has(device.stationSn);
+    // A connection left open for this frame keeps the path it got there by.
+    if (coldConnection) this.relayUsed = false;
 
     const startedAt = Date.now();
     try {
@@ -631,10 +632,11 @@ export class MegaAdapter implements CameraAdapter {
     return problems.length > 0 ? { status: "error", detail: problems.join("; ") } : { status: "ok", detail: null };
   }
 
-  /** Holds the connection open like an attempt does, so the sweep doesn't close it, and shuts it the same way afterwards. */
-  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>) => Promise<T>, timeoutMs = POSITION_TIMEOUT_MS): Promise<T> {
+  /** Holds the connection open like an attempt does, so the sweep doesn't close it, and shuts it the same way afterwards, unless it's wanted next. */
+  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>) => Promise<T>, { timeoutMs = POSITION_TIMEOUT_MS, keepOpen = false }: { timeoutMs?: number; keepOpen?: boolean } = {}): Promise<T> {
     this.attemptActive = true;
     let deadline: NodeJS.Timeout | undefined;
+    let succeeded = false;
     try {
       await this.restoreLogin();
       const positions = (await this.deviceFor(cameraKey)).ptz?.()?.preset?.();
@@ -643,14 +645,18 @@ export class MegaAdapter implements CameraAdapter {
       const expired = new Promise<never>((_resolve, reject) => {
         deadline = setTimeout(() => reject(new CaptureFailure("camera_unreachable", "position", `The camera didn't finish with its saved positions within ${timeoutMs / 1000} seconds.`)), timeoutMs);
       });
-      return await Promise.race([work(positions, list), expired]);
+      const result = await Promise.race([work(positions, list), expired]);
+      succeeded = true;
+      return result;
     } catch (error) {
       if (error instanceof CaptureFailure) throw error;
       throw await this.failureFrom(error, "position", new AbortController().signal);
     } finally {
       clearTimeout(deadline);
-      const closed = await this.teardown(cameraKey, POSITION_CLOSE_TIMEOUT_MS);
-      if (closed.status !== "ok") this.warn(`the camera connection may not have closed after using its saved positions: ${closed.detail ?? "no detail"}`);
+      if (!keepOpen || !succeeded) {
+        const closed = await this.teardown(cameraKey, POSITION_CLOSE_TIMEOUT_MS);
+        if (closed.status !== "ok") this.warn(`the camera connection may not have closed after using its saved positions: ${closed.detail ?? "no detail"}`);
+      }
     }
   }
 
@@ -672,6 +678,7 @@ export class MegaAdapter implements CameraAdapter {
   }
 
   async prepareFrame(cameraKey: string, positionId: number): Promise<"ready" | "gone"> {
+    this.relayUsed = false;
     return this.withPositions(
       cameraKey,
       async (positions, list) => {
@@ -684,7 +691,8 @@ export class MegaAdapter implements CameraAdapter {
         await delay(this.settle.moveMs);
         return "ready";
       },
-      FRAME_STEP_TIMEOUT_MS,
+      // Left open for the frame. A new connection straight after closing this one came back at 720p, and ended within seconds.
+      { timeoutMs: FRAME_STEP_TIMEOUT_MS, keepOpen: true },
     );
   }
 
@@ -696,7 +704,7 @@ export class MegaAdapter implements CameraAdapter {
         // As with a move, closing the connection straight away could lose it.
         await delay(this.settle.settingMs);
       },
-      FRAME_STEP_TIMEOUT_MS,
+      { timeoutMs: FRAME_STEP_TIMEOUT_MS },
     );
   }
 

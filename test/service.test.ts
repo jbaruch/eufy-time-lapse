@@ -664,6 +664,23 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("keeps time for turning tracking back on when it decides on another try", async () => {
+      let h: Harness | undefined;
+      const { compare } = scripted();
+      const slow = async (): Promise<LiveSession> => {
+        if (h !== undefined) h.clock.ms += 40_000;
+        return await hangUp();
+      };
+      h = await harness({ open: slow, compareFrames: compare, startMs: BEFORE_FIRST_SLOT });
+      h.state.setFlag("first_started_at", new Date(BEFORE_FIRST_SLOT).toISOString());
+      h.state.setFlag("framing_position_id", "3");
+      // Another try needs 100 s after the first's 40. That fits in the 170 s left, but not with 55 s kept back for tracking.
+      h.clock.ms = AT_0800 + (DEFAULT_SERVICE_CONFIG.capture.slot_deadline_seconds - 170) * 1000;
+      await h.service.tick(h.signal);
+      assert.equal(h.adapter.opens, 1);
+      h.state.close();
+    });
+
     it("goes straight to the frame when a late start leaves no time for a reset", async () => {
       const h = await guarded([steady]);
       h.state.setFlag("first_started_at", new Date(BEFORE_FIRST_SLOT).toISOString());

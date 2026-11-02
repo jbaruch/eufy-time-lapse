@@ -118,7 +118,8 @@ export interface CameraAdapter {
   savePosition(cameraKey: string): Promise<number>;
   /**
    * Gets the camera ready for a frame: stops it following what it detects, then turns it to a saved position, or answers "gone",
-   * without moving, if that position no longer exists. Tracking stays off until resumeTracking. Rejects with CaptureFailure.
+   * without moving, if that position no longer exists. Tracking stays off until resumeTracking, and the connection stays open for
+   * the frame that follows, so the next openLiveSession or resumeTracking has to come. Rejects with CaptureFailure.
    */
   prepareFrame(cameraKey: string, positionId: number): Promise<"ready" | "gone">;
   /** Lets the camera follow what it detects again. Rejects with CaptureFailure. */

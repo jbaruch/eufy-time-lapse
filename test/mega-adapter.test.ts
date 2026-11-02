@@ -504,7 +504,7 @@ describe("MegaAdapter saved positions", () => {
     const { adapter, client } = withPositions(c.positions);
     const before = client.disconnects;
     client.sessions.set(SERIAL, {});
-    await adapter.prepareFrame(SERIAL, 3);
+    await adapter.resumeTracking(SERIAL);
     assert.ok(client.disconnects > before);
     assert.equal(adapter.unexpectedConnectionCount(), 0);
     await adapter.shutdown();
@@ -513,7 +513,7 @@ describe("MegaAdapter saved positions", () => {
   it("logs in again before using the camera if it's been closed", async () => {
     const c = camera([0, 3]);
     const { adapter, client } = withPositions(c.positions);
-    await adapter.prepareFrame(SERIAL, 3);
+    await adapter.resumeTracking(SERIAL);
     const logins = client.logins;
     await adapter.prepareFrame(SERIAL, 3);
     assert.ok(client.logins > logins);
@@ -541,6 +541,41 @@ describe("MegaAdapter saved positions", () => {
     const before = client.disconnects;
     await assert.rejects(adapter.prepareFrame(SERIAL, 3), TypeError);
     assert.ok(client.disconnects > before);
+    await adapter.shutdown();
+  });
+
+  it("leaves the connection open after a reset, for the frame that follows", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    client.onRoute = () => client.sessions.set(SERIAL, {});
+    const before = client.disconnects;
+    await adapter.prepareFrame(SERIAL, 3);
+    assert.equal(client.disconnects, before);
+    const session = await adapter.openLiveSession(SERIAL, new AbortController().signal);
+    assert.equal(session.coldConnection, false);
+    await adapter.teardown(SERIAL, 1000);
+    assert.ok(client.disconnects > before);
+    await adapter.shutdown();
+  });
+
+  it("reports the path the reset's connection took, since the frame stays on it", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    client.onRoute = () => {
+      client.sessions.set(SERIAL, {});
+      adapter.noteRelayUsed();
+    };
+    await adapter.prepareFrame(SERIAL, 3);
+    assert.equal((await adapter.openLiveSession(SERIAL, new AbortController().signal)).connectionPath, "relay");
+    await adapter.shutdown();
+  });
+
+  it("doesn't carry a path over from an earlier reset", async () => {
+    const c = camera([0, 3]);
+    const { adapter } = withPositions(c.positions);
+    adapter.noteRelayUsed();
+    await adapter.prepareFrame(SERIAL, 3);
+    assert.equal((await adapter.openLiveSession(SERIAL, new AbortController().signal)).connectionPath, "direct");
     await adapter.shutdown();
   });
 
