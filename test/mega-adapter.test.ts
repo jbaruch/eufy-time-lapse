@@ -572,7 +572,8 @@ describe("MegaAdapter saved positions", () => {
 
   it("doesn't carry a path over from an earlier reset", async () => {
     const c = camera([0, 3]);
-    const { adapter } = withPositions(c.positions);
+    const { adapter, client } = withPositions(c.positions);
+    client.onRoute = () => client.sessions.set(SERIAL, {});
     adapter.noteRelayUsed();
     await adapter.prepareFrame(SERIAL, 3);
     assert.equal((await adapter.openLiveSession(SERIAL, new AbortController().signal)).connectionPath, "direct");
