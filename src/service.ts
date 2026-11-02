@@ -111,8 +111,8 @@ export class CaptureService {
   private lastPruneDate: string | undefined;
   /** A failure from background work, which the next tick raises so it takes the same path as any other crash. */
   private backgroundFailure: Error | undefined;
-  /** Unset until the service runs. */
   private dailyReportReadFor: string | undefined;
+  /** Unset until the service runs. */
   private loopBeatAt: number | undefined;
   private loopDeclaredStuck = false;
   private readonly onBackgroundFailure = (error: Error): void => {
