@@ -761,7 +761,7 @@ describe("CaptureService", () => {
       await runAt(h, [0]);
       h.adapter.setDiscoverFailure(() => new CaptureFailure("camera_unreachable", "discovery", "no cloud"));
       await idleAt(h, AT_1800 + MINUTE);
-      assert.match(reports(h)[0] ?? "", /Charging: last seen 08:00\./);
+      assert.match(reports(h)[0] ?? "", /Charging: seen at 08:00, still on at the last reading\./);
       h.state.close();
     });
 
@@ -774,6 +774,67 @@ describe("CaptureService", () => {
       const failed = h.state.batterySince("2000-01-01T00:00:00.000Z").filter((row) => row.percent === null);
       assert.ok(failed.length >= 2, `${failed.length} failed reads`);
       for (const row of failed) assert.equal(row.telemetry_json, "{}");
+      h.state.close();
+    });
+
+    it("measures the battery against the evening before, not this morning", async () => {
+      const h = await harness();
+      await idleAt(h, AT_1800 + MINUTE);
+      h.adapter.setCamera(reading(74, new Date(AT_0800 + 24 * 60 * MINUTE).toISOString()));
+      await runAt(h, [24 * 60]);
+      await idleAt(h, AT_1800 + 24 * 60 * MINUTE + MINUTE);
+      assert.match(reports(h)[0] ?? "", /Battery: 80% \(low 80, high 80\)\./);
+      assert.match(reports(h)[1] ?? "", /Battery: 74%, down 6 since yesterday \(low 74, high 74\)\./);
+      h.state.close();
+    });
+
+    it("skips a read that failed when it looks for the evening before", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(() => new CaptureFailure("camera_unreachable", "discovery", "no cloud"));
+      await idleAt(h, AT_1800 + MINUTE);
+      h.adapter.setDiscoverFailure(undefined);
+      h.adapter.setCamera(reading(74, new Date(AT_1800 + 24 * 60 * MINUTE).toISOString()));
+      await idleAt(h, AT_1800 + 24 * 60 * MINUTE + MINUTE);
+      assert.match(reports(h)[1] ?? "", /Battery: 74%, down 6 since yesterday/);
+      h.state.close();
+    });
+
+    it("skips a reading with no percentage in it, too", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.adapter.setCamera(reading(null));
+      await idleAt(h, AT_1800 + MINUTE);
+      h.adapter.setCamera(reading(74, new Date(AT_1800 + 24 * 60 * MINUTE).toISOString()));
+      await idleAt(h, AT_1800 + 24 * 60 * MINUTE + MINUTE);
+      assert.match(reports(h)[1] ?? "", /Battery: 74%, down 6 since yesterday/);
+      h.state.close();
+    });
+
+    it("counts a slot that took more tries once, and only on its own day", async () => {
+      let opens = 0;
+      const h = await harness({
+        open: async () => {
+          opens += 1;
+          return opens <= 2 ? hangUp() : fresh();
+        },
+      });
+      await runAt(h, [0, 5]);
+      assert.equal(opens, 4, "one slot took three tries, the other one");
+      await idleAt(h, AT_1800 + MINUTE);
+      assert.match(reports(h)[0] ?? "", /\. 1 took a second try\.\n/);
+      await idleAt(h, AT_1800 + 24 * 60 * MINUTE + MINUTE);
+      assert.doesNotMatch(reports(h)[1] ?? "", /second try/);
+      h.state.close();
+    });
+
+    it("says when that day's slots were missed", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      await idleAt(h, AT_1800 + MINUTE);
+      assert.match(reports(h)[0] ?? "", /Missed: 08:05 to 17:55\.\n/);
+      await idleAt(h, AT_1800 + 24 * 60 * MINUTE + MINUTE);
+      assert.match(reports(h)[1] ?? "", /Missed: 08:00 to 17:55\.\n/);
       h.state.close();
     });
 

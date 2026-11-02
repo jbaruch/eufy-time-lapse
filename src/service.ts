@@ -517,7 +517,19 @@ export class CaptureService {
     if (this.state.getFlag("operator_paused") !== undefined) paused.push("by you");
     if (this.state.getFlag("battery_paused") !== undefined) paused.push("low battery");
     if (this.state.getFlag("auth_required") !== undefined) paused.push("needs a login");
-    const text = dailyReport({ date: local.date, zone: this.zone, slots: this.state.slotCountsOn(local.date), readings, offTarget: this.state.offTargetCountOn(local.date), paused });
+    const text = dailyReport({
+      date: local.date,
+      zone: this.zone,
+      slots: this.state.slotCountsOn(local.date),
+      retried: this.state.retriedSlotsOn(local.date),
+      missedMinutes: this.state.missedMinutesOn(local.date),
+      gridMinutes: this.config.schedule.grid_minutes,
+      readings,
+      // Everything before the day's first row is from an earlier day, with no need to work out when the day began.
+      previous: this.state.lastKnownBatteryBefore(readings[0]?.read_at ?? now.toISOString()),
+      offTarget: this.state.offTargetCountOn(local.date),
+      paused,
+    });
     if (await this.options.notify(text)) this.state.setFlag("daily_report_date", local.date);
   }
 

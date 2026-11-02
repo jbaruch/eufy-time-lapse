@@ -154,11 +154,15 @@ Once a day, as soon as the window's last slot is done, the service sends one mes
 
 ```text
 Time-lapse, Mon Nov 2
-Frames: 130 of 132 at 4K, 1 below 4K, 1 missed.
-Battery: 92%, down 3 today (low 90, high 95).
-Charging: last seen 16:20.
+Frames: 130 of 132 at 4K, 1 below 4K, 1 missed. 4 took a second try.
+Missed: 11:20.
+Battery: 92%, down 3 since yesterday (low 90, high 95).
+Charging: about 2.5 hours between 13:50 and 16:20, ended at 96%.
 Battery temperature: 11°C.
 ```
+
+The battery is compared with the last reading before today, because nothing reads it overnight and a day's own change
+would leave the night out. Second tries are worth watching: they're the first number to move when the connection weakens.
 
 It also goes out on a paused day. So no report means the service, the host or Telegram is down, though only someone
 who notices the silence will know. `"alerts": { "daily_report": false }` turns it off.
