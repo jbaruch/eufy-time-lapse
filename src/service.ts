@@ -496,41 +496,48 @@ export class CaptureService {
 
   /**
    * Once a day, after the last slot of the window. Also the only sign of life that doesn't need something to go wrong, so
-   * it goes out on a paused day or a day with no slots too. An undelivered one is tried again at the next idle wake.
+   * it goes out on a paused day or a day with no slots too. An undelivered or late one is tried at each idle wake until the
+   * next day's is due, so only the newest is ever owed.
    */
   private async sendDailyReportIfDue(): Promise<void> {
     if (!this.config.alerts.daily_report) return;
     const now = this.now();
     const local = localParts(now, this.zone);
+    const lastSent = this.state.getFlag("daily_report_date");
     // From the last slot's turn, not the window's end: the clock never reaches a window ending at 24:00.
-    if (local.minutes < parseClock(this.config.schedule.window_end_exclusive) - this.config.schedule.grid_minutes) return;
-    if (this.state.getFlag("daily_report_date") === local.date || this.state.hasUnfinishedSlotsOn(local.date)) return;
-    if (this.dailyReportReadFor !== local.date) {
+    const todaysIsDue = local.minutes >= parseClock(this.config.schedule.window_end_exclusive) - this.config.schedule.grid_minutes;
+    // Until then it's yesterday's that may be owed, after an outage or a failed delivery that ran past midnight.
+    const date = todaysIsDue ? local.date : addDays(local.date, -1);
+    if ((lastSent !== undefined && lastSent >= date) || this.state.hasUnfinishedSlotsOn(date)) return;
+    if (todaysIsDue && this.dailyReportReadFor !== date) {
       // Cloud only, so it doesn't wake the camera. Without it, a day with no slots would have no reading at all.
       const reading = await this.readCamera();
       // Readers take the newest row's pace as the current one, and this read doesn't change it.
       this.recordBatteryReading(now, reading, this.state.latestBattery()?.every_minutes ?? null);
-      this.dailyReportReadFor = local.date;
+      this.dailyReportReadFor = date;
     }
-    const readings = this.state.batterySince(new Date(now.getTime() - 2 * DAY_MS).toISOString()).filter((row) => localParts(new Date(row.read_at), this.zone).date === local.date);
+    const readings = this.state.batterySince(new Date(now.getTime() - 2 * DAY_MS).toISOString()).filter((row) => localParts(new Date(row.read_at), this.zone).date === date);
+    const slots = this.state.slotCountsOn(date);
+    // Nothing on record means a day from before this service existed, and there's nothing to say about that.
+    if (readings.length === 0 && Object.keys(slots).length === 0) return;
     const paused: string[] = [];
     if (this.state.getFlag("operator_paused") !== undefined) paused.push("by you");
     if (this.state.getFlag("battery_paused") !== undefined) paused.push("low battery");
     if (this.state.getFlag("auth_required") !== undefined) paused.push("needs a login");
     const text = dailyReport({
-      date: local.date,
+      date,
       zone: this.zone,
-      slots: this.state.slotCountsOn(local.date),
-      retried: this.state.retriedSlotsOn(local.date),
-      missedMinutes: this.state.missedMinutesOn(local.date),
+      slots,
+      retried: this.state.retriedSlotsOn(date),
+      missedMinutes: this.state.missedMinutesOn(date),
       gridMinutes: this.config.schedule.grid_minutes,
       readings,
       // Everything before the day's first row is from an earlier day, with no need to work out when the day began.
       previous: this.state.lastKnownBatteryBefore(readings[0]?.read_at ?? now.toISOString()),
-      offTarget: this.state.offTargetCountOn(local.date),
+      offTarget: this.state.offTargetCountOn(date),
       paused,
     });
-    if (await this.options.notify(text)) this.state.setFlag("daily_report_date", local.date);
+    if (await this.options.notify(text)) this.state.setFlag("daily_report_date", date);
   }
 
   /**

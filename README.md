@@ -164,8 +164,9 @@ Battery temperature: 11°C.
 The battery is compared with the last reading before today, because nothing reads it overnight and a day's own change
 would leave the night out. Second tries are worth watching: they're the first number to move when the connection weakens.
 
-It also goes out on a paused day. So no report means the service, the host or Telegram is down, though only someone
-who notices the silence will know. `"alerts": { "daily_report": false }` turns it off.
+It also goes out on a paused day. A report that's late or can't be delivered keeps trying until the next day's is due, so
+a whole day with no report means the service, the host or Telegram was down, though only someone who notices the silence
+will know. `"alerts": { "daily_report": false }` turns it off.
 
 The service also answers on `127.0.0.1:8787`. `/status` has the full report. `/healthz` means only that the
 process is alive, so check `/status` to know frames are arriving. If the capture loop makes no progress for 15 minutes,
