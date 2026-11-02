@@ -3,8 +3,9 @@
 Records a construction time-lapse from a solar-powered eufy 4G LTE Cam S330 (T86P2) on its built-in SIM.
 The design lives in [`eufy_s330_timelapse_spec.md`](eufy_s330_timelapse_spec.md).
 
-**Status:** the service runs against the real camera on its SIM, at about 98% of first tries in 4K. Still open:
-battery behavior on solar, which sets the sustainable cadence. Not built yet: the offsite S3 archive and the
+**Status:** the service runs against the real camera on its SIM. On its first afternoon on the pole, 57 of 61 first
+tries came back in 4K and retries got the other four. Still open: battery behavior on solar, which sets the
+sustainable cadence. Not built yet: the offsite S3 archive and the
 monthly preview render. Frames stay on local storage until the archive exists, and nothing deletes them.
 
 ## Requirements
