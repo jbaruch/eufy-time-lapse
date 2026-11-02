@@ -61,8 +61,11 @@ function spokenMinutes(minutes: number): string {
   return minutes < 120 ? `${minutes} minutes` : `${Math.round(minutes / 30) / 2} hours`;
 }
 
+/** How many slots one charging reading can vouch for. Past that, failed reads or an outage would count as charging. */
+const CHARGING_READING_SLOTS = 3;
+
 /** Each charging reading counts until the next one, which is as close as readings a slot apart can get. */
-function chargingLine(known: ReadonlyArray<BatteryRow & { percent: number }>, zone: string): string {
+function chargingLine(known: ReadonlyArray<BatteryRow & { percent: number }>, gridMinutes: number, zone: string): string {
   const clock = (row: BatteryRow): string => formatClock(localParts(new Date(row.read_at), zone).minutes);
   const isCharging = (row: BatteryRow): boolean => telemetryOf(row).charging === true;
   let chargingMs = 0;
@@ -73,15 +76,18 @@ function chargingLine(known: ReadonlyArray<BatteryRow & { percent: number }>, zo
     first ??= row;
     const next = known[index + 1];
     end = next ?? row;
-    if (next !== undefined) chargingMs += Date.parse(next.read_at) - Date.parse(row.read_at);
+    if (next !== undefined) chargingMs += Math.min(Date.parse(next.read_at) - Date.parse(row.read_at), CHARGING_READING_SLOTS * (row.every_minutes ?? gridMinutes) * 60_000);
   }
   if (first === undefined || end === undefined) {
     // A full battery reads as not charging, and that's no reason for anyone to go and look at the panel.
     return known.every((row) => row.percent === 100) ? "Charging: none needed, it's full." : "Charging: none seen today.";
   }
   const minutes = Math.round(chargingMs / 60_000);
-  const when = minutes < 2 ? `seen at ${clock(first)}` : `about ${spokenMinutes(minutes)} between ${clock(first)} and ${clock(end)}`;
-  return `Charging: ${when}, ${isCharging(end) ? "still on at the last reading" : `ended at ${end.percent}%`}.`;
+  const outcome = isCharging(end) ? "still on at the last reading" : `ended at ${end.percent}%`;
+  if (minutes < 2) return `Charging: seen at ${clock(first)}, ${outcome}.`;
+  // The morning sun gets there before the first slot, so the length of a charge that was already on is only a floor.
+  if (first === known[0]) return `Charging: at least ${spokenMinutes(minutes)}, already on at ${clock(first)}, ${outcome}${isCharging(end) ? "" : ` by ${clock(end)}`}.`;
+  return `Charging: about ${spokenMinutes(minutes)} between ${clock(first)} and ${clock(end)}, ${outcome}.`;
 }
 
 function batteryLines(input: DailyReportInput): string[] {
@@ -89,7 +95,7 @@ function batteryLines(input: DailyReportInput): string[] {
   const last = known.at(-1);
   if (last === undefined) return ["Battery: no reading today."];
   const percents = known.map((row) => row.percent);
-  const lines = [`Battery: ${last.percent}%${changeSince(last.percent, input)} (low ${Math.min(...percents)}, high ${Math.max(...percents)}).`, chargingLine(known, input.zone)];
+  const lines = [`Battery: ${last.percent}%${changeSince(last.percent, input)} (low ${Math.min(...percents)}, high ${Math.max(...percents)}).`, chargingLine(known, input.gridMinutes, input.zone)];
   const temperature = telemetryOf(last).batteryTemperature;
   if (typeof temperature === "number") lines.push(`Battery temperature: ${temperature}°C.`);
   return lines;
