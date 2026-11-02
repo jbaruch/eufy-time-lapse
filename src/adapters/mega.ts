@@ -53,7 +53,11 @@ const TRUST_LIST_TIMEOUT_MS = 20_000;
 const POSITION_TIMEOUT_MS = 90_000;
 const POSITION_CLOSE_TIMEOUT_MS = 10_000;
 /** A save showed on the camera's own list after 5 seconds, not after 2. The move is what was tested with a 6-second wait. */
-const POSITION_SETTLE: PositionSettle = { saveMs: 5_000, moveMs: 6_000 };
+const POSITION_SETTLE: PositionSettle = { saveMs: 5_000, moveMs: 6_000, settingMs: 2_000 };
+/** Getting ready for a frame, or finishing after one, has a slot to fit in. With POSITION_CLOSE_TIMEOUT_MS this is FRAME_STEP_SECONDS. */
+const FRAME_STEP_TIMEOUT_MS = 45_000;
+/** The camera's motion tracking setting, which the app calls AI tracking. It only took the JSON form, not the scalar one. */
+const MOTION_TRACKING_SETTING = 6016;
 
 /** The SDK's HTTP client, for the trusted-device calls it doesn't wrap. test/mega-adapter.test.ts checks these against the real class. */
 export interface SecurityApi {
@@ -91,6 +95,7 @@ export interface MegaLiveStream {
 export interface PositionSettle {
   saveMs: number;
   moveMs: number;
+  settingMs: number;
 }
 
 /**
@@ -124,6 +129,8 @@ export interface MegaClient {
   connectStation(serial: string, signal?: AbortSignal): Promise<void>;
   getP2pSessions(): Map<string, unknown>;
   deviceState(serial: string): { lastSeenMs?: number };
+  /** Private in the SDK's types. It's the only way to a setting it has no setter for, and the version is pinned. */
+  routeCommand(serial: string, command: { kind: "set-json"; param: number; data: { value: number }; channel: number }): Promise<void>;
   earnTrust(answer: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<void>;
   isTrustedDevice(): Promise<boolean>;
   disconnect(): Promise<void>;
@@ -625,7 +632,7 @@ export class MegaAdapter implements CameraAdapter {
   }
 
   /** Holds the connection open like an attempt does, so the sweep doesn't close it, and shuts it the same way afterwards. */
-  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>) => Promise<T>): Promise<T> {
+  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>) => Promise<T>, timeoutMs = POSITION_TIMEOUT_MS): Promise<T> {
     this.attemptActive = true;
     let deadline: NodeJS.Timeout | undefined;
     try {
@@ -634,7 +641,7 @@ export class MegaAdapter implements CameraAdapter {
       const list = positions?.list?.bind(positions);
       if (positions === undefined || list === undefined) throw new CaptureFailure("camera_unreachable", "position", "The SDK offers no saved positions for this camera.");
       const expired = new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => reject(new CaptureFailure("camera_unreachable", "position", `The camera didn't finish with its saved positions within ${POSITION_TIMEOUT_MS / 1000} seconds.`)), POSITION_TIMEOUT_MS);
+        deadline = setTimeout(() => reject(new CaptureFailure("camera_unreachable", "position", `The camera didn't finish with its saved positions within ${timeoutMs / 1000} seconds.`)), timeoutMs);
       });
       return await Promise.race([work(positions, list), expired]);
     } catch (error) {
@@ -660,15 +667,37 @@ export class MegaAdapter implements CameraAdapter {
     });
   }
 
-  async returnToPosition(cameraKey: string, positionId: number): Promise<"returned" | "gone"> {
-    return this.withPositions(cameraKey, async (positions, list) => {
-      // A position can be deleted in the app, and there's nothing to go to then.
-      if ((await list()).find((position) => position.id === positionId)?.raw.enable !== 1) return "gone";
-      await positions.preview(positionId);
-      // Closing the connection straight away could stop the camera on its way.
-      await delay(this.settle.moveMs);
-      return "returned";
-    });
+  private setMotionTracking(cameraKey: string, on: boolean): Promise<void> {
+    return this.client.routeCommand(cameraKey, { kind: "set-json", param: MOTION_TRACKING_SETTING, data: { value: on ? 1 : 0 }, channel: 0 });
+  }
+
+  async prepareFrame(cameraKey: string, positionId: number): Promise<"ready" | "gone"> {
+    return this.withPositions(
+      cameraKey,
+      async (positions, list) => {
+        // First, so a frame taken without its position still can't be taken mid-chase.
+        await this.setMotionTracking(cameraKey, false);
+        // A position can be deleted in the app, and there's nothing to go to then.
+        if ((await list()).find((position) => position.id === positionId)?.raw.enable !== 1) return "gone";
+        await positions.preview(positionId);
+        // Closing the connection straight away could stop the camera on its way.
+        await delay(this.settle.moveMs);
+        return "ready";
+      },
+      FRAME_STEP_TIMEOUT_MS,
+    );
+  }
+
+  async resumeTracking(cameraKey: string): Promise<void> {
+    await this.withPositions(
+      cameraKey,
+      async () => {
+        await this.setMotionTracking(cameraKey, true);
+        // As with a move, closing the connection straight away could lose it.
+        await delay(this.settle.settingMs);
+      },
+      FRAME_STEP_TIMEOUT_MS,
+    );
   }
 
   async forgetPosition(cameraKey: string, positionId: number): Promise<void> {

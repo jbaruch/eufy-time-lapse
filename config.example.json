@@ -27,13 +27,13 @@
     "target_keyframes": 2,
     "max_attempts": 3,
     "retry_delay_seconds": 5,
-    "slot_deadline_seconds": 180,
+    "slot_deadline_seconds": 285,
     "max_session_seconds_per_day": 6000
   },
   "traffic": { "monthly_budget_mb": null, "warn_fraction": 0.8, "pause_fraction": 1 },
   "storage": { "min_free_disk_mb": 1024, "keep_failed_work_days": 3, "keep_logs_days": 30 },
   "alerts": { "telegram": null, "consecutive_failed_slots": 3, "reminder_hours": 24, "first_try_warn_percent": 80, "first_try_window": 50, "daily_report": true },
   "http": { "bind": "127.0.0.1", "port": 8787 },
-  "framing": { "tolerance_pixels": 32, "return_after_off_target_slots": 2, "return_enabled": true },
+  "framing": { "tolerance_pixels": 32, "alert_after_off_target_slots": 2, "reset_before_frame": true },
   "logging": { "sdk_debug": false }
 }

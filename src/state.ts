@@ -171,7 +171,7 @@ export interface BatteryRow {
   telemetry_json: string;
 }
 
-export type FlagName = "operator_paused" | "battery_paused" | "battery_override" | "auth_required" | "first_started_at" | "camera_read_failures" | "login_renewal_tried_at" | "framing_position_id" | "framing_position_saved_at" | "framing_returned_at" | "daily_report_date";
+export type FlagName = "operator_paused" | "battery_paused" | "battery_override" | "auth_required" | "first_started_at" | "camera_read_failures" | "login_renewal_tried_at" | "framing_position_id" | "framing_position_saved_at" | "tracking_paused_at" | "daily_report_date";
 
 export type FramingCheckStatus = "on_target" | "off_target" | "unsure";
 

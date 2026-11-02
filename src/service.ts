@@ -21,6 +21,7 @@ import { addDays, formatClock, isActiveForInterval, localParts, parseClock, plan
 import { EXPOSURE_TIME_NOTE, readStoredCapture, spoolDirectory, storedCaptureProblem } from "./stored-capture.ts";
 import type { CaptureMetadata, CaptureOwner } from "./stored-capture.ts";
 import type { ScheduleConfig } from "./schedule.ts";
+import { FRAME_STEP_SECONDS } from "./service-config.ts";
 import type { ServiceConfig } from "./service-config.ts";
 import type { AttemptRow, CaptureRow, FramingReference, SlotRow, State } from "./state.ts";
 
@@ -66,9 +67,17 @@ export interface ServiceOptions {
 /** How far back to look for a frame taken at this time of day. */
 const FRAMING_REFERENCE_DAYS = 3;
 /** Each return runs the motor, so a frame that keeps saying off target can't run it often, whatever the cause. */
-const FRAMING_RETURN_COOLDOWN_MS = 30 * 60_000;
-const FRAMING_MAX_RETURNS_PER_DAY = 6;
+/** How many times to try getting the camera ready for one frame. */
+const FRAME_RESET_TRIES = 2;
+const FRAME_STEP_MS = FRAME_STEP_SECONDS * 1000;
+/** How long to wait between tries at turning tracking back on, once a slot hasn't managed it. */
+const TRACKING_RETRY_MS = 5 * 60_000;
 const DAY_MS = 86_400_000;
+
+interface JudgedFrame {
+  reference: FramingReference | undefined;
+  verdict: FramingVerdict;
+}
 
 async function compareStoredFrames(referencePath: string, framePath: string): Promise<FrameComparison> {
   return compareFrames(await readGrayFrame(referencePath), await readGrayFrame(framePath));
@@ -112,6 +121,7 @@ export class CaptureService {
   /** A failure from background work, which the next tick raises so it takes the same path as any other crash. */
   private backgroundFailure: Error | undefined;
   private dailyReportReadFor: string | undefined;
+  private trackingRetryAtMs: number | undefined;
   /** Unset until the service runs. */
   private loopBeatAt: number | undefined;
   private loopDeclaredStuck = false;
@@ -431,6 +441,7 @@ export class CaptureService {
       return 0;
     }
     await this.renewLoginIfDue();
+    await this.resumeTrackingIfOwed();
     await this.sendDailyReportIfDue();
     const next = this.state.nextPending(now);
     return next === undefined ? IDLE_WAKE_MS : Math.min(IDLE_WAKE_MS, Math.max(0, Date.parse(next.scheduled_at_utc) - now.getTime()));
@@ -735,28 +746,51 @@ export class CaptureService {
     });
 
     const slotDir = join(this.options.dataDir, "work", workKey);
+    const savedPosition = this.state.getFlag("framing_position_id");
+    const positionId = this.config.framing.reset_before_frame && savedPosition !== undefined ? Number(savedPosition) : undefined;
+    const deadlineAtMs = startedAt.getTime() + remainingMs;
+    const judged = new Map<string, JudgedFrame>();
     let result: Awaited<ReturnType<typeof captureSlot>>;
     try {
       await mkdir(join(this.options.dataDir, "work"), { recursive: true });
-      result = await withCameraLock(this.lockPath, (lockLost) =>
-        captureSlot({
-          adapter,
-          cameraKey: camera.key,
-          slotDir,
-          acquisitionTimeoutMs: acquire * 1000,
-          cleanupTimeoutMs: cleanup * 1000,
-          targetKeyframes: this.config.capture.target_keyframes,
-          minWidth: this.options.minWidth,
-          minHeight: this.options.minHeight,
-          maxTries: this.config.capture.max_attempts,
-          retryDelayMs: this.config.capture.retry_delay_seconds * 1000,
-          slotDeadlineMs: remainingMs,
-          signal: AbortSignal.any([signal, lockLost]),
-          log: this.options.log,
-          sleep: this.sleep,
-          now: this.now,
-          onLateFailure: this.onBackgroundFailure,
-        }),
+      result = await withCameraLock(
+        this.lockPath,
+        async (lockLost) => {
+          const taken = await captureSlot({
+            adapter,
+            cameraKey: camera.key,
+            slotDir,
+            acquisitionTimeoutMs: acquire * 1000,
+            cleanupTimeoutMs: cleanup * 1000,
+            targetKeyframes: this.config.capture.target_keyframes,
+            minWidth: this.options.minWidth,
+            minHeight: this.options.minHeight,
+            maxTries: this.config.capture.max_attempts,
+            retryDelayMs: this.config.capture.retry_delay_seconds * 1000,
+            // Turning tracking back on has to fit too, so a try can't start that would leave no time for it.
+            slotDeadlineMs: positionId === undefined ? remainingMs : remainingMs - FRAME_STEP_MS,
+            signal: AbortSignal.any([signal, lockLost]),
+            log: this.options.log,
+            sleep: this.sleep,
+            now: this.now,
+            onLateFailure: this.onBackgroundFailure,
+            ...(positionId === undefined
+              ? {}
+              : {
+                  beforeTry: () => this.resetCamera(adapter, camera, positionId, deadlineAtMs),
+                  beforeTryMs: FRAME_STEP_MS,
+                  isOffTarget: async (record: AttemptRecord) => {
+                    const verdict = await this.judgeFrame(join(this.options.dataDir, "work", record.attempt_id, "frame.jpg"), new Date(record.timing.frame_saved_at ?? this.now()));
+                    judged.set(record.attempt_id, verdict);
+                    return verdict.verdict.status === "off_target";
+                  },
+                }),
+          });
+          // A connection that may still be closing could cut this off, and a lost lock isn't ours to act under. The next idle wake does it instead.
+          const closed = [taken.chosen, ...taken.otherTries].every((record) => record.cleanup.status === "ok");
+          if (positionId !== undefined && closed && !lockLost.aborted) await this.resumeTracking(adapter, camera);
+          return taken;
+        },
         this.lockOptions,
       );
     } catch (error) {
@@ -808,7 +842,7 @@ export class CaptureService {
         everyMinutes,
       });
       this.state.setSlot(slot.slot_id, chosen.status === "captured" ? "captured" : "captured_degraded", { captureId, everyMinutes });
-      await this.checkFraming(captureId, camera);
+      await this.checkFraming(captureId, judged.get(chosen.attempt_id));
       // Every try's directory, the kept one included. Each holds raw 4K video.
       for (const record of [chosen, ...otherTries]) await rm(join(this.options.dataDir, "work", record.attempt_id), { recursive: true, force: true });
       this.options.log(`${slot.local_date} ${slot.local_time}: ${chosen.status} ${chosen.frame.width}x${chosen.frame.height} via ${chosen.connection_path ?? "unknown"} in ${chosen.timing.session_ms} ms, ${otherTries.length + 1} tries (${relativeDir})`);
@@ -937,13 +971,12 @@ export class CaptureService {
     return relativeDir;
   }
 
-  /** The frame is already safe, so nothing here can cost it. A verdict only says how to use it, and whether to turn the camera. */
-  private async checkFraming(captureId: string, camera: CameraInfo): Promise<void> {
-    const flagged = this.state.getFlag("framing_position_id");
-    if (flagged === undefined) return;
+  /** The frame is already safe, so nothing here can cost it. A verdict only says how to use it. */
+  private async checkFraming(captureId: string, alreadyJudged?: JudgedFrame): Promise<void> {
+    if (this.state.getFlag("framing_position_id") === undefined) return;
     const capture = this.state.getCapture(captureId);
     if (capture === undefined) throw new Error(`capture ${captureId} was published but has no row`);
-    const { reference, verdict } = await this.judgeFrame(capture);
+    const { reference, verdict } = alreadyJudged ?? (await this.judgeFrame(join(this.options.dataDir, capture.relative_dir, "frame.jpg"), new Date(capture.frame_received_at)));
     this.state.recordFramingCheck({ capture_id: captureId, checked_at: this.now().toISOString(), status: verdict.status, reference_capture_id: reference?.capture_id ?? null, dx: verdict.dx, dy: verdict.dy, offset_dx: verdict.offset?.dx ?? null, offset_dy: verdict.offset?.dy ?? null, detail: verdict.detail });
     if (verdict.status === "unsure") return;
     if (verdict.status === "on_target") {
@@ -951,16 +984,18 @@ export class CaptureService {
       return;
     }
     this.options.log(`${capture.local_date}: this frame is off target: ${verdict.detail}`);
-    await this.returnIfStillOff(camera, Number(flagged));
+    const inARow = this.state.offTargetSlotsInARow();
+    if (inARow >= this.config.framing.alert_after_off_target_slots) {
+      await this.alerts.raise("framing_off_target", `the camera has been pointing away from its saved position for ${inARow} slots. Those frames are left out of renders. Look at the latest frame, and if this is the view you want, run framing set`);
+    }
   }
 
-  private async judgeFrame(capture: CaptureRow): Promise<{ reference: FramingReference | undefined; verdict: FramingVerdict }> {
-    const at = new Date(capture.frame_received_at);
+  private async judgeFrame(framePath: string, at: Date): Promise<JudgedFrame> {
     const references = this.state.framingReferences(new Date(at.getTime() - FRAMING_REFERENCE_DAYS * DAY_MS).toISOString(), this.state.getFlag("framing_position_saved_at") ?? "");
     const reference = chooseReference(references, at);
     if (reference === undefined) return { reference, verdict: { status: "unsure", dx: null, dy: null, offset: null, detail: "there's no earlier on-target frame to compare with" } };
     try {
-      const comparison = await (this.options.compareFrames ?? compareStoredFrames)(join(this.options.dataDir, reference.relative_dir, "frame.jpg"), join(this.options.dataDir, capture.relative_dir, "frame.jpg"));
+      const comparison = await (this.options.compareFrames ?? compareStoredFrames)(join(this.options.dataDir, reference.relative_dir, "frame.jpg"), framePath);
       return { reference, verdict: judgeFraming(comparison, { referenceAgeMs: at.getTime() - Date.parse(reference.frame_received_at), referenceOffset: { dx: reference.offset_dx ?? 0, dy: reference.offset_dy ?? 0 }, tolerancePixels: this.config.framing.tolerance_pixels }) };
     } catch (error) {
       if (!(error instanceof CaptureFailure)) throw error;
@@ -968,39 +1003,69 @@ export class CaptureService {
     }
   }
 
-  private async returnIfStillOff(camera: CameraInfo, positionId: number): Promise<void> {
-    const { return_after_off_target_slots: returnAfter, return_enabled: returnEnabled } = this.config.framing;
-    const inARow = this.state.offTargetSlotsInARow();
-    if (!returnEnabled || inARow < returnAfter) return;
-    if (inARow > returnAfter) {
-      await this.alerts.raise("framing_off_target", `the camera has been pointing away from its saved position for ${inARow} slots, and going back hasn't fixed it. Those frames are left out of renders. Look at the latest frame, and if this is the view you want, run framing set`);
-    }
-    const now = this.now();
-    const lastTried = this.state.getFlag("framing_returned_at");
-    if (lastTried !== undefined && now.getTime() - Date.parse(lastTried) < FRAMING_RETURN_COOLDOWN_MS) return;
-    if (this.state.countEventsSince("framing_return_tried", new Date(now.getTime() - DAY_MS).toISOString()) >= FRAMING_MAX_RETURNS_PER_DAY) return;
-    const adapter = this.adapter;
-    if (adapter === undefined) return;
-    // Recorded first, so a crash halfway through can't turn into a motor that never rests.
-    this.state.setFlag("framing_returned_at", now.toISOString());
-    this.state.addEvent("framing_return_tried", `going back to saved position ${positionId}`);
-    let outcome: "returned" | "gone";
-    try {
-      outcome = await withCameraLock(this.lockPath, () => adapter.returnToPosition(camera.key, positionId), this.lockOptions);
-    } catch (error) {
-      if (error instanceof CameraLockHeldError || error instanceof CameraLockLostError || error instanceof CaptureFailure) {
-        this.state.addEvent("framing_return_failed", error.message);
-        this.options.log(`couldn't turn the camera back to its saved position, and will try again: ${error.message}`);
+  /**
+   * Stops the camera chasing what it detects, and sends it back to its position. This can't cost a frame: a failed reset
+   * usually leaves the camera where it belongs, and the check on the frame catches it when it doesn't.
+   */
+  private async resetCamera(adapter: CameraAdapter, camera: CameraInfo, positionId: number, deadlineAtMs: number): Promise<void> {
+    // Written first, so that if the process dies from here on, the next start knows tracking may still be off.
+    this.state.setFlag("tracking_paused_at", this.now().toISOString());
+    const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup } = this.config.capture;
+    for (let attempt = 1; attempt <= FRAME_RESET_TRIES; attempt += 1) {
+      // This step, a capture, and turning tracking back on. Without room for all three, the frame is what matters.
+      if (this.now().getTime() + 2 * FRAME_STEP_MS + (acquire + cleanup) * 1000 > deadlineAtMs) {
+        this.options.log("not resetting the camera: there's only time left for the frame");
         return;
       }
-      throw error;
+      try {
+        const outcome = await adapter.prepareFrame(camera.key, positionId);
+        if (outcome === "gone") await this.alerts.raise("framing_position_gone", "the camera's saved position no longer exists, so it can't go back to it. Aim it where it should be, then run framing set");
+        return;
+      } catch (error) {
+        if (!(error instanceof CaptureFailure)) throw error;
+        this.state.addEvent("framing_reset_failed", error.message);
+        this.options.log(`couldn't reset the camera before a frame, on try ${attempt} of ${FRAME_RESET_TRIES}: ${error.message}`);
+      }
     }
-    if (outcome === "gone") {
-      await this.alerts.raise("framing_position_gone", "the camera's saved position no longer exists, so it can't go back to it. Aim it where it should be, then run framing set");
+  }
+
+  private async resumeTracking(adapter: CameraAdapter, camera: CameraInfo): Promise<void> {
+    try {
+      await adapter.resumeTracking(camera.key);
+    } catch (error) {
+      if (!(error instanceof CaptureFailure)) throw error;
+      this.state.addEvent("tracking_resume_failed", error.message);
+      this.options.log(`couldn't turn the camera's tracking back on, and will try again: ${error.message}`);
       return;
     }
-    this.state.addEvent("framing_returned", `returned to saved position ${positionId} after ${inARow} off-target slots`);
-    this.options.log(`turned the camera back to its saved position after ${inARow} off-target slots`);
+    this.state.setFlag("tracking_paused_at", null);
+    await this.alerts.clear("tracking_left_off");
+  }
+
+  /** For a slot that couldn't turn tracking back on, or a process that died before it could. */
+  private async resumeTrackingIfOwed(): Promise<void> {
+    if (this.state.getFlag("tracking_paused_at") === undefined) return;
+    const now = this.now();
+    if (this.trackingRetryAtMs !== undefined && now.getTime() < this.trackingRetryAtMs) return;
+    // A slot about to start does this itself when it's done, and holding the camera now could cost it its frame.
+    const next = this.state.nextPending(now);
+    if (next !== undefined && Date.parse(next.scheduled_at_utc) - now.getTime() < FRAME_STEP_MS) return;
+    this.trackingRetryAtMs = now.getTime() + TRACKING_RETRY_MS;
+    let outcome: void | CaptureFailure;
+    try {
+      outcome = await this.onCamera((adapter, camera) => adapter.resumeTracking(camera.key));
+    } catch (error) {
+      if (!(error instanceof CameraLockHeldError) && !(error instanceof CameraLockLostError)) throw error;
+      outcome = new CaptureFailure("camera_unreachable", "position", error.message, { cause: error });
+    }
+    if (outcome instanceof CaptureFailure) {
+      this.state.addEvent("tracking_resume_failed", outcome.message);
+      await this.alerts.raise("tracking_left_off", `the camera's AI tracking is still off after a frame, so events won't follow what they detect. It keeps trying: ${outcome.message}`);
+      return;
+    }
+    this.state.setFlag("tracking_paused_at", null);
+    this.trackingRetryAtMs = undefined;
+    await this.alerts.clear("tracking_left_off");
   }
 
   /** One piece of camera work outside a slot, for a command that ends straight after. */
@@ -1040,7 +1105,6 @@ export class CaptureService {
     this.state.recordFramingCheck({ capture_id: frame.capture_id, checked_at: this.now().toISOString(), status: "on_target", reference_capture_id: null, dx: 0, dy: 0, offset_dx: 0, offset_dy: 0, detail: "this frame was taken when the position was saved" });
     this.state.setFlag("framing_position_id", String(saved));
     this.state.setFlag("framing_position_saved_at", frame.frame_received_at);
-    this.state.setFlag("framing_returned_at", null);
     this.state.addEvent("framing_position_saved", `saved position ${saved}`);
     await this.alerts.clear("framing_off_target");
     await this.alerts.clear("framing_position_gone");
@@ -1055,7 +1119,6 @@ export class CaptureService {
     if (forgotten instanceof CaptureFailure) return forgotten;
     this.state.setFlag("framing_position_id", null);
     this.state.setFlag("framing_position_saved_at", null);
-    this.state.setFlag("framing_returned_at", null);
     this.state.addEvent("framing_position_forgotten", `forgot position ${flagged}`);
     await this.alerts.clear("framing_off_target");
     await this.alerts.clear("framing_position_gone");

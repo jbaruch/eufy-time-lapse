@@ -129,25 +129,35 @@ In this order, and nothing waits for a slot:
 
 ## Using it as a camera too
 
-You can watch and pan in the app at any time. A slot that fires during live view still gets its frame, and the picture
-flickers once. To keep frames on target while people do that:
+You can watch and pan in the app at any time, and the camera can follow what it detects between frames ("AI tracking" in
+the app). A slot that fires during live view still gets its frame, and the picture flickers once. To keep every frame on
+target anyway:
 
 ```bash
 docker compose run --rm timelapse framing set
 ```
 
 This saves where the camera points now, in the first empty saved-position slot. It shows in the app, so leave it there.
-From then on, each frame's distance from that view is worked out through the last good frame, so small moves add up:
+From then on, every slot does this:
 
-- One frame off target is flagged, and renders leave it out. `render --include-off-target` keeps it.
-- If the next slot is off target too, the camera goes back to the saved position, so you get about 5 to 10 minutes of
-  looking around. The first frame after that is the next slot's.
-- It lands 10 to 18 pixels from where it was, which is close enough to count as on target.
-- A return runs at most every 30 minutes and 6 times in 24 hours. If going back doesn't fix it, an alert says so.
-- Fog, darkness or a frame it can't judge count as unsure, and unsure never moves the camera.
+1. Turns AI tracking off and sends the camera to the saved position. If that fails, it tries once more.
+2. Takes the frame, and compares it with the saved view.
+3. If the frame is off target, goes back and takes it again, as long as the slot has tries and time left.
+4. Turns AI tracking back on. If that fails, it keeps trying between slots, and an alert says so if it can't.
 
-If you meant to change the view, run `framing set` again. `framing off` stops all of it. `"framing": { "return_enabled": false }`
-in `data/config.json` keeps the flags and the verdicts in `status`, but never moves the camera.
+So anything you do in the app between frames undoes itself at the next slot, including a pan you meant to keep looking at.
+A few things about the frames:
+
+- A frame's distance from the saved view is worked out through the last good frame, so small moves add up.
+- The camera lands up to about 24 pixels from where it was, which counts as on target. Expect the view to shift that much
+  between frames, and leave it to the edit to line them up.
+- A failed reset doesn't cost the frame, because the camera is usually where it belongs anyway. A frame still off target
+  when the tries run out is kept and flagged, and renders leave it out. `render --include-off-target` keeps it.
+- Slots off target twice in a row raise an alert. `alert_after_off_target_slots` sets how many.
+- Fog, darkness or a frame it can't judge count as unsure, and unsure never triggers another try.
+
+If you meant to change the view, run `framing set` again. `framing off` stops all of it. `"framing": { "reset_before_frame": false }`
+in `data/config.json` keeps the flags, the alert and the verdicts in `status`, but never touches the camera.
 
 ## The daily report
 

@@ -120,7 +120,8 @@ export interface MockBehavior {
   trusted?: boolean | null;
   trustOutcome?: boolean;
   /** What a return to a saved position does, by default answering "returned". */
-  positionReturn?: () => "returned" | "gone";
+  frameReset?: () => "ready" | "gone";
+  trackingResume?: () => void;
 }
 
 export class MockAdapter implements CameraAdapter {
@@ -132,7 +133,10 @@ export class MockAdapter implements CameraAdapter {
   renewals = 0;
   trustCodes: string[] = [];
   savedPositions: number[] = [];
-  positionReturns: number[] = [];
+  /** What was asked of the camera, in order, for tests of the order. */
+  steps: string[] = [];
+  frameResets: number[] = [];
+  trackingResumes = 0;
   forgottenPositions: number[] = [];
   forgetFailure: Error | undefined;
   private readonly behavior: MockBehavior;
@@ -185,8 +189,12 @@ export class MockAdapter implements CameraAdapter {
     return this.behavior.trustOutcome ?? true;
   }
 
-  setPositionReturn(behavior: () => "returned" | "gone"): void {
-    this.behavior.positionReturn = behavior;
+  setFrameReset(behavior: () => "ready" | "gone"): void {
+    this.behavior.frameReset = behavior;
+  }
+
+  setTrackingResume(behavior: () => void): void {
+    this.behavior.trackingResume = behavior;
   }
 
   async savePosition(): Promise<number> {
@@ -195,9 +203,16 @@ export class MockAdapter implements CameraAdapter {
     return slot;
   }
 
-  async returnToPosition(_cameraKey: string, positionId: number): Promise<"returned" | "gone"> {
-    this.positionReturns.push(positionId);
-    return this.behavior.positionReturn?.() ?? "returned";
+  async prepareFrame(_cameraKey: string, positionId: number): Promise<"ready" | "gone"> {
+    this.steps.push(`reset ${positionId}`);
+    this.frameResets.push(positionId);
+    return this.behavior.frameReset?.() ?? "ready";
+  }
+
+  async resumeTracking(): Promise<void> {
+    this.steps.push("resume");
+    this.trackingResumes += 1;
+    this.behavior.trackingResume?.();
   }
 
   async forgetPosition(_cameraKey: string, positionId: number): Promise<void> {
@@ -217,6 +232,7 @@ export class MockAdapter implements CameraAdapter {
   }
 
   async openLiveSession(_key: string, signal: AbortSignal): Promise<LiveSession> {
+    this.steps.push("capture");
     this.opens += 1;
     if (this.behavior.open === undefined) throw new Error("this test did not expect a live session");
     return await this.behavior.open(signal);

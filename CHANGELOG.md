@@ -15,7 +15,7 @@ First version of the service, proven against the real camera on its built-in SIM
 - The `login` command adds the service to the account's trusted devices, through the older of Eufy's two login systems, since only its codes can do that. After that, renewing the login takes no code.
 - Renders MP4s from stored frames without touching the camera.
 - Sends a daily report after the capture window closes: the day's frames, how many took a second try, when any were missed, the battery against the day before, how long it charged and what it reached, and the battery's temperature.
-- Keeps the camera on target when people also use it as a camera: `framing set` saves the view, frames that drift are flagged and left out of renders, and the camera goes back if it stays off for two slots.
+- Keeps every frame on target when people also use it as a camera, and when it follows what it detects: `framing set` saves the view, and each slot turns AI tracking off, sends the camera back, takes the frame, retakes it if it's off target, and turns tracking back on. Frames still off target are flagged and left out of renders, and an alert says so if it keeps happening. Failures at any step retry, and none of them costs the frame.
 - `probe` uses the service's capture settings, and with `--attempts 10 --interval-minutes 0.05` is a 4-minute check for mount day. The README's "Going live" has the order.
 - Sends alerts to Telegram through the OneCLI gateway, so the service never holds the bot token. An alert that can't be delivered is tried again at the next slot.
 - Not built yet: the offsite S3 archive and the monthly preview render.

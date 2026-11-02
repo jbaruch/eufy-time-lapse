@@ -155,6 +155,61 @@ describe("captureSlot", () => {
     });
   }
 
+  it("runs the step before a try ahead of every try, retries included", async () => {
+    const order: string[] = [];
+    const { result } = slot([unreachable, good], {
+      beforeTry: async () => {
+        order.push("before");
+      },
+    });
+    const { chosen, otherTries } = await result;
+    assert.deepEqual(order, ["before", "before"]);
+    assert.equal(chosen.status, "captured");
+    assert.equal(otherTries.length, 1);
+  });
+
+  it("takes another try when a frame comes out off target, and logs why", async () => {
+    const answers = [true, false];
+    const { result, logged } = slot([good, good], { isOffTarget: async () => answers.shift() as boolean });
+    const { chosen, otherTries } = await result;
+    assert.equal(otherTries.length, 1);
+    assert.match(chosen.attempt_id, /-retry-1$/, "the later frame is the one kept");
+    assert.match(logged.join("\n"), /ended as off target/);
+  });
+
+  it("keeps a frame on target without asking for another", async () => {
+    const { result } = slot([good], { isOffTarget: async () => false });
+    assert.equal((await result).otherTries.length, 0);
+  });
+
+  it("doesn't ask whether a try with no frame was off target", async () => {
+    let asked = 0;
+    const { result } = slot([unreachable, good], {
+      isOffTarget: async () => {
+        asked += 1;
+        return false;
+      },
+    });
+    await result;
+    assert.equal(asked, 1);
+  });
+
+  it("keeps the frame when every try came out off target, since that's all it has", async () => {
+    const { result } = slot([good, good], { isOffTarget: async () => true });
+    const { chosen, otherTries } = await result;
+    assert.equal(otherTries.length, 1);
+    assert.notEqual(chosen.frame, null);
+  });
+
+  it("counts the step before a try toward the deadline", async () => {
+    const budget = 30_000 + 2_000 + 100;
+    const fits = slot([good, good], { slotDeadlineMs: budget + 1_000, beforeTryMs: 500, isOffTarget: async () => true });
+    assert.equal((await fits.result).otherTries.length, 1);
+    const tooLong = slot([good], { slotDeadlineMs: budget + 1_000, beforeTryMs: 2_000, isOffTarget: async () => true });
+    assert.equal((await tooLong.result).otherTries.length, 0);
+    assert.match(tooLong.logged.join("\n"), /wouldn't finish/);
+  });
+
   it("doesn't start a try that couldn't finish inside the slot deadline", async () => {
     const { adapter, result, logged } = slot([unreachable], { slotDeadlineMs: 30_000 });
     const { chosen } = await result;

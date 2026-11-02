@@ -36,9 +36,12 @@ export interface ServiceConfig {
   storage: { min_free_disk_mb: number; keep_failed_work_days: number; keep_logs_days: number };
   alerts: { telegram: TelegramConfig | null; consecutive_failed_slots: number; reminder_hours: number; first_try_warn_percent: number; first_try_window: number; daily_report: boolean };
   http: { bind: string; port: number };
-  framing: { tolerance_pixels: number; return_after_off_target_slots: number; return_enabled: boolean };
+  framing: { tolerance_pixels: number; alert_after_off_target_slots: number; reset_before_frame: boolean };
   logging: { sdk_debug: boolean };
 }
+
+/** The longest one step around a frame can take, getting the camera ready or letting it track again, closing its connection included. */
+export const FRAME_STEP_SECONDS = 55;
 
 /** Starting values only. The tiers and the session cap are set by calibration on real solar power. */
 export const DEFAULT_SERVICE_CONFIG: ServiceConfig = {
@@ -61,7 +64,7 @@ export const DEFAULT_SERVICE_CONFIG: ServiceConfig = {
     target_keyframes: 2,
     max_attempts: 3,
     retry_delay_seconds: 5,
-    slot_deadline_seconds: 180,
+    slot_deadline_seconds: 285,
     max_session_seconds_per_day: 6000,
   },
   traffic: { monthly_budget_mb: null, warn_fraction: 0.8, pause_fraction: 1 },
@@ -69,7 +72,7 @@ export const DEFAULT_SERVICE_CONFIG: ServiceConfig = {
   alerts: { telegram: null, consecutive_failed_slots: 3, reminder_hours: 24, first_try_warn_percent: 80, first_try_window: 50, daily_report: true },
   http: { bind: "127.0.0.1", port: 8787 },
   // 32 clears the 10 to 18 pixels a return to a saved position was measured to land off, so a return can't look like a new move.
-  framing: { tolerance_pixels: 32, return_after_off_target_slots: 2, return_enabled: true },
+  framing: { tolerance_pixels: 32, alert_after_off_target_slots: 2, reset_before_frame: true },
   logging: { sdk_debug: false },
 };
 
@@ -176,12 +179,13 @@ function validate(config: ServiceConfig): void {
   if (typeof retry !== "number" || !Number.isFinite(retry) || retry < 0) fail(`capture.retry_delay_seconds must be 0 or more, got ${JSON.stringify(retry)}.`);
   whole("capture.target_keyframes", keyframes, 1);
   whole("capture.max_attempts", tries, 1);
-  if ((acquire + cleanup) * tries + retry * (tries - 1) > deadline) fail("capture.slot_deadline_seconds is too short for max_attempts to finish.");
+  const aroundFrame = config.framing.reset_before_frame ? 2 * FRAME_STEP_SECONDS : 0;
+  if ((acquire + cleanup) * tries + retry * (tries - 1) + aroundFrame > deadline) fail("capture.slot_deadline_seconds is too short for max_attempts to finish, with the steps around a frame.");
 
-  const { tolerance_pixels: tolerance, return_after_off_target_slots: returnAfter, return_enabled: returnEnabled } = config.framing;
+  const { tolerance_pixels: tolerance, alert_after_off_target_slots: alertAfter, reset_before_frame: resetBeforeFrame } = config.framing;
   positive("framing.tolerance_pixels", tolerance);
-  whole("framing.return_after_off_target_slots", returnAfter, 1);
-  if (typeof returnEnabled !== "boolean") fail(`framing.return_enabled must be true or false, got ${JSON.stringify(returnEnabled)}.`);
+  whole("framing.alert_after_off_target_slots", alertAfter, 1);
+  if (typeof resetBeforeFrame !== "boolean") fail(`framing.reset_before_frame must be true or false, got ${JSON.stringify(resetBeforeFrame)}.`);
 
   const { monthly_budget_mb: budget, warn_fraction: warnFraction, pause_fraction: pauseFraction } = config.traffic;
   if (budget !== null) positive("traffic.monthly_budget_mb", budget);
