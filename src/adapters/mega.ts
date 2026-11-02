@@ -93,11 +93,15 @@ export interface PositionSettle {
   moveMs: number;
 }
 
-/** The camera's saved positions. `enable` is 1 on a slot in use and 0 on an empty one. */
+/**
+ * The camera's saved positions. `enable` is 1 on a slot in use and 0 on an empty one.
+ * The SDK's names mislead: its `goto` sends 6032, the vendor's save command, which doesn't move the camera and rewrites the
+ * slot with the current view, so it's left out of here. Its `preview` sends 6035, the vendor's command to go to a position.
+ */
 export interface MegaPositions {
   list?(): Promise<Array<{ id: number; raw: Record<string, unknown> }>>;
   save(id: number): Promise<unknown>;
-  goto(id: number): Promise<unknown>;
+  preview(id: number): Promise<unknown>;
   delete(id: number): Promise<unknown>;
 }
 
@@ -658,9 +662,9 @@ export class MegaAdapter implements CameraAdapter {
 
   async returnToPosition(cameraKey: string, positionId: number): Promise<"returned" | "gone"> {
     return this.withPositions(cameraKey, async (positions, list) => {
-      // On an empty slot this same command saves the current view instead, so a position deleted in the app must be caught first.
+      // A position can be deleted in the app, and there's nothing to go to then.
       if ((await list()).find((position) => position.id === positionId)?.raw.enable !== 1) return "gone";
-      await positions.goto(positionId);
+      await positions.preview(positionId);
       // Closing the connection straight away could stop the camera on its way.
       await delay(this.settle.moveMs);
       return "returned";
