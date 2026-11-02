@@ -164,6 +164,10 @@ Battery temperature: 11°C.
 The battery is compared with the last reading before today, because nothing reads it overnight and a day's own change
 would leave the night out. Second tries are worth watching: they're the first number to move when the connection weakens.
 
+Charging time only counts what the readings saw, so it errs low. A gap in the readings counts for a few slots at most. If
+the day's first reading finds it already charging, the line says so: `Charging: at least 5 minutes, already on at 07:00,
+ended at 100% by 07:05.` Don't read much into the percentage during a charge. So far it sits flat and then jumps to 100.
+
 It also goes out on a paused day. A report that's late or can't be delivered keeps trying until the next day's is due, so
 a whole day with no report means the service, the host or Telegram was down, though only someone who notices the silence
 will know. `"alerts": { "daily_report": false }` turns it off.
