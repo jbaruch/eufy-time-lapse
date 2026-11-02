@@ -136,7 +136,7 @@ docker compose run --rm timelapse framing set
 ```
 
 This saves where the camera points now, in the first empty saved-position slot. It shows in the app, so leave it there.
-From then on, each frame is compared with the last good one:
+From then on, each frame's distance from that view is worked out through the last good frame, so small moves add up:
 
 - One frame off target is flagged, and renders leave it out. `render --include-off-target` keeps it.
 - If the next slot is off target too, the camera goes back to the saved position, so you get about 5 to 10 minutes of

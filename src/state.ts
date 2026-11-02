@@ -90,6 +90,10 @@ const MIGRATIONS: readonly string[] = [
   );
   CREATE INDEX framing_checks_by_time ON framing_checks (checked_at);
   `,
+  `
+  ALTER TABLE framing_checks ADD COLUMN offset_dx INTEGER;
+  ALTER TABLE framing_checks ADD COLUMN offset_dy INTEGER;
+  `,
 ];
 
 export type SlotState = "pending" | "running" | "captured" | "captured_degraded" | "missed" | "skipped_policy";
@@ -176,8 +180,12 @@ export interface FramingCheckRow {
   checked_at: string;
   status: FramingCheckStatus;
   reference_capture_id: string | null;
+  /** How far from the frame it was compared with. */
   dx: number | null;
   dy: number | null;
+  /** How far from the saved position. Null when it couldn't be measured, and on rows from before this was kept. */
+  offset_dx: number | null;
+  offset_dy: number | null;
   detail: string;
 }
 
@@ -186,6 +194,8 @@ export interface FramingReference {
   capture_id: string;
   relative_dir: string;
   frame_received_at: string;
+  offset_dx: number | null;
+  offset_dy: number | null;
 }
 
 export class State {
@@ -468,8 +478,8 @@ export class State {
   /** Later checks of the same frame are ignored, so a retried publish can't rewrite a verdict. */
   recordFramingCheck(row: FramingCheckRow): void {
     this.db
-      .prepare("INSERT INTO framing_checks (capture_id, checked_at, status, reference_capture_id, dx, dy, detail) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (capture_id) DO NOTHING")
-      .run(row.capture_id, row.checked_at, row.status, row.reference_capture_id, row.dx, row.dy, row.detail);
+      .prepare("INSERT INTO framing_checks (capture_id, checked_at, status, reference_capture_id, dx, dy, offset_dx, offset_dy, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (capture_id) DO NOTHING")
+      .run(row.capture_id, row.checked_at, row.status, row.reference_capture_id, row.dx, row.dy, row.offset_dx, row.offset_dy, row.detail);
   }
 
   latestFramingCheck(): FramingCheckRow | undefined {
@@ -481,7 +491,7 @@ export class State {
    * Nothing from before the position was saved, however good: those frames show another view.
    */
   framingReferences(since: string, positionSavedAt: string): FramingReference[] {
-    const query = "SELECT c.capture_id, c.relative_dir, c.frame_received_at FROM framing_checks f JOIN captures c ON c.capture_id = f.capture_id WHERE f.status = 'on_target' AND c.frame_received_at >= ?";
+    const query = "SELECT c.capture_id, c.relative_dir, c.frame_received_at, f.offset_dx, f.offset_dy FROM framing_checks f JOIN captures c ON c.capture_id = f.capture_id WHERE f.status = 'on_target' AND c.frame_received_at >= ?";
     const recent = this.all<FramingReference>(`${query} AND c.frame_received_at >= ? ORDER BY c.frame_received_at`, positionSavedAt, since);
     return recent.length > 0 ? recent : this.all<FramingReference>(`${query} ORDER BY c.frame_received_at DESC LIMIT 1`, positionSavedAt);
   }
