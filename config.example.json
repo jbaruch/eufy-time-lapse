@@ -1,0 +1,38 @@
+{
+  "project": { "id": "construction", "site_time_zone": "America/Chicago" },
+  "camera": { "id": "site-overview" },
+  "schedule": {
+    "grid_minutes": 5,
+    "window_start": "08:00",
+    "window_end_exclusive": "18:00",
+    "days": ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+  },
+  "cadence": {
+    "tiers": [
+      { "battery_at_least": 60, "every_minutes": 5 },
+      { "battery_at_least": 40, "every_minutes": 15 },
+      { "battery_at_least": 0, "every_minutes": 60 }
+    ],
+    "unknown_battery_every_minutes": 60
+  },
+  "battery": {
+    "warn_below_percent": 35,
+    "pause_at_or_below_percent": 25,
+    "resume_at_or_above_percent": 40,
+    "reading_max_age_hours": 6
+  },
+  "capture": {
+    "acquisition_timeout_seconds": 30,
+    "cleanup_timeout_seconds": 10,
+    "target_keyframes": 2,
+    "max_attempts": 3,
+    "retry_delay_seconds": 5,
+    "slot_deadline_seconds": 180,
+    "max_session_seconds_per_day": 6000
+  },
+  "traffic": { "monthly_budget_mb": null, "warn_fraction": 0.8, "pause_fraction": 1 },
+  "storage": { "min_free_disk_mb": 1024, "keep_failed_work_days": 3, "keep_logs_days": 30 },
+  "alerts": { "webhook_url_file": null, "consecutive_failed_slots": 3, "reminder_hours": 24, "first_try_warn_percent": 80, "first_try_window": 50 },
+  "http": { "bind": "127.0.0.1", "port": 8787 },
+  "logging": { "sdk_debug": false }
+}

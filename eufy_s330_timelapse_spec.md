@@ -1,8 +1,17 @@
 # Eufy S330 Construction Time-Lapse Service — Technical Specification
 
-**Version:** 1.0  
-**Date:** October 21, 2026  
-**Status:** Proposed; native LTE feasibility must be validated before implementation proceeds beyond the probe.
+**Version:** 1.1\
+**Date:** October 31, 2026\
+**Status:** Native LTE feasibility shown on the actual camera: 98% of first tries in a back-to-back run, 46 of 47 slots at 4K at the real pace, and a passed formal probe (section 3.1). Battery behavior on solar is not yet measured. The capture service runs on the target host. The offsite archiver and monthly preview are not built.
+
+**Changes in 1.1**, from running the real camera and from the owner's decisions:
+
+- The adapter is `@mega-yfue/eufy-sdk` with this project's own connect on top; the legacy library failed on this account, and the SDK's connect wasn't reliable (sections 2, 3.1).
+- The minimum frame size is **3840×2160**, and renders exclude smaller frames by default (sections 3, 8).
+- The target cadence is **every 5 minutes**, thinned by battery tiers, with more frames kept than any one render uses (section 6.1).
+- The session budget default rises to **6,000 seconds per day** to fit that cadence (section 6.3).
+- Eufy credentials are Docker secret files, because the credential gateway can't carry them (section 10).
+- Activity-based rendering and bonus frames are recorded as post-MVP ideas (section 14).
 
 The service will document approximately one year of construction using an already-purchased **eufy 4G LTE Cam S330 (T86P2)** connected through its **built-in SIM card** and powered by a battery and solar panel. It will capture fresh frames on a schedule, archive them off-camera, and render videos for selected date ranges.
 
@@ -31,10 +40,11 @@ Out of scope for the MVP: a web dashboard, multi-user or multi-camera support, c
 | `eufy-security-client` can handle this device family and remote P2P connections, but the repository is archived. [S2] | Use it as the first candidate for an experimental adapter; validate behavior on the actual camera. |
 | A report involving two T86P2 cameras describes successful remote video access with the legacy library. Those cameras were connected by Wi-Fi to an LTE router. [S3] | This does **not** prove access over the camera's built-in SIM. |
 | A report covering three T86P2 units on mobile networks describes frequent live-stream connection failures through the newer bridge, plus an isolated successful capture. [S4] | Native LTE must be demonstrated; it is not an assumed capability. |
-| A relay-fallback fix has been proposed for the new SDK. The PR was still open as of this specification. [S5] | Do not treat the existence of the PR as a validated fix. |
+| The relay-fallback fix for the new SDK has merged. [S5] | Validated on this camera over its built-in SIM: every 4K frame so far came through the relay (section 3.1). |
+| `eufy-security-client` returned an empty device list for this account, and its maintainer describes the API it uses as one Eufy is shutting down. | The legacy adapter is removed; it failed the probe's first step. |
 | The SDK and HTTP bridge may return retained imagery if a live request fails. [S6, S7] | Verify frame provenance explicitly; never silently substitute a cached frame. |
 
-**Adapter selection:** implement an adapter around `eufy-security-client` first. Consider a second adapter based on `@mega-yfue/eufy-sdk` only if the legacy option fails the probe or later breaks after an Eufy change. Supporting both adapters simultaneously is not an MVP requirement.
+**Adapter selection:** `@mega-yfue/eufy-sdk`, pinned at exactly `0.5.0`, after the legacy option failed. Supporting both adapters simultaneously is not an MVP requirement. This project already replaces the SDK's connect behavior (section 3.1). If the SDK's data path later breaks too, the next step is taking the rest of the verified protocol into this project's own client, not going back to the legacy library.
 
 Before installation, inspect available releases, select an exact version, and pin it in the lockfile. Version `4.2.0` in [S3] is the version reported by that user, **not** a dependency already verified for this project. Pin a fork by commit SHA. Avoid floating `latest` tags and unpinned branches.
 
@@ -55,7 +65,7 @@ For each attempt, record:
 - Camera session duration, available traffic counters, and connection-cleanup result.
 - Battery percentage and age of the reading, if available.
 
-Minimum acceptable image size for the initial test: **1280×720**; **1920×1080 or higher** is preferred. This is a project acceptance threshold, not a manufacturer guarantee. Do not infer the accessible video resolution from the camera's 4K marketing designation.
+Minimum acceptable image size: **3840×2160**, by the owner's decision: the camera delivers it, and a smaller frame would pull a whole render down to its size. This is a project acceptance threshold, not a manufacturer guarantee. The accessible resolution was measured, not inferred from the camera's 4K marketing designation.
 
 ## Probe acceptance criteria
 
@@ -64,6 +74,57 @@ All three attempts must retrieve frames from **new live sessions**, meet the min
 Where practical, verify freshness with a controlled change in the scene between attempts. Equal or different file hashes alone do not prove that an image is fresh.
 
 If the probe fails, its deliverable is a diagnostic report identifying the failure and the next bounded experiment (for example, a connectivity setting or alternate adapter). Continuous operation remains **blocked**. Returning the latest thumbnail is not an acceptable workaround or a passing result.
+
+## 3.1 Findings on the actual camera
+
+Measured on a T86P2 (firmware 1.2.4.4) on cable power, on its built-in SIM, from the production host, on the night of October 31, 2026.
+
+**What works:**
+
+- The SDK reaches the camera over the built-in SIM and receives real **3840×2160** H.265 keyframes.
+- The camera sits behind symmetric carrier NAT, so every 4K frame has come through the **relay**. A direct path won occasionally in early tests, stayed at 720p and carried little data.
+- Each stream starts at 1280×720 for the first keyframe and steps up to 3840×2160 from the next, about 2 seconds later. The service holds the session until it has two keyframes at the required size, then stops. One FFmpeg run decodes each keyframe, because a single FFmpeg output locks to the first frame's size.
+- A capture takes about **13 seconds** of camera contact when the camera has to wake, and about **0.5 MB** of media, which is about 1.8 GB per month at the target cadence. That counts media bytes only; compare it with the carrier's figure.
+
+**The connect is this project's, not the SDK's.** The SDK's own connect was unreliable on this camera, so `src/adapters/p2p-policy.ts` changes it by wrapping private methods of the pinned SDK, tested against the real class. `lab/hammer.ts` fires captures back to back and traces the packets:
+
+| Connect | Tries | 4K | Camera never joined | Hang-ups or no video | Median session |
+| --- | --- | --- | --- | --- | --- |
+| SDK's own | 13 | 23% | 7 | 5 | 33 s |
+| One socket, relay after 7 s, no lookups once on the relay | 24 | 71% | 7 | 1 | 17 s |
+| Also: no hole punch, and ask again on a stall | 40 | 98% | 0 | 3 | 17 s |
+| Also: relay from about 2 s, and one stream start | 100 | 98% | 0 | 2 | 9.4 s |
+
+The first two rows were rotated together, the last two ran as their own blocks. What each change does:
+
+- **Asking again.** The SDK asks the lookup servers for the relay list once. A try that stalled stayed stalled until the SDK's 45-second timeout, though the relay answered within a second whenever it answered at all. Asking again after 2 seconds took "camera never joined" from 7 of 24 to 0 of 140, with stalled tries recovering in the same session. A relay doesn't answer a bare hello from an unregistered socket, which fits relays depending on what the lookup servers have arranged, but the mechanism on the camera's side is inferred, not observed.
+- **One stream start.** The SDK started a running stream a second time once the level-2 key arrived, and the camera often closed the session right after acknowledging it. Hang-ups 3 to 3.6 seconds in went from about 4 in 100 tries to none in 100. 4K arrives without that second start.
+- **Asking for the relay early.** The lookup servers hold the list until the camera is ready, so waiting first added only time.
+- **Hole punching.** Carrier NAT defeats it. Removing it removed traffic, with no measured harm.
+
+Answering the camera's relay packets, and switching to another relay on a stall without asking for the list again, were tried and did nothing.
+
+**What's left:** about 2% of tries. A session closes about 2 seconds in with no visible cause, or the camera never completes the key exchange and closes at about 6 seconds. Neither has a root cause. The next try, 5 seconds later, handles both, at a cost of under 10 seconds.
+
+**The formal probe** passed on November 1, 2026: 3 of 3 attempts at 4K on the first try, 15 minutes apart, connecting in 6.2 to 7.5 seconds, with sessions of 11.3 to 18.3 seconds and no connection left open.
+
+**At the real pace:** 47 slots at 5 minutes over one night, on cable. 46 came out at 4K and one at 1280×720. 43 of 46 first tries reached 4K, and a retry fixed 2 of the other 3. Sessions took 13.8 seconds at the median and 28.7 at the 90th percentile, for about 0.42 MB of video per frame.
+
+**The run slowed down with no change to the connect.** Until about 03:30 local, connects took 7.3 seconds at the median and 10.4 at most. After that they took 13.0 and 22.8, and median sessions went from 12.7 to 19.3 seconds. Most of that is the wait for the lookup servers to learn the camera's address, which moved from a steady 4 seconds to steps of about 4, 10 and 16 to 19. Some sessions also go silent for about 6 seconds mid-stream. Our lookups were acknowledged within 20 ms throughout, so the steps are on the camera's or the carrier's side. A lost wake being retried would fit, but that's inferred. A retry seconds later found the camera in 3.8 seconds. The attempt deadline is 30 seconds, and 4 sessions reached it with a frame already in hand, so calibration has to allow for this when it sets the session cap.
+
+**Broken on purpose, on the real camera:**
+
+| What happened | What the service did |
+|---|---|
+| `SIGKILL` mid-decode, with the stream on disk and no frame yet | The restart published the 4K frame 1.5 seconds later, marked `unknown_after_crash` |
+| The fall-back hour on November 1 | No slots in the repeated hour, and no duplicate local times |
+| The month changing at local midnight | The data budget restarted from the new month's sessions |
+| The service stopped for 31 minutes | 5 slots marked missed, one alert on restart, and its recovery 19 seconds later with the next frame |
+| A second full login from the service's device identity | Eufy asked for a 2FA code, which is how the trusted-device gap was found. The held token kept working, and the next slot came out at 4K |
+
+**Not proven yet:** that a trusted device renews with no code, and the renewal itself on the real account. Both need one real code from the account holder, through `login`. On the real account so far: the trusted list answers, and lists 3 devices and not this one, and a wrong code on the add comes back as `26050`, Eufy's own verify-code error.
+
+**Not ruled out:** what the camera does on its side is only visible through the relay. Battery cost has not been measured, because the camera has only run on cable. It's the main open question for the 5-minute target.
 
 # 4. Architecture
 
@@ -93,11 +154,11 @@ An accepted frame must be decoded from the video data of a **new live session st
 
 This proves the acquisition path, not the exact physical exposure time if the camera provides no trustworthy frame timestamp. Record reception time and camera exposure time separately; set unknown exposure times to `null`.
 
-For the legacy adapter, start a new live stream and decoder per attempt. Register event handlers before sending the start command. The method name `startStationLivestream` does not require a separate HomeBase: a standalone camera may act as its own station.
+Start a new live stream and decoder per attempt, and register event handlers before sending the start command.
 
-If the newer SDK is used, disable its retained-image cache with `storedSnapshotCache: false`, reject any `retained: true` result, and prevent reuse of frames from an earlier shared stream. Calling `snapshotLive()` without those safeguards is insufficient. Likewise, do not treat bridge endpoint `/snapshot/<sn>?mode=live` as a guaranteed fresh source. [S6, S7]
+Disable the SDK's retained-image cache with `storedSnapshotCache: false`, reject any `retained: true` result, and prevent reuse of frames from an earlier shared stream. Calling `snapshotLive()` without those safeguards is insufficient. Likewise, do not treat bridge endpoint `/snapshot/<sn>?mode=live` as a guaranteed fresh source. [S6, S7]
 
-On a cold start, wait for a decodable keyframe. Dropping the first frame or allowing a brief warm-up may be necessary for a given adapter; record the observed policy after the probe. A fixed delay alone is not proof of freshness.
+On a cold start, wait for keyframes at the required size. The observed policy: hold the session until two keyframes at the minimum size have arrived or the attempt's deadline passes, then use the last keyframe at the highest resolution. A fixed delay alone is not proof of freshness, and a fixed window lost 4K on a slow path.
 
 ## 5.2 Capture attempt lifecycle
 
@@ -105,11 +166,13 @@ On a cold start, wait for a decodable keyframe. Dropping the first frame or allo
 2. Create a capture-attempt record with a unique identifier.
 3. If configured and experimentally supported, restore the selected camera framing/preset.
 4. Open a new live session, obtain a frame, and validate its image data and provenance.
-5. Atomically store the frame and provisional metadata with `cleanup_status=pending`.
+5. Atomically store a versioned record of the attempt beside the received stream, so those bytes survive a crash.
 6. In `finally`, stop the live stream, decoder, and camera connection.
-7. Atomically finalize the capture metadata with the cleanup outcome; complete the attempt record and enqueue archive upload.
+7. Decode the frame, then atomically publish it with its final metadata, including the cleanup outcome; complete the attempt record and enqueue archive upload.
 
-The frame-acquisition timeout is **60 seconds per attempt**. Allow up to **10 additional seconds** for cleanup. The SDK may impose tighter internal timeouts; extending the service-level timeout does not automatically change them.
+Decoding comes after teardown so that FFmpeg never keeps the camera awake, which matters on every frame of a solar-powered session. A crash between steps 5 and 7 therefore leaves bytes that aren't a frame yet. Reconciliation decodes them and publishes the frame with `cleanup_status=unknown_after_crash`. If they won't decode, the slot counts as missed.
+
+The frame-acquisition timeout is **30 seconds per attempt**, twice the slowest 4K session measured. Allow up to **10 additional seconds** for cleanup. The SDK may impose tighter internal timeouts; extending the service-level timeout does not automatically change them.
 
 Release the connection immediately after success. The newer SDK's default five-minute idle disconnect is unsuitable for a standalone battery camera if it continues heartbeats beyond capture. Use explicit teardown or a verified short idle interval, such as up to five seconds. Disable event-driven pre-warming. [S8]
 
@@ -131,9 +194,17 @@ If the same camera is used for security, account for the documented T86P2 behavi
 
 ## 6.1 Initial schedule
 
-The proposed low-impact pilot schedule is **one capture per hour, every day from 08:00 through 17:00** (the `18:00` endpoint is exclusive), for **10 scheduled frames per day**. Configure 15- or 30-minute intervals only after measuring battery behavior and data usage.
+The target schedule is **one capture every 5 minutes, every day from 08:00 through 17:55** (the `18:00` endpoint is exclusive), for **120 scheduled frames per day**, thinned by battery so a weak day costs frames rather than the camera:
 
-At 365 days with no missing frames, this produces 3,650 images and approximately **2 minutes 2 seconds at 30 fps**. This is illustrative; both project duration and frequency are configurable.
+| Battery | Capture every |
+| --- | --- |
+| 60% or more | 5 minutes |
+| 40% or more | 15 minutes |
+| Below 40%, or unknown | 60 minutes |
+
+The tiers select from one fixed slot grid, so frames stay evenly placed when the cadence changes. They are starting values, to be set from measured battery behavior on solar. If the measurements don't support 5 minutes, the top tier moves rather than the design.
+
+At 365 days with no missing frames, this produces 43,800 images, or about **24 minutes at 30 fps** if all of them were used. That is deliberately more than a final video needs: more frames at capture, and the choice of which to use at render. Both project duration and frequency are configurable.
 
 Calculate schedules in the construction site's **IANA time zone**. The sample configuration uses `America/Chicago`; confirm the actual site's time zone at deployment. Store all timestamps in UTC and display local times with their UTC offset. The host's time zone must not alter scheduling.
 
@@ -143,7 +214,7 @@ For daylight saving time changes, mark nonexistent local instants as skipped wit
 
 Uniquely identify a scheduled slot by `(project_id, camera_id, scheduled_at_utc)`. Accept **at most one frame per slot**. Manual snapshots use separate IDs and do not improve scheduled-capture completeness.
 
-Allow **two attempts total** per slot, with a **30-second** delay after the first failure. The overall slot deadline is **180 seconds after its scheduled time**. Do not start an attempt unless enough time remains for both acquisition and cleanup limits. Retry only transient connectivity or media-acquisition errors.
+Allow **three attempts total** per slot, **5 seconds** apart: a failed try now costs seconds, and a long wait only keeps the camera awake for longer. The overall slot deadline is **180 seconds after its scheduled time**. Do not start an attempt unless enough time remains for both acquisition and cleanup limits. Retry only transient connectivity or media-acquisition errors.
 
 Authentication failures, unsupported protocols, invalid image provenance, and insufficient disk space must not enter a retry loop. After a restart, the service may resume only a still-valid slot. Mark expired past slots as missed; never take a burst of present-day photos to impersonate missing historical captures.
 
@@ -157,13 +228,13 @@ Initial project thresholds:
 - Pause capture at **25% or lower**.
 - Resume at **40% or higher**.
 
-These are configurable service thresholds, not manufacturer limits. The MVP must not secretly alter its capture frequency: explicitly warn or pause based on configured rules.
+These are configurable service thresholds, not manufacturer limits. The MVP must not secretly alter its capture frequency: it warns, pauses, or changes tier only by configured rules, and reports the active interval in its status.
 
-Use battery readings available without waking the camera. Treat readings older than **six hours** as stale. Show an unknown battery value as unknown, never as zero. When capture remains permitted without recent telemetry, keep the time budgets active and issue a warning. Do not automatically clear a battery pause without a fresh sufficient reading.
+Use battery readings available without waking the camera. Treat readings older than **six hours** as stale. Show an unknown battery value as unknown, never as zero. When capture remains permitted without recent telemetry, keep the time budgets active and issue a warning. Do not automatically clear a battery pause without a fresh sufficient reading. A failed read says nothing about the battery, so it leaves the last reading in force for choosing a rate until that reading goes stale, and reads that keep failing raise their own alert. A slot skipped because the battery is unknown records `battery_unknown`, not `battery_tier`, so the status never blames the battery for an outage.
 
 While paused for low battery, continue receiving passive updates. If battery status updates only when the camera is contacted, notify the owner to check the charge in the Eufy app and run `resume --battery-checked`. Log this explicit manual override; it does not turn an old reading into a fresh one. Periodically waking the camera just to check the battery is not required in the MVP.
 
-The proposed additional budget is **600 seconds of camera-contact time per day**. Count all attempts from the first camera-facing command through teardown, including failed attempts. This is a conservative software counter—not a measurement of actual awake time or energy consumption. Reserve time before starting an attempt; always allow cleanup commands even if the budget is exhausted.
+The additional budget defaults to **6,000 seconds of camera-contact time per day**, generous against the roughly 1,600 seconds that 120 slots at about 13 seconds each would use. Set it from measured use. Count all attempts from the first camera-facing command through teardown, including failed attempts. This is a conservative software counter—not a measurement of actual awake time or energy consumption. Reserve time before starting an attempt; always allow cleanup commands even if the budget is exhausted.
 
 Configure the **monthly data budget** after selecting the SIM plan and measuring a pilot. **JPEG file size is not LTE traffic consumption.** Track media-stream bytes and available network-byte counters separately, along with each measurement's coverage. If the library cannot observe the entire transport, label totals as estimates and compare them with the SIM provider's statistics.
 
@@ -175,7 +246,11 @@ Persist counters, budget reservations, and attempt counts in SQLite; a restart m
 
 ## 7.1 Capture storage and offsite archive
 
-Keep SQLite and the local image spool on durable storage in a persistent Docker volume. Write JPEG and JSON metadata into a temporary directory, then atomically rename the complete directory. Enforce a unique database constraint on the scheduled slot. Following cleanup, atomically replace provisional metadata with the final JSON, then allow upload. After crashes, reconcile completed local directories against DB rows without recapturing an already saved slot. Mark unfinished cleanup as `unknown_after_crash`, not as successfully completed.
+Keep SQLite and the local image spool on durable storage in a persistent Docker volume. Write JPEG and JSON metadata into a temporary directory, then atomically rename the complete directory. Enforce a unique database constraint on the scheduled slot. After crashes, reconcile completed local directories against DB rows without recapturing an already saved slot. Mark unfinished cleanup as `unknown_after_crash`, not as successfully completed.
+
+Reconciling adopts a stored frame only if its metadata, its place in the spool and its bytes all agree, and it belongs to the configured project and camera. A scheduled frame must also hold its own slot: the writer only leaves one unrecorded by dying while that slot is `running`, so a slot row in any other state, or from another schedule revision, refuses it. A frame with no slot row at all is still adopted and its row rebuilt from its metadata, because that's what a lost database looks like, those frames are what a render needs, and the camera must never go after a slot that already has a frame. A refused frame is left in place and raises an alert.
+
+Adopting a frame, with its slot, is one transaction. A frame row whose slot row is gone gets it rebuilt the same way, if the stored frame still matches. A frame row whose slot doesn't name it back is finished only in the shape a crash leaves: a `running` slot naming no capture, and a stored frame that still matches its row. Any other disagreement is left as it is and raises an alert. Each start also checks every stored frame against its row in the background, because reading a year of frames takes minutes and capture doesn't wait for it. A frame that no longer matches is left in place, raises an alert, and is left out of renders. So is one whose recorded location isn't the one derived from its own project, camera, date and id, or whose files are links leading elsewhere.
 
 An independent worker uploads artifacts to S3-compatible storage. Example object layout:
 
@@ -218,7 +293,7 @@ Output defaults: **MP4, H.264, 30 fps, no audio, original aspect ratio**. Resize
 
 By default, **compress gaps**: the next available frame follows the previous frame immediately. The source archive and manifest continue to identify missing slots. Do not insert synthetic imagery disguised as real captures.
 
-For every render, save an input-frame manifest, transformation parameters, FFmpeg version, and exclusion list. Include `degraded` frames with an explicit warning in the render report; do not silently discard them.
+For every render, save an input-frame manifest, transformation parameters, FFmpeg version, and exclusion list. **Exclude `degraded` frames by default and list each one in the exclusion list**: since the output is no larger than the smallest selected frame, one 720p frame would downscale a whole 4K video. `--include-degraded` opts them in, with an explicit warning in the render report.
 
 Acceptance: the MP4 plays, frames are in chronological order, and video duration is `number of included frames / fps` within container rounding tolerance. A render failure must never stop scheduled capture. The only scheduled render task in the MVP is a **monthly preview**; the full final video is generated on demand.
 
@@ -246,7 +321,15 @@ Send one notification when an issue begins, at most one reminder per day, and on
 
 Persist the Eufy authentication session across process restarts. Do **not** initiate a full login every 15 or 60 minutes. Prefer a separate account with shared access to the camera if the chosen SDK supports shared-device access; verify this during Phase 1.
 
+A token lasts 30 days, so a run this long replaces one about every month, and that shouldn't take a person. Eufy's help articles say a new code is required for a device that isn't on the account's trusted list, after a token expires, and for a trusted device that hasn't logged in for 30 days. So waiting for a token to end can't work, and a trusted device has to log in again before it does:
+
+- **Trust.** The `login` command adds the service to the trusted list with the code it just used, through `v1/app/trust_device/add` on the security-app host, which the SDK doesn't wrap. A login restored from disk used no code, so if the device isn't listed, `login` logs in afresh to get one.
+- **Renewal.** In a token's last 7 days the service logs in again beside the held login, at most once a day, and swaps the result in only once it's complete. If Eufy asks for a code, the held token keeps working and a `login_renewal` alert gives a person the date.
+- **If a token ends anyway.** The SDK logs in again when Eufy rejects it. If that fails, the adapter asks the login directly, because the SDK's error doesn't say why: only a challenge or a refusal stops captures. An outage during the login, or a second rejection inside the SDK's hold-off, is a failed try that the next try repairs.
+
 If authentication requires 2FA or CAPTCHA, pause new camera operations and expose the specific manual step needed. Do not retry logins indefinitely. Supply credentials via Docker secret files or protected environment variables; never write them to the repository, logs, manifests, or HTTP responses. Session files must be readable only by the service account.
+
+A credential gateway such as OneCLI can't hold the Eufy login: the password is ECDH-encrypted into the request body, v6 bodies are encrypted and signed, the camera traffic is UDP, and a gateway writes only headers, query, and path. Credentials sent in a plain header, such as a webhook's, can use the gateway.
 
 Deploy as one Docker Compose project with persistent volumes and a restart policy. FFmpeg must decode the camera's **actual** H.264/H.265 stream. Bind HTTP to loopback by default; use an existing secure tunnel or an authenticated reverse proxy for remote access.
 
@@ -269,24 +352,32 @@ camera:
   id: site-overview
   model: T86P2
   serial_file: /run/secrets/eufy_camera_serial
-  adapter: legacy
+  adapter: mega
   framing: fixed
-  min_width: 1280
-  min_height: 720
+  min_width: 3840
+  min_height: 2160
 
 schedule:
-  every_minutes: 60
+  grid_minutes: 5
   window_start: "08:00"
   window_end_exclusive: "18:00"
   days: [mon, tue, wed, thu, fri, sat, sun]
 
+cadence:
+  tiers:
+    - { battery_at_least: 60, every_minutes: 5 }
+    - { battery_at_least: 40, every_minutes: 15 }
+    - { battery_at_least: 0, every_minutes: 60 }
+  unknown_battery_every_minutes: 60
+
 capture:
-  acquisition_timeout_seconds: 60
+  acquisition_timeout_seconds: 30
   cleanup_timeout_seconds: 10
-  max_attempts: 2
-  retry_delay_seconds: 30
+  target_keyframes: 2
+  max_attempts: 3
+  retry_delay_seconds: 5
   slot_deadline_seconds: 180
-  max_session_seconds_per_day: 600
+  max_session_seconds_per_day: 6000
 
 battery:
   warn_below_percent: 35
@@ -311,6 +402,7 @@ render:
   fps: 30
   codec: h264
   include_manual: false
+  include_degraded: false
   upscale: false
   missing_frames: skip
 
@@ -337,7 +429,7 @@ http:
 
 ## Phase 3 — Seven-day pilot and rendering
 
-Run **seven complete days on the intended production host** with the proposed hourly daytime schedule: **70 scheduled slots**. The proposed acceptance threshold is **at least 69 slots with genuinely fresh frames**, received before their respective deadlines and at or above the configured minimum resolution. No retained thumbnails may be accepted, no duplicate slots may exist, and no camera connection may remain unintentionally open.
+Run **seven complete days on the intended production host** with the cadence chosen from calibration. The acceptance threshold is **at least 98.5% of scheduled slots with genuinely fresh frames** (69 of 70 at the original hourly schedule), received before their respective deadlines and at or above the configured minimum resolution. Slots the battery tiers leave out don't count against it, but are reported separately. No retained thumbnails may be accepted, no duplicate slots may exist, and no camera connection may remain unintentionally open.
 
 Preserve and separately count `degraded` frames; they **do not** satisfy the quality acceptance threshold. Each missed slot must have a recorded explanation. Measure battery behavior, actual cellular data usage, and notification delivery during the pilot.
 
@@ -368,7 +460,21 @@ Provide a service repository containing a README, Dockerfile, Docker Compose con
 
 Before enabling year-long operation, fill in project dates, site time zone, Eufy credentials, offsite storage, and notification destination. Validate built-in SIM connectivity, framing, image quality, and observed budgets. Capture frequency, minimum acceptable resolution, and budget values remain runtime configuration—not code changes.
 
-# 13. References
+# 13. Not Built Yet
+
+- The S3 offsite archiver. Frames are spooled on the host, whose storage is durable, but there is no offsite copy; the destination is not chosen.
+- The monthly preview render.
+- A notification destination. Alerts go to the service log until a webhook is configured.
+- Battery and solar calibration, which needs the camera on its panel.
+
+# 14. Post-MVP Ideas
+
+Recorded so they aren't lost; neither is in the MVP.
+
+- **Activity-based rendering:** use more frames when there is visible work and fewer when nothing happens, chosen at render time by comparing stored frames. It needs no camera contact and costs no battery, which is why capture keeps more frames than a render uses.
+- **Bonus frames:** capture extra frames when the camera's own motion events suggest activity, if the battery can afford it.
+
+# 15. References
 
 External capability and limitation information was reviewed on **October 21, 2026**. Architecture, thresholds, and acceptance criteria above are **proposed MVP design decisions**, not verified Eufy product guarantees.
 

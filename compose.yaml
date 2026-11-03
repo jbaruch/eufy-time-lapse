@@ -1,0 +1,41 @@
+services:
+  timelapse:
+    build:
+      context: .
+      args:
+        TIMELAPSE_REVISION: ${TIMELAPSE_REVISION:-unknown}
+    image: eufy-time-lapse:local
+    # `docker compose up -d` runs the service. `docker compose run --rm timelapse <command>` runs anything else.
+    command: ["run"]
+    restart: unless-stopped
+    # Docker keeps a container's output forever otherwise. The service's own log is in the data directory.
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    # The camera sits behind carrier NAT. Docker's bridge would put a second NAT in front of P2P setup.
+    network_mode: host
+    # Must own the secret files and the data directory.
+    user: "${TIMELAPSE_UID:-1000}:${TIMELAPSE_GID:-1000}"
+    environment:
+      EUFY_EMAIL_FILE: /run/secrets/eufy_email
+      EUFY_PASSWORD_FILE: /run/secrets/eufy_password
+      EUFY_COUNTRY: ${EUFY_COUNTRY:-US}
+      EUFY_CAMERA_SERIAL: ${EUFY_CAMERA_SERIAL:-}
+      TIMELAPSE_CAMERA_LINK: ${TIMELAPSE_CAMERA_LINK:-}
+      TIMELAPSE_CELLULAR_OPERATOR: ${TIMELAPSE_CELLULAR_OPERATOR:-}
+      TIMELAPSE_MIN_WIDTH: ${TIMELAPSE_MIN_WIDTH:-}
+      TIMELAPSE_MIN_HEIGHT: ${TIMELAPSE_MIN_HEIGHT:-}
+      TIMELAPSE_CONFIG: /data/config.json
+    volumes:
+      - ${TIMELAPSE_DATA_PATH:-./data}:/data
+    secrets:
+      - eufy_email
+      - eufy_password
+
+secrets:
+  eufy_email:
+    file: ${TIMELAPSE_SECRETS_DIR:-${HOME}/.config/eufy-time-lapse}/eufy_email
+  eufy_password:
+    file: ${TIMELAPSE_SECRETS_DIR:-${HOME}/.config/eufy-time-lapse}/eufy_password

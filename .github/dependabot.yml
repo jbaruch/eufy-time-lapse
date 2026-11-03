@@ -1,0 +1,20 @@
+# Renewal for every pinned dependency. These open PRs only: per the spec, rerun the
+# cold-connection probe before any bump reaches the running service.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: weekly
