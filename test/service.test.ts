@@ -2885,6 +2885,17 @@ describe("CaptureService", () => {
     const cloudDown = (): Error => new CaptureFailure("camera_unreachable", "discovery", "Eufy's cloud can't be reached");
     const SEVEN_HOURS = 420;
 
+    it("doesn't count the report's read toward the slots whose reads failed", async () => {
+      const h = await harness();
+      h.adapter.setDiscoverFailure(cloudDown);
+      // Two slots in a row fail their read, one short of the alert.
+      await runAt(h, [10 * 60 - 10, 10 * 60 - 5]);
+      await runAt(h, [10 * 60 + 1]);
+      assert.equal(h.notices.some((notice) => notice.includes("slots in a row")), false, h.notices.join("; "));
+      assert.equal(h.state.getFlag("camera_read_failures"), "2");
+      h.state.close();
+    });
+
     it("keeps the rate, on the last good reading, through a short outage", async () => {
       const h = await harness();
       await runAt(h, [0]);
