@@ -17,7 +17,7 @@ import { readGrayFrame } from "./media/ffmpeg.ts";
 import { dataBudgetSpent, decide, nextBatteryPaused, reservedSessionMs, sessionBudgetSpent } from "./policy.ts";
 import type { PolicyInput } from "./policy.ts";
 import type { CameraLink } from "./probe/report.ts";
-import { addDays, formatClock, isActiveForInterval, localParts, parseClock, planDay } from "./schedule.ts";
+import { addDays, formatClock, isActiveForInterval, lastSlotMinutes, localParts, planDay } from "./schedule.ts";
 import { EXPOSURE_TIME_NOTE, readStoredCapture, spoolDirectory, storedCaptureProblem } from "./stored-capture.ts";
 import type { CaptureMetadata, CaptureOwner } from "./stored-capture.ts";
 import type { ScheduleConfig } from "./schedule.ts";
@@ -505,13 +505,14 @@ export class CaptureService {
     const local = localParts(now, this.zone);
     const lastSent = this.state.getFlag("daily_report_date");
     // From the last slot's turn, not the window's end: the clock never reaches a window ending at 24:00.
-    const todaysIsDue = local.minutes >= parseClock(this.config.schedule.window_end_exclusive) - this.config.schedule.grid_minutes;
+    const { window_start: start, window_end_exclusive: end, grid_minutes: grid } = this.config.schedule;
+    const todaysIsDue = local.minutes >= lastSlotMinutes(start, end, grid);
     // Until then it's yesterday's that may be owed, after an outage or a failed delivery that ran past midnight.
     const date = todaysIsDue ? local.date : addDays(local.date, -1);
     if ((lastSent !== undefined && lastSent >= date) || this.state.hasUnfinishedSlotsOn(date)) return;
     if (todaysIsDue && this.dailyReportReadFor !== date) {
       // Cloud only, so it doesn't wake the camera. Without it, a day with no slots would have no reading at all.
-      const reading = await this.readCamera();
+      const reading = await this.readCamera({ forSlot: false });
       // Readers take the newest row's pace as the current one, and this read doesn't change it.
       this.recordBatteryReading(now, reading, this.state.latestBattery()?.every_minutes ?? null);
       this.dailyReportReadFor = date;
@@ -577,8 +578,11 @@ export class CaptureService {
     }
   }
 
-  /** A cloud read that doesn't wake the camera. Nothing here contacts the camera, including the login restore. */
-  private async readCamera(): Promise<BatteryReading | null> {
+  /**
+   * A cloud read that doesn't wake the camera. Nothing here contacts the camera, including the login restore. Only a slot's
+   * read counts toward the alert about failed reads, which says how many slots in a row failed.
+   */
+  private async readCamera({ forSlot }: { forSlot: boolean }): Promise<BatteryReading | null> {
     if (this.state.getFlag("auth_required") !== undefined) {
       await this.retireAdapter();
       return null;
@@ -594,7 +598,7 @@ export class CaptureService {
         starting = undefined;
       }
       this.camera = await this.adapter.discoverCamera(this.camera?.key ?? this.options.cameraSerial);
-      await this.noteCameraRead(true);
+      if (forSlot) await this.noteCameraRead(true);
       return this.camera.battery;
     } catch (error) {
       // Anything but a failure the adapter recognised is a bug, and should crash rather than limp on.
@@ -607,7 +611,7 @@ export class CaptureService {
       // The cloud being unreachable is a reason to skip a reading. The capture attempt reports its own failure.
       this.state.addEvent("camera_read_failed", error.message);
       this.options.log(`could not read camera state: ${error.message}`);
-      await this.noteCameraRead(false);
+      if (forSlot) await this.noteCameraRead(false);
       return null;
     } finally {
       await starting?.shutdown();
@@ -652,7 +656,7 @@ export class CaptureService {
   }
 
   private async processSlot(slot: SlotRow, signal: AbortSignal): Promise<void> {
-    const reading = await this.readCamera();
+    const reading = await this.readCamera({ forSlot: true });
     // Only a real reading can clear a battery pause. For choosing a rate, the last one counts for as long as any reading does.
     const freshPercent = this.effectivePercent(reading);
     const percent = this.effectivePercent(reading ?? this.lastKnownReading());
@@ -1005,7 +1009,7 @@ export class CaptureService {
 
   /** One piece of camera work outside a slot, for a command that ends straight after. */
   private async onCamera<T>(work: (adapter: CameraAdapter, camera: CameraInfo) => Promise<T>): Promise<T | CaptureFailure> {
-    await this.readCamera();
+    await this.readCamera({ forSlot: false });
     const { adapter, camera } = this;
     if (adapter === undefined || camera === undefined) return new CaptureFailure("camera_unreachable", "discovery", "The camera can't be reached right now. The log line above says why.");
     try {
@@ -1098,7 +1102,7 @@ export class CaptureService {
 
   /** A one-off frame. It holds the same lock, spends the same budgets, and never affects completeness. */
   async captureManual(signal: AbortSignal): Promise<CaptureRow | CaptureFailure> {
-    const reading = await this.readCamera();
+    const reading = await this.readCamera({ forSlot: false });
     if (this.adapter === undefined || this.camera === undefined) {
       const needsLogin = this.state.getFlag("auth_required");
       if (needsLogin !== undefined) return new CaptureFailure("auth_required", "auth", needsLogin);

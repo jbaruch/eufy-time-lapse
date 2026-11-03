@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { addDays, isActiveForInterval, localParts, localToUtc, parseClock, planDay } from "../src/schedule.ts";
+import { addDays, isActiveForInterval, lastSlotMinutes, localParts, localToUtc, parseClock, planDay } from "../src/schedule.ts";
 import type { ScheduleConfig } from "../src/schedule.ts";
 
 const CHICAGO = "America/Chicago";
@@ -81,6 +81,20 @@ describe("planDay", () => {
     const slots = planDay("2026-07-01", config({ windowStart: "23:00", windowEndExclusive: "24:00" }));
     assert.deepEqual(slots.map((slot) => slot.localTime), ["23:00", "23:30"]);
   });
+});
+
+describe("lastSlotMinutes", () => {
+  for (const [name, start, end, grid] of [
+    ["a window the grid divides", "07:00", "18:00", 5],
+    ["a window the grid doesn't divide", "07:00", "17:58", 5],
+    ["a window shorter than the grid", "07:00", "07:03", 5],
+    ["a window running to 24:00", "23:00", "24:00", 30],
+  ] as const) {
+    it(`is the last slot planDay lays out, for ${name}`, () => {
+      const planned = planDay("2026-07-01", config({ windowStart: start, windowEndExclusive: end, gridMinutes: grid }));
+      assert.equal(lastSlotMinutes(start, end, grid), planned.at(-1)?.localMinutes);
+    });
+  }
 });
 
 describe("isActiveForInterval", () => {
