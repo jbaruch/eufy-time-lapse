@@ -44,7 +44,7 @@ const SOCKET_GONE_CODES: ReadonlySet<string> = new Set(["ERR_SOCKET_DGRAM_NOT_RU
 const WRONG_PASSWORD = 26006;
 /** What the pinned SDK says when it can't set up a session. test/mega-adapter.test.ts holds these wordings. */
 const SDK_CONNECT_FAILURE = /^P2P connect timeout for |^station .* is not in the device list$|^no P2P endpoint \(p2p_did\) for station /;
-const TELEMETRY_NAME = /signal|rssi|band|cellular|network|lte|charging|solar|power|quality/i;
+const TELEMETRY_NAME = /signal|rssi|band|cellular|network|lte|charging|solar|power|quality|batteryTemperature|batteryHealth/i;
 const TELEMETRY_EXCLUDED = /imei|iccid|imsi|mac|ssid|serial|ip_?addr/i;
 
 export type MegaLoginResult = { status: "ok" } | { status: "captcha"; image: string } | { status: "2fa" };

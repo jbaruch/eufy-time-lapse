@@ -118,6 +118,8 @@ Answering the camera's relay packets, and switching to another relay on a stall 
 
 **A slot during live view, also on November 1:** the owner watched in the app while a slot fired. The picture flickered once and carried on, and the frame still came out at 4K on the first try, in about 13 seconds or less. The camera also recorded an event, which it didn't do for a slot nobody was watching. That is one observation, so what caused the event isn't known.
 
+**The battery reading is coarse, seen on the pole on November 1:** it fell from 100% to 95% over the morning, reported charging for an hour on an overcast afternoon while it stayed at exactly 95%, then read 100% and not charging, and held there. Nothing was plugged in. The likely reason is that the charger reached its end point and the camera corrected its figure, though without the voltage that's an inference. So a day's change isn't a measure of energy, and calibration has to read the trend over several days. `solarIntensity` stayed at 0 throughout and `powerSource` read "Battery", so neither says anything about charging on this camera.
+
 **Leaving a saved position and coming back, also on November 1:** the camera moved one step each way, and returning to a saved preset landed 18 and then 10 pixels off horizontally at 4K, with no vertical error. Two untouched frames differed by at most 2 pixels, so that's real, about 0.5% of the frame's width at worst. A preset could only be created in the first empty slot: the list shows 10 slots, and a save to slot 9 did nothing while a save to slot 3 worked. No position events arrived, so comparing frames is the only way found so far to tell where the camera is pointing.
 
 **Broken on purpose, on the real camera:**
@@ -196,6 +198,8 @@ Handle SIGTERM by shutting down the active capture and releasing resources. SIGK
 ## 5.3 Framing and image quality
 
 The default installation uses a fixed camera position and one field of view; the owner disables auto-tracking during setup. Verify that the camera retains its orientation after sleep and reboot.
+
+Once a day, after the window's last slot, the service sends the alert destination a report of the day's frames and battery, including on a paused day. Its absence is the only sign the service gives that the host itself is down, and it takes a person to notice that, so it isn't a real dead-man's switch.
 
 The owner also uses it as a camera, so someone can pan it and leave it there. `framing set` saves a position, and each scheduled frame is then compared with the last good one: at 480×270, by 12 patches of trees and ground, with normalized correlation, so that light matters less than view. Three patches agreeing on a shift within 32 pixels at 4K is on target, and on a larger shift is off target. No agreement at all is off target only against a reference under 30 minutes old in similar light, and everything else is unsure, because night to day looks the same. On 193 real pairs of frames, hours apart or not, no false shift appeared. Off-target frames are flagged in their own table, never in a capture's immutable metadata, and renders leave them out. On a second off-target slot since the last good frame the camera returns to the position, at most every 30 minutes and 6 times in 24 hours. Unsure never moves it.
 

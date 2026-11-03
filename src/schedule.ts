@@ -98,6 +98,12 @@ export function planDay(date: string, config: ScheduleConfig): PlannedSlot[] {
   return slots;
 }
 
+/** The window's last grid slot, in minutes of the day. The grid counts from the window's start, so the end needn't fall on it. */
+export function lastSlotMinutes(windowStart: string, windowEndExclusive: string, gridMinutes: number): number {
+  const start = parseClock(windowStart);
+  return start + Math.floor((parseClock(windowEndExclusive) - start - 1) / gridMinutes) * gridMinutes;
+}
+
 /** Whether a grid slot is one of those a tier captures. Counted from the window's start, so frames stay evenly spaced. */
 export function isActiveForInterval(localMinutes: number, windowStart: string, everyMinutes: number): boolean {
   return (localMinutes - parseClock(windowStart)) % everyMinutes === 0;

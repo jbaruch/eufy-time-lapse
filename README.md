@@ -148,6 +148,30 @@ From then on, each frame's distance from that view is worked out through the las
 If you meant to change the view, run `framing set` again. `framing off` stops all of it. `"framing": { "return_enabled": false }`
 in `data/config.json` keeps the flags and the verdicts in `status`, but never moves the camera.
 
+## The daily report
+
+Once a day, as soon as the window's last slot is done, the service sends one message to the alert destination:
+
+```text
+Time-lapse, Mon Nov 2
+Frames: 130 of 132 at 4K, 1 below 4K, 1 missed. 4 took a second try.
+Missed: 11:20.
+Battery: 92%, down 3 since yesterday (low 90, high 95).
+Charging: about 2.5 hours between 13:50 and 16:20, ended at 96%.
+Battery temperature: 11°C.
+```
+
+The battery is compared with the last reading before today, because nothing reads it overnight and a day's own change
+would leave the night out. Second tries are worth watching: they're the first number to move when the connection weakens.
+
+Charging time only counts what the readings saw, so it errs low. A gap in the readings counts for a few slots at most. If
+the day's first reading finds it already charging, the line says so: `Charging: at least 5 minutes, already on at 07:00,
+ended at 100% by 07:05.` Don't read much into the percentage during a charge. So far it sits flat and then jumps to 100.
+
+It also goes out on a paused day. A report that's late or can't be delivered keeps trying until the next day's is due, so
+a whole day with no report means the service, the host or Telegram was down, though only someone who notices the silence
+will know. `"alerts": { "daily_report": false }` turns it off.
+
 The service also answers on `127.0.0.1:8787`. `/status` has the full report. `/healthz` means only that the
 process is alive, so check `/status` to know frames are arriving. If the capture loop makes no progress for 15 minutes,
 the service alerts and restarts itself.

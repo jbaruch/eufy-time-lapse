@@ -759,6 +759,318 @@ describe("CaptureService", () => {
     });
   });
 
+  describe("the daily report", () => {
+    const AT_1800 = AT_0800 + 10 * 60 * MINUTE;
+    const reports = (h: Harness): string[] => h.notices.filter((notice) => notice.startsWith("Time-lapse, "));
+    const idleAt = async (h: Harness, ms: number): Promise<void> => {
+      h.clock.ms = ms;
+      while ((await h.service.tick(h.signal)) === 0);
+    };
+
+    it("goes out once, after the window closes, with the day's frames and battery", async () => {
+      const h = await harness();
+      await runAt(h, [0, 5]);
+      assert.deepEqual(reports(h), []);
+      await idleAt(h, AT_1800 + MINUTE);
+      assert.equal(reports(h).length, 1);
+      assert.match(reports(h)[0] ?? "", /Frames: 2 of \d+ at 4K/);
+      assert.match(reports(h)[0] ?? "", /Battery: 80%/);
+      await idleAt(h, AT_1800 + 2 * MINUTE);
+      assert.equal(reports(h).length, 1, "once a day");
+      h.state.close();
+    });
+
+    it("waits for a slot still under way, even past the window's end", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      const late = h.state.nextPending(new Date(AT_1800 - 6 * MINUTE));
+      assert.ok(late !== undefined, "a late slot to hold open");
+      h.state.setSlot(late.slot_id, "running");
+      await idleAt(h, AT_1800 + MINUTE);
+      assert.deepEqual(reports(h), []);
+      h.state.setSlot(late.slot_id, "captured");
+      await idleAt(h, AT_1800 + 2 * MINUTE);
+      assert.equal(reports(h).length, 1);
+      h.state.close();
+    });
+
+    it("doesn't report charging at a time the camera couldn't be read", async () => {
+      const h = await harness({ camera: { ...reading(80), telemetry: { charging: true } } });
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(() => new CaptureFailure("camera_unreachable", "discovery", "no cloud"));
+      await idleAt(h, AT_1800 + MINUTE);
+      assert.match(reports(h)[0] ?? "", /Charging: seen at 08:00, still on at the last reading\./);
+      h.state.close();
+    });
+
+    it("keeps nothing from an earlier read in the row for a read that failed, at a slot or at the report", async () => {
+      const h = await harness({ camera: { ...reading(80), telemetry: { charging: true } } });
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(() => new CaptureFailure("camera_unreachable", "discovery", "no cloud"));
+      await runAt(h, [5]);
+      await idleAt(h, AT_1800 + MINUTE);
+      const failed = h.state.batterySince("2000-01-01T00:00:00.000Z").filter((row) => row.percent === null);
+      assert.ok(failed.length >= 2, `${failed.length} failed reads`);
+      for (const row of failed) assert.equal(row.telemetry_json, "{}");
+      h.state.close();
+    });
+
+    it("measures the battery against the evening before, not this morning", async () => {
+      const h = await harness();
+      await idleAt(h, AT_1800 + MINUTE);
+      h.adapter.setCamera(reading(74, new Date(AT_0800 + 24 * 60 * MINUTE).toISOString()));
+      await runAt(h, [24 * 60]);
+      await idleAt(h, AT_1800 + 24 * 60 * MINUTE + MINUTE);
+      assert.match(reports(h)[0] ?? "", /Battery: 80% \(low 80, high 80\)\./);
+      assert.match(reports(h)[1] ?? "", /Battery: 74%, down 6 since yesterday \(low 74, high 74\)\./);
+      h.state.close();
+    });
+
+    it("skips a read that failed when it looks for the evening before", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.adapter.setDiscoverFailure(() => new CaptureFailure("camera_unreachable", "discovery", "no cloud"));
+      await idleAt(h, AT_1800 + MINUTE);
+      h.adapter.setDiscoverFailure(undefined);
+      h.adapter.setCamera(reading(74, new Date(AT_1800 + 24 * 60 * MINUTE).toISOString()));
+      await idleAt(h, AT_1800 + 24 * 60 * MINUTE + MINUTE);
+      assert.match(reports(h)[1] ?? "", /Battery: 74%, down 6 since yesterday/);
+      h.state.close();
+    });
+
+    it("skips a reading with no percentage in it, too", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.adapter.setCamera(reading(null));
+      await idleAt(h, AT_1800 + MINUTE);
+      h.adapter.setCamera(reading(74, new Date(AT_1800 + 24 * 60 * MINUTE).toISOString()));
+      await idleAt(h, AT_1800 + 24 * 60 * MINUTE + MINUTE);
+      assert.match(reports(h)[1] ?? "", /Battery: 74%, down 6 since yesterday/);
+      h.state.close();
+    });
+
+    it("counts a slot that took more tries once, and only on its own day", async () => {
+      let opens = 0;
+      const h = await harness({
+        open: async () => {
+          opens += 1;
+          return opens <= 2 ? hangUp() : fresh();
+        },
+      });
+      await runAt(h, [0, 5]);
+      assert.equal(opens, 4, "one slot took three tries, the other one");
+      await idleAt(h, AT_1800 + MINUTE);
+      assert.match(reports(h)[0] ?? "", /\. 1 took a second try\.\n/);
+      await idleAt(h, AT_1800 + 24 * 60 * MINUTE + MINUTE);
+      assert.doesNotMatch(reports(h)[1] ?? "", /second try/);
+      h.state.close();
+    });
+
+    it("says when that day's slots were missed", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      await idleAt(h, AT_1800 + MINUTE);
+      assert.match(reports(h)[0] ?? "", /Missed: 08:05 to 17:55\.\n/);
+      await idleAt(h, AT_1800 + 24 * 60 * MINUTE + MINUTE);
+      assert.match(reports(h)[1] ?? "", /Missed: 08:00 to 17:55\.\n/);
+      h.state.close();
+    });
+
+    it("says nothing before the last slot's turn", async () => {
+      const h = await harness();
+      await idleAt(h, AT_1800 - 6 * MINUTE);
+      assert.deepEqual(reports(h), []);
+      h.state.close();
+    });
+
+    it("waits for the evening on a day with no slots, when nothing else holds it back", async () => {
+      const WEEKDAYS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"] as const;
+      const today = WEEKDAYS[new Date(AT_0800).getUTCDay()];
+      const config = serviceConfig();
+      config.schedule = { ...config.schedule, days: config.schedule.days.filter((day) => day !== today) };
+      const h = await harness({ config });
+      await idleAt(h, AT_0800);
+      assert.deepEqual(reports(h), []);
+      await idleAt(h, AT_1800 - 4 * MINUTE);
+      assert.match(reports(h)[0] ?? "", /Frames: none planned\./);
+      h.state.close();
+    });
+
+    it("goes out as soon as the last slot is done", async () => {
+      const h = await harness();
+      await idleAt(h, AT_1800 - 5 * MINUTE + 30_000);
+      assert.equal(reports(h).length, 1);
+      h.state.close();
+    });
+
+    it("still goes out when the window runs to midnight, whose end the clock never reaches", async () => {
+      const config = serviceConfig();
+      config.schedule = { ...config.schedule, window_end_exclusive: "24:00" };
+      const h = await harness({ config });
+      await idleAt(h, AT_0800 + (15 * 60 + 56) * MINUTE);
+      assert.equal(reports(h).length, 1);
+      h.state.close();
+    });
+
+    it("still delivers a report that couldn't go out before midnight, under its own day", async () => {
+      const config = serviceConfig();
+      config.schedule = { ...config.schedule, window_end_exclusive: "24:00" };
+      const h = await harness({ config });
+      h.delivery.ok = false;
+      await idleAt(h, AT_0800 + (15 * 60 + 56) * MINUTE);
+      assert.match(reports(h)[0] ?? "", /^Time-lapse, Wed Jul 1\n/);
+      h.delivery.ok = true;
+      await idleAt(h, AT_0800 + 16 * 60 * MINUTE + MINUTE);
+      assert.equal(reports(h).length, 2);
+      assert.match(reports(h)[1] ?? "", /^Time-lapse, Wed Jul 1\n/);
+      h.state.close();
+    });
+
+    it("catches up on a report an outage slept through, without another camera read, and still sends the next", async () => {
+      const h = await harness();
+      await idleAt(h, AT_1800 + MINUTE);
+      await runAt(h, [24 * 60]);
+      const rows = h.state.batterySince("2000-01-01T00:00:00.000Z").length;
+      await idleAt(h, AT_0800 + 48 * 60 * MINUTE - 30 * MINUTE);
+      assert.equal(reports(h).length, 2);
+      assert.match(reports(h)[1] ?? "", /^Time-lapse, Thu Jul 2\n/);
+      assert.match(reports(h)[1] ?? "", /Battery: 80%/, "with that day's readings");
+      assert.equal(h.state.batterySince("2000-01-01T00:00:00.000Z").length, rows);
+      await idleAt(h, AT_0800 + 48 * 60 * MINUTE - 20 * MINUTE);
+      assert.equal(reports(h).length, 2, "once");
+      await idleAt(h, AT_1800 + 48 * 60 * MINUTE + MINUTE);
+      assert.equal(reports(h).length, 3, "that evening's still goes out");
+      assert.match(reports(h)[2] ?? "", /^Time-lapse, Fri Jul 3\n/);
+      h.state.close();
+    });
+
+    it("owes only the newest report after a longer outage", async () => {
+      const h = await harness();
+      await idleAt(h, AT_1800 + MINUTE);
+      await idleAt(h, AT_0800 + 72 * 60 * MINUTE - 30 * MINUTE);
+      assert.equal(reports(h).length, 2);
+      assert.match(reports(h)[1] ?? "", /^Time-lapse, Fri Jul 3\n/);
+      h.state.close();
+    });
+
+    it("waits for a slot still under way across midnight before catching up", async () => {
+      const h = await harness();
+      await idleAt(h, AT_1800 + MINUTE);
+      await runAt(h, [24 * 60]);
+      const late = h.state.nextPending(new Date(AT_1800 + 24 * 60 * MINUTE - 6 * MINUTE));
+      assert.ok(late !== undefined, "a late slot to hold open");
+      h.state.setSlot(late.slot_id, "running");
+      await idleAt(h, AT_0800 + 48 * 60 * MINUTE - 30 * MINUTE);
+      assert.equal(reports(h).length, 1);
+      h.state.close();
+    });
+
+    it("doesn't report a day from before it was ever installed", async () => {
+      const h = await harness();
+      await idleAt(h, AT_0800 - 30 * MINUTE);
+      assert.deepEqual(reports(h), []);
+      h.state.close();
+    });
+
+    it("doesn't send an older report after a newer one, if the window moves later", async () => {
+      const config = serviceConfig();
+      const h = await harness({ config });
+      await idleAt(h, AT_1800 + MINUTE);
+      await idleAt(h, AT_1800 + 24 * 60 * MINUTE + MINUTE);
+      assert.equal(reports(h).length, 2);
+      h.state.close();
+      config.schedule = { ...config.schedule, window_end_exclusive: "20:00" };
+      const { service, state } = h.restart();
+      h.clock.ms = AT_1800 + 24 * 60 * MINUTE + 2 * MINUTE;
+      while ((await service.tick(h.signal)) === 0);
+      assert.equal(reports(h).length, 2);
+      state.close();
+    });
+
+    it("tries again when it couldn't be delivered, and reads the camera only once", async () => {
+      const h = await harness();
+      await runAt(h, [0]);
+      h.delivery.ok = false;
+      await idleAt(h, AT_1800 + MINUTE);
+      assert.equal(reports(h).length, 1);
+      const rows = h.state.batterySince("2000-01-01T00:00:00.000Z").length;
+      h.delivery.ok = true;
+      await idleAt(h, AT_1800 + 2 * MINUTE);
+      assert.equal(reports(h).length, 2);
+      await idleAt(h, AT_1800 + 3 * MINUTE);
+      assert.equal(reports(h).length, 2, "delivered, so that's the end of it");
+      assert.equal(h.state.batterySince("2000-01-01T00:00:00.000Z").length, rows, "no extra reading for the retry");
+      h.state.close();
+    });
+
+    it("goes out again the next day", async () => {
+      const h = await harness();
+      await idleAt(h, AT_1800 + MINUTE);
+      await idleAt(h, AT_1800 + 24 * 60 * MINUTE + MINUTE);
+      assert.equal(reports(h).length, 2);
+      h.state.close();
+    });
+
+    it("survives a restart without repeating itself", async () => {
+      const h = await harness();
+      await idleAt(h, AT_1800 + MINUTE);
+      h.state.close();
+      const { service, state } = h.restart();
+      h.clock.ms = AT_1800 + 2 * MINUTE;
+      while ((await service.tick(h.signal)) === 0);
+      assert.equal(reports(h).length, 1);
+      state.close();
+    });
+
+    it("still goes out on a paused day, and says why, so silence always means something's down", async () => {
+      const h = await harness();
+      h.state.setFlag("operator_paused", "2026-07-01T00:00:00.000Z");
+      await idleAt(h, AT_1800 + MINUTE);
+      assert.match(reports(h)[0] ?? "", /Paused: by you\./);
+      h.state.close();
+    });
+
+    it("can be turned off", async () => {
+      const config = serviceConfig();
+      config.alerts = { ...config.alerts, daily_report: false };
+      const h = await harness({ config });
+      await idleAt(h, AT_1800 + MINUTE);
+      assert.deepEqual(reports(h), []);
+      h.state.close();
+    });
+
+    it("leaves the capture pace alone in status and calibration", async () => {
+      const h = await harness();
+      await runAt(h, [0, 595]);
+      const paceAt = (ms: number): number | null => buildStatus(h.state, serviceConfig(), new Date(ms), 50_000).battery.every_minutes;
+      const pace = paceAt(AT_1800 - MINUTE);
+      assert.ok(pace !== null, "the slots set a pace");
+      await idleAt(h, AT_1800 - 4 * MINUTE);
+      assert.equal(reports(h).length, 1);
+      assert.equal(paceAt(AT_1800), pace, "the report's own reading doesn't blank the pace");
+      const { hours } = buildCalibration(h.state, serviceConfig(), new Date(AT_0800));
+      assert.equal(hours.at(-1)?.every_minutes, pace);
+      h.state.close();
+    });
+
+    it("shows charging and temperature in the status report", async () => {
+      const h = await harness({ camera: { ...reading(80), telemetry: { charging: true, batteryTemperature: 11 } } });
+      await runAt(h, [0]);
+      const { battery } = buildStatus(h.state, serviceConfig(), new Date(AT_0800 + MINUTE), 50_000);
+      assert.equal(battery.charging, true);
+      assert.equal(battery.temperature_c, 11);
+      h.state.close();
+    });
+
+    it("says it doesn't know when the camera didn't report them", async () => {
+      const h = await harness();
+      const { battery } = buildStatus(h.state, serviceConfig(), new Date(AT_0800), 50_000);
+      assert.equal(battery.charging, null);
+      assert.equal(battery.temperature_c, null);
+      h.state.close();
+    });
+  });
+
   describe("renewing the login", () => {
     const DAY = 24 * 60 * MINUTE;
     const about = (h: Harness): string[] => h.notices.filter((notice) => /renew the login/.test(notice));
@@ -2344,6 +2656,17 @@ describe("CaptureService", () => {
     const AT = (minutes: number): string => `construction/site-overview/${new Date(AT_0800 + minutes * MINUTE).toISOString()}`;
     const cloudDown = (): Error => new CaptureFailure("camera_unreachable", "discovery", "Eufy's cloud can't be reached");
     const SEVEN_HOURS = 420;
+
+    it("doesn't count the report's read toward the slots whose reads failed", async () => {
+      const h = await harness();
+      h.adapter.setDiscoverFailure(cloudDown);
+      // Two slots in a row fail their read, one short of the alert.
+      await runAt(h, [10 * 60 - 10, 10 * 60 - 5]);
+      await runAt(h, [10 * 60 + 1]);
+      assert.equal(h.notices.some((notice) => notice.includes("slots in a row")), false, h.notices.join("; "));
+      assert.equal(h.state.getFlag("camera_read_failures"), "2");
+      h.state.close();
+    });
 
     it("keeps the rate, on the last good reading, through a short outage", async () => {
       const h = await harness();

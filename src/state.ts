@@ -171,7 +171,7 @@ export interface BatteryRow {
   telemetry_json: string;
 }
 
-export type FlagName = "operator_paused" | "battery_paused" | "battery_override" | "auth_required" | "first_started_at" | "camera_read_failures" | "login_renewal_tried_at" | "framing_position_id" | "framing_position_saved_at" | "framing_returned_at";
+export type FlagName = "operator_paused" | "battery_paused" | "battery_override" | "auth_required" | "first_started_at" | "camera_read_failures" | "login_renewal_tried_at" | "framing_position_id" | "framing_position_saved_at" | "framing_returned_at" | "daily_report_date";
 
 export type FramingCheckStatus = "on_target" | "off_target" | "unsure";
 
@@ -287,6 +287,31 @@ export class State {
   /** A slot that already has a frame is never due, whatever its row says: capturing it again would wake the camera for nothing. */
   duePending(now: Date): SlotRow | undefined {
     return this.one<SlotRow>("SELECT s.* FROM slots s WHERE s.state = 'pending' AND s.scheduled_at_utc <= ? AND NOT EXISTS (SELECT 1 FROM captures c WHERE c.slot_id = s.slot_id) ORDER BY s.scheduled_at_utc LIMIT 1", now.toISOString());
+  }
+
+  /** How a local date's slots went, by state. */
+  slotCountsOn(localDate: string): Partial<Record<SlotState, number>> {
+    const rows = this.all<{ state: SlotState; count: number }>("SELECT state, COUNT(*) AS count FROM slots WHERE local_date = ? GROUP BY state", localDate);
+    return Object.fromEntries(rows.map((row) => [row.state, row.count]));
+  }
+
+  /** Whether a local date still has slots to come, or one under way. */
+  hasUnfinishedSlotsOn(localDate: string): boolean {
+    return this.one("SELECT 1 FROM slots WHERE local_date = ? AND state IN ('pending', 'running') LIMIT 1", localDate) !== undefined;
+  }
+
+  offTargetCountOn(localDate: string): number {
+    return this.one<{ count: number }>("SELECT COUNT(*) AS count FROM framing_checks f JOIN captures c ON c.capture_id = f.capture_id WHERE f.status = 'off_target' AND c.local_date = ?", localDate)?.count ?? 0;
+  }
+
+  /** Slots on a local date that took a second try. A retry's attempt id carries a -retry- suffix. */
+  retriedSlotsOn(localDate: string): number {
+    return this.one<{ count: number }>("SELECT COUNT(DISTINCT a.slot_id) AS count FROM attempts a JOIN slots s ON s.slot_id = a.slot_id WHERE s.local_date = ? AND a.attempt_id LIKE '%-retry-%' AND a.attempt_id NOT LIKE 'reservation-%'", localDate)?.count ?? 0;
+  }
+
+  /** When a local date's missed slots were due, in local minutes, earliest first. */
+  missedMinutesOn(localDate: string): number[] {
+    return this.all<{ local_minutes: number }>("SELECT local_minutes FROM slots WHERE local_date = ? AND state = 'missed' ORDER BY scheduled_at_utc", localDate).map((row) => row.local_minutes);
   }
 
   nextPending(after: Date): SlotRow | undefined {
@@ -423,6 +448,11 @@ export class State {
   /** The newest reading that has both a value and a time, as opposed to a read that failed or came back empty. */
   lastKnownBattery(): BatteryRow | undefined {
     return this.one<BatteryRow>("SELECT * FROM battery_readings WHERE percent IS NOT NULL AND observed_at IS NOT NULL ORDER BY read_at DESC LIMIT 1");
+  }
+
+  /** The same, as of a moment in the past. */
+  lastKnownBatteryBefore(at: string): BatteryRow | undefined {
+    return this.one<BatteryRow>("SELECT * FROM battery_readings WHERE percent IS NOT NULL AND observed_at IS NOT NULL AND read_at < ? ORDER BY read_at DESC LIMIT 1", at);
   }
 
   latestBattery(): BatteryRow | undefined {

@@ -8,6 +8,7 @@ import type { Notify } from "./alerts.ts";
 import { recoverAttempt, TRAFFIC_BASIS } from "./capture/acquire.ts";
 import type { AttemptRecord, RecoveredAttempt } from "./capture/acquire.ts";
 import { abortableSleep, captureSlot, chooseBest, tryDirectory } from "./capture/slot.ts";
+import { dailyReport } from "./daily-report.ts";
 import { chooseReference, compareFrames, judgeFraming } from "./framing.ts";
 import type { FrameComparison, FramingVerdict } from "./framing.ts";
 import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "./lock.ts";
@@ -16,7 +17,7 @@ import { readGrayFrame } from "./media/ffmpeg.ts";
 import { dataBudgetSpent, decide, nextBatteryPaused, reservedSessionMs, sessionBudgetSpent } from "./policy.ts";
 import type { PolicyInput } from "./policy.ts";
 import type { CameraLink } from "./probe/report.ts";
-import { addDays, formatClock, isActiveForInterval, localParts, planDay } from "./schedule.ts";
+import { addDays, formatClock, isActiveForInterval, lastSlotMinutes, localParts, planDay } from "./schedule.ts";
 import { EXPOSURE_TIME_NOTE, readStoredCapture, spoolDirectory, storedCaptureProblem } from "./stored-capture.ts";
 import type { CaptureMetadata, CaptureOwner } from "./stored-capture.ts";
 import type { ScheduleConfig } from "./schedule.ts";
@@ -110,6 +111,7 @@ export class CaptureService {
   private lastPruneDate: string | undefined;
   /** A failure from background work, which the next tick raises so it takes the same path as any other crash. */
   private backgroundFailure: Error | undefined;
+  private dailyReportReadFor: string | undefined;
   /** Unset until the service runs. */
   private loopBeatAt: number | undefined;
   private loopDeclaredStuck = false;
@@ -429,6 +431,7 @@ export class CaptureService {
       return 0;
     }
     await this.renewLoginIfDue();
+    await this.sendDailyReportIfDue();
     const next = this.state.nextPending(now);
     return next === undefined ? IDLE_WAKE_MS : Math.min(IDLE_WAKE_MS, Math.max(0, Date.parse(next.scheduled_at_utc) - now.getTime()));
   }
@@ -492,6 +495,53 @@ export class CaptureService {
   }
 
   /**
+   * Once a day, after the last slot of the window. Also the only sign of life that doesn't need something to go wrong, so
+   * it goes out on a paused day or a day with no slots too. An undelivered or late one is tried at each idle wake until the
+   * next day's is due, so only the newest is ever owed.
+   */
+  private async sendDailyReportIfDue(): Promise<void> {
+    if (!this.config.alerts.daily_report) return;
+    const now = this.now();
+    const local = localParts(now, this.zone);
+    const lastSent = this.state.getFlag("daily_report_date");
+    // From the last slot's turn, not the window's end: the clock never reaches a window ending at 24:00.
+    const { window_start: start, window_end_exclusive: end, grid_minutes: grid } = this.config.schedule;
+    const todaysIsDue = local.minutes >= lastSlotMinutes(start, end, grid);
+    // Until then it's yesterday's that may be owed, after an outage or a failed delivery that ran past midnight.
+    const date = todaysIsDue ? local.date : addDays(local.date, -1);
+    if ((lastSent !== undefined && lastSent >= date) || this.state.hasUnfinishedSlotsOn(date)) return;
+    if (todaysIsDue && this.dailyReportReadFor !== date) {
+      // Cloud only, so it doesn't wake the camera. Without it, a day with no slots would have no reading at all.
+      const reading = await this.readCamera({ forSlot: false });
+      // Readers take the newest row's pace as the current one, and this read doesn't change it.
+      this.recordBatteryReading(now, reading, this.state.latestBattery()?.every_minutes ?? null);
+      this.dailyReportReadFor = date;
+    }
+    const readings = this.state.batterySince(new Date(now.getTime() - 2 * DAY_MS).toISOString()).filter((row) => localParts(new Date(row.read_at), this.zone).date === date);
+    const slots = this.state.slotCountsOn(date);
+    // Nothing on record means a day from before this service existed, and there's nothing to say about that.
+    if (readings.length === 0 && Object.keys(slots).length === 0) return;
+    const paused: string[] = [];
+    if (this.state.getFlag("operator_paused") !== undefined) paused.push("by you");
+    if (this.state.getFlag("battery_paused") !== undefined) paused.push("low battery");
+    if (this.state.getFlag("auth_required") !== undefined) paused.push("needs a login");
+    const text = dailyReport({
+      date,
+      zone: this.zone,
+      slots,
+      retried: this.state.retriedSlotsOn(date),
+      missedMinutes: this.state.missedMinutesOn(date),
+      gridMinutes: this.config.schedule.grid_minutes,
+      readings,
+      // Everything before the day's first row is from an earlier day, with no need to work out when the day began.
+      previous: this.state.lastKnownBatteryBefore(readings[0]?.read_at ?? now.toISOString()),
+      offTarget: this.state.offTargetCountOn(date),
+      paused,
+    });
+    if (await this.options.notify(text)) this.state.setFlag("daily_report_date", date);
+  }
+
+  /**
    * Eufy asks even a trusted device for a code once its token has expired or it hasn't logged in for 30 days, so a
    * login has to happen before then to need nobody. One that Eufy challenges early costs nothing: the held token keeps
    * working, and a person gets days of warning instead of a stopped camera.
@@ -528,8 +578,11 @@ export class CaptureService {
     }
   }
 
-  /** A cloud read that doesn't wake the camera. Nothing here contacts the camera, including the login restore. */
-  private async readCamera(): Promise<BatteryReading | null> {
+  /**
+   * A cloud read that doesn't wake the camera. Nothing here contacts the camera, including the login restore. Only a slot's
+   * read counts toward the alert about failed reads, which says how many slots in a row failed.
+   */
+  private async readCamera({ forSlot }: { forSlot: boolean }): Promise<BatteryReading | null> {
     if (this.state.getFlag("auth_required") !== undefined) {
       await this.retireAdapter();
       return null;
@@ -545,7 +598,7 @@ export class CaptureService {
         starting = undefined;
       }
       this.camera = await this.adapter.discoverCamera(this.camera?.key ?? this.options.cameraSerial);
-      await this.noteCameraRead(true);
+      if (forSlot) await this.noteCameraRead(true);
       return this.camera.battery;
     } catch (error) {
       // Anything but a failure the adapter recognised is a bug, and should crash rather than limp on.
@@ -558,7 +611,7 @@ export class CaptureService {
       // The cloud being unreachable is a reason to skip a reading. The capture attempt reports its own failure.
       this.state.addEvent("camera_read_failed", error.message);
       this.options.log(`could not read camera state: ${error.message}`);
-      await this.noteCameraRead(false);
+      if (forSlot) await this.noteCameraRead(false);
       return null;
     } finally {
       await starting?.shutdown();
@@ -570,6 +623,17 @@ export class CaptureService {
     const failures = succeeded ? 0 : Number(this.state.getFlag("camera_read_failures") ?? "0") + 1;
     this.state.setFlag("camera_read_failures", failures === 0 ? null : String(failures));
     await this.alerts.set("camera_read_failing", failures >= this.config.alerts.consecutive_failed_slots, `the camera's state couldn't be read from Eufy's cloud at ${failures} slots in a row. Capture uses the last battery reading until it's too old. The log has the reason`);
+  }
+
+  /** A failed read keeps the last camera around, and its telemetry says nothing about now. */
+  private recordBatteryReading(now: Date, reading: BatteryReading | null, everyMinutes: number | null): void {
+    this.state.recordBattery({
+      read_at: now.toISOString(),
+      percent: reading?.percent ?? null,
+      observed_at: reading?.observedAt ?? null,
+      every_minutes: everyMinutes,
+      telemetry_json: JSON.stringify(reading === null ? {} : (this.camera?.telemetry ?? {})),
+    });
   }
 
   /** What the last good read said, for a read that failed. A failed read says nothing about the battery either way. */
@@ -592,7 +656,7 @@ export class CaptureService {
   }
 
   private async processSlot(slot: SlotRow, signal: AbortSignal): Promise<void> {
-    const reading = await this.readCamera();
+    const reading = await this.readCamera({ forSlot: true });
     // Only a real reading can clear a battery pause. For choosing a rate, the last one counts for as long as any reading does.
     const freshPercent = this.effectivePercent(reading);
     const percent = this.effectivePercent(reading ?? this.lastKnownReading());
@@ -621,13 +685,7 @@ export class CaptureService {
     };
     const decision = decide(input, this.config, (every) => isActiveForInterval(slot.local_minutes, this.config.schedule.window_start, every));
 
-    this.state.recordBattery({
-      read_at: now.toISOString(),
-      percent: reading?.percent ?? null,
-      observed_at: reading?.observedAt ?? null,
-      every_minutes: decision.everyMinutes,
-      telemetry_json: JSON.stringify(this.camera?.telemetry ?? {}),
-    });
+    this.recordBatteryReading(now, reading, decision.everyMinutes);
     await this.syncPolicyAlerts(input, percent, local.date);
 
     if (decision.action === "skip") {
@@ -951,7 +1009,7 @@ export class CaptureService {
 
   /** One piece of camera work outside a slot, for a command that ends straight after. */
   private async onCamera<T>(work: (adapter: CameraAdapter, camera: CameraInfo) => Promise<T>): Promise<T | CaptureFailure> {
-    await this.readCamera();
+    await this.readCamera({ forSlot: false });
     const { adapter, camera } = this;
     if (adapter === undefined || camera === undefined) return new CaptureFailure("camera_unreachable", "discovery", "The camera can't be reached right now. The log line above says why.");
     try {
@@ -1044,7 +1102,7 @@ export class CaptureService {
 
   /** A one-off frame. It holds the same lock, spends the same budgets, and never affects completeness. */
   async captureManual(signal: AbortSignal): Promise<CaptureRow | CaptureFailure> {
-    const reading = await this.readCamera();
+    const reading = await this.readCamera({ forSlot: false });
     if (this.adapter === undefined || this.camera === undefined) {
       const needsLogin = this.state.getFlag("auth_required");
       if (needsLogin !== undefined) return new CaptureFailure("auth_required", "auth", needsLogin);

@@ -290,7 +290,7 @@ async function commandStatus(settings: AppSettings, paths: Paths, args: string[]
     `Next slot:  ${report.next_slot?.local_time ?? "none planned"}`,
     `Last 24 h:  ${c.captured_at_target_quality} at target, ${c.captured_degraded} degraded, ${c.missed} missed, of ${c.scheduled} grid slots`,
     `Skipped:    ${JSON.stringify(c.skipped_by_reason)}`,
-    `Battery:    ${report.battery.percent ?? "unknown"}%${report.battery.every_minutes === null ? "" : `, capturing every ${report.battery.every_minutes} min`}`,
+    `Battery:    ${report.battery.percent ?? "unknown"}%${report.battery.charging === true ? ", charging" : ""}${report.battery.temperature_c === null ? "" : `, ${report.battery.temperature_c}°C`}${report.battery.every_minutes === null ? "" : `, capturing every ${report.battery.every_minutes} min`}`,
     `Paused:     ${report.pause_reasons.join(", ") || "no"}`,
     `Framing:    ${report.framing.position_saved ? (report.framing.last_check?.status ?? "no frames checked yet") : "no saved position"}`,
     `Alerts:     ${report.active_alerts.join(", ") || "none"}`,
