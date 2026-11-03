@@ -149,8 +149,8 @@ So anything you do in the app between frames undoes itself at the next slot, inc
 A few things about the frames:
 
 - A frame's distance from the saved view is worked out through the last good frame, so small moves add up.
-- The camera lands up to about 24 pixels from where it was, which counts as on target. Expect the view to shift that much
-  between frames, and leave it to the edit to line them up.
+- The camera lands up to about 24 pixels from where it was. Anything within 64 pixels counts as on target (`tolerance_pixels`),
+  so expect the view to shift a little between frames, and leave it to the edit to line them up.
 - A failed reset doesn't cost the frame, because the camera is usually where it belongs anyway. A frame still off target
   when the tries run out is kept and flagged, and renders leave it out. `render --include-off-target` keeps it.
 - Slots off target twice in a row raise an alert. `alert_after_off_target_slots` sets how many.

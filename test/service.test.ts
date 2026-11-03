@@ -548,7 +548,7 @@ describe("CaptureService", () => {
     });
 
     it("adds up small moves until they're off target, and acts on the total", async () => {
-      const nudged: FrameComparison = { ...steady, dx: 24, dy: 0, matchingInPlace: 6 };
+      const nudged: FrameComparison = { ...steady, dx: 48, dy: 0, matchingInPlace: 6 };
       const h = await watching([nudged, nudged, nudged]);
       await runAt(h, [0, 5, 10]);
       assert.deepEqual(checks(h).map((check) => check.status), ["on_target", "off_target", "off_target"]);
@@ -690,7 +690,7 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
-    it("keeps the frame when tracking can't be turned back on, and alerts once a second try fails too", async () => {
+    it("keeps the frame when tracking can't be turned back on, and doesn't alert over a failure that clears itself", async () => {
       const h = await guarded([steady]);
       h.adapter.setTrackingResume(() => {
         throw new CaptureFailure("camera_unreachable", "position", "no connection");
@@ -699,8 +699,31 @@ describe("CaptureService", () => {
       assert.equal(h.state.getSlot(`${h.state.latestCapture()?.slot_id}`)?.state, "captured");
       assert.notEqual(h.state.getFlag("tracking_paused_at"), undefined);
       assert.equal(h.adapter.trackingResumes, 2, "at the end of the slot, then at the next idle wake");
+      assert.deepEqual(trackingAlerts(h), []);
+      h.adapter.setTrackingResume(() => {});
+      h.clock.ms += 6 * MINUTE;
+      await h.service.tick(h.signal);
+      assert.equal(h.state.getFlag("tracking_paused_at"), undefined);
+      assert.deepEqual(trackingAlerts(h), [], "and nothing to say it recovered either");
+      h.state.close();
+    });
+
+    it("alerts once tracking has been off for 15 minutes, and says so when it's back", async () => {
+      const h = await harness({ startMs: AT_0800 - 40 * MINUTE });
+      h.adapter.setTrackingResume(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+      });
+      h.state.setFlag("tracking_paused_at", new Date(h.clock.ms - 14 * MINUTE).toISOString());
+      await h.service.tick(h.signal);
+      assert.deepEqual(trackingAlerts(h), [], "14 minutes isn't long enough");
+      h.clock.ms += 6 * MINUTE;
+      await h.service.tick(h.signal);
       assert.equal(trackingAlerts(h).length, 1);
-      assert.match(trackingAlerts(h)[0] ?? "", /AI tracking/);
+      assert.match(trackingAlerts(h)[0] ?? "", /keeps trying/);
+      h.adapter.setTrackingResume(() => {});
+      h.clock.ms += 6 * MINUTE;
+      await h.service.tick(h.signal);
+      assert.match(trackingAlerts(h).at(-1) ?? "", /recovered/);
       h.state.close();
     });
 
@@ -719,7 +742,6 @@ describe("CaptureService", () => {
       await h.service.tick(h.signal);
       await h.service.tick(h.signal);
       assert.equal(h.state.getFlag("tracking_paused_at"), undefined);
-      assert.match(trackingAlerts(h).at(-1) ?? "", /recovered/);
       h.state.close();
     });
 
@@ -743,7 +765,7 @@ describe("CaptureService", () => {
 
     it("waits and alerts, without falling over, when the camera lock is held at an idle wake", async () => {
       const h = await harness({ startMs: AT_0800 - 2 * MINUTE });
-      h.state.setFlag("tracking_paused_at", new Date(AT_0800 - 3 * MINUTE).toISOString());
+      h.state.setFlag("tracking_paused_at", new Date(AT_0800 - 20 * MINUTE).toISOString());
       await withCameraLock(join(h.dataDir, "camera-lock.sqlite"), async () => {
         await h.service.tick(h.signal);
       });

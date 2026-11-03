@@ -72,6 +72,8 @@ const FRAME_RESET_TRIES = 2;
 const FRAME_STEP_MS = FRAME_STEP_SECONDS * 1000;
 /** How long to wait between tries at turning tracking back on, once a slot hasn't managed it. */
 const TRACKING_RETRY_MS = 5 * 60_000;
+/** On the first real afternoon a failure here cleared itself in under 3 minutes, and that's not worth two messages. */
+const TRACKING_ALERT_AFTER_MS = 15 * 60_000;
 const DAY_MS = 86_400_000;
 
 interface JudgedFrame {
@@ -782,7 +784,9 @@ export class CaptureService {
                   isOffTarget: async (record: AttemptRecord) => {
                     const verdict = await this.judgeFrame(join(this.options.dataDir, "work", record.attempt_id, "frame.jpg"), new Date(record.timing.frame_saved_at ?? this.now()));
                     judged.set(record.attempt_id, verdict);
-                    return verdict.verdict.status === "off_target";
+                    if (verdict.verdict.status !== "off_target") return false;
+                    this.options.log(`this try's frame is off target: ${verdict.verdict.detail}`);
+                    return true;
                   },
                 }),
           });
@@ -1044,7 +1048,8 @@ export class CaptureService {
 
   /** For a slot that couldn't turn tracking back on, or a process that died before it could. */
   private async resumeTrackingIfOwed(): Promise<void> {
-    if (this.state.getFlag("tracking_paused_at") === undefined) return;
+    const pausedAt = this.state.getFlag("tracking_paused_at");
+    if (pausedAt === undefined) return;
     const now = this.now();
     if (this.trackingRetryAtMs !== undefined && now.getTime() < this.trackingRetryAtMs) return;
     // A slot about to start does this itself when it's done, and holding the camera now could cost it its frame.
@@ -1060,7 +1065,9 @@ export class CaptureService {
     }
     if (outcome instanceof CaptureFailure) {
       this.state.addEvent("tracking_resume_failed", outcome.message);
-      await this.alerts.raise("tracking_left_off", `the camera's AI tracking is still off after a frame, so events won't follow what they detect. It keeps trying: ${outcome.message}`);
+      if (now.getTime() - Date.parse(pausedAt) >= TRACKING_ALERT_AFTER_MS) {
+        await this.alerts.raise("tracking_left_off", `the camera's AI tracking is still off after a frame, so events won't follow what they detect. It keeps trying: ${outcome.message}`);
+      }
       return;
     }
     this.state.setFlag("tracking_paused_at", null);
