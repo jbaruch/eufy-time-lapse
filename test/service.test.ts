@@ -17,6 +17,7 @@ import type { CaptureMetadata } from "../src/stored-capture.ts";
 import { State } from "../src/state.ts";
 import type { AttemptRow, CaptureRow, SlotState } from "../src/state.ts";
 import { buildCalibration, buildStatus } from "../src/status.ts";
+import type { FrameComparison } from "../src/framing.ts";
 import { CAMERA, liveSession, MockAdapter, rawVideo, storedMetadata, tempDir } from "./helpers/fixtures.ts";
 import type { MockBehavior } from "./helpers/fixtures.ts";
 
@@ -71,7 +72,7 @@ describe("CaptureService", () => {
     restart: () => { service: CaptureService; state: State };
   }
 
-  async function harness(options: { onStuck?: (error: Error) => void; sleep?: () => Promise<void>; open?: (signal: AbortSignal) => Promise<LiveSession>; teardown?: MockBehavior["teardown"]; authFailure?: MockBehavior["authFailure"]; shutdownFailure?: MockBehavior["shutdownFailure"]; camera?: CameraInfo; auth?: AuthState[]; config?: ServiceConfig; startMs?: number } = {}): Promise<Harness> {
+  async function harness(options: { compareFrames?: (reference: string, frame: string) => Promise<FrameComparison>; onStuck?: (error: Error) => void; sleep?: () => Promise<void>; open?: (signal: AbortSignal) => Promise<LiveSession>; teardown?: MockBehavior["teardown"]; authFailure?: MockBehavior["authFailure"]; shutdownFailure?: MockBehavior["shutdownFailure"]; camera?: CameraInfo; auth?: AuthState[]; config?: ServiceConfig; startMs?: number } = {}): Promise<Harness> {
     run += 1;
     const dataDir = join(root.path, `data-${run}`);
     await mkdir(dataDir, { recursive: true });
@@ -105,6 +106,7 @@ describe("CaptureService", () => {
         sleep: options.sleep ?? (async () => {}),
         diskFreeMb: async () => disk.mb,
         ...(options.onStuck ? { onStuck: options.onStuck } : {}),
+        ...(options.compareFrames ? { compareFrames: options.compareFrames } : {}),
       });
     const state = new State(join(dataDir, "state.sqlite"), now);
     return {
@@ -331,6 +333,428 @@ describe("CaptureService", () => {
       assert.deepEqual(h.state.listOwedRecoveries(), []);
       await runAt(h, [10]);
       assert.equal(h.notices.filter((notice) => notice.includes("recovered: broken")).length, 2, "and then it's done");
+      h.state.close();
+    });
+  });
+
+  describe("the framing guard", () => {
+    const steady: FrameComparison = { texturedPatches: 12, frameTexturedPatches: 12, agreeing: 12, dx: 0, dy: 0, matchingInPlace: 12, referenceBrightness: 110, frameBrightness: 110 };
+    const panned: FrameComparison = { ...steady, agreeing: 6, dx: 400, dy: -16, matchingInPlace: 0 };
+    const farAway: FrameComparison = { ...steady, agreeing: 1, dx: 0, dy: 0, matchingInPlace: 0 };
+    const murky: FrameComparison = { ...steady, agreeing: 1, matchingInPlace: 3 };
+    /** A position is saved before the frames compared with it. */
+    const BEFORE_FIRST_SLOT = AT_0800 - MINUTE;
+
+    /** Answers each comparison in turn, then says steady. */
+    function scripted(...script: FrameComparison[]): { compare: (reference: string, frame: string) => Promise<FrameComparison>; calls: Array<[string, string]> } {
+      const calls: Array<[string, string]> = [];
+      return {
+        calls,
+        compare: async (reference, frame) => {
+          calls.push([reference, frame]);
+          return script.shift() ?? steady;
+        },
+      };
+    }
+
+    async function guarded(script: FrameComparison[], config = serviceConfig()): Promise<Harness & { calls: Array<[string, string]> }> {
+      const { compare, calls } = scripted(...script);
+      const h = await harness({ compareFrames: compare, config, startMs: BEFORE_FIRST_SLOT });
+      const saved = await h.service.setFramingPosition(h.signal);
+      assert.equal(typeof saved, "number", "the position saved");
+      return { ...h, calls };
+    }
+
+    const checks = (h: Harness): Array<{ status: string; dx: number | null; dy: number | null }> => {
+      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"), { readOnly: true });
+      const rows = raw.prepare("SELECT f.status, f.dx, f.dy FROM framing_checks f JOIN captures c ON c.capture_id = f.capture_id WHERE c.kind = 'scheduled' ORDER BY f.checked_at").all() as Array<{ status: string; dx: number | null; dy: number | null }>;
+      raw.close();
+      return rows.map((row) => ({ ...row }));
+    };
+    const about = (h: Harness): string[] => h.notices.filter((notice) => /saved position/.test(notice));
+
+    it("does nothing at all until a position is saved", async () => {
+      const { compare, calls } = scripted();
+      const h = await harness({ compareFrames: compare });
+      await runAt(h, [0, 5]);
+      assert.deepEqual(calls, []);
+      assert.deepEqual(checks(h), []);
+      assert.deepEqual(h.adapter.positionReturns, []);
+      h.state.close();
+    });
+
+    it("saves the position, and takes a frame to compare later ones with", async () => {
+      const { compare } = scripted();
+      const h = await harness({ compareFrames: compare });
+      assert.equal(await h.service.setFramingPosition(h.signal), 3);
+      assert.deepEqual(h.adapter.savedPositions, [3]);
+      assert.equal(h.state.getFlag("framing_position_id"), "3");
+      assert.equal(h.state.latestFramingCheck()?.status, "on_target");
+      h.state.close();
+    });
+
+    it("replaces an earlier position, deleting the old one only once the new one is safe", async () => {
+      const h = await guarded([]);
+      assert.equal(await h.service.setFramingPosition(h.signal), 4);
+      assert.deepEqual(h.adapter.forgottenPositions, [3]);
+      assert.equal(h.state.getFlag("framing_position_id"), "4");
+      h.state.close();
+    });
+
+    it("forgets the position and stops checking when told to", async () => {
+      const h = await guarded([panned, panned]);
+      await h.service.forgetFramingPosition();
+      assert.deepEqual(h.adapter.forgottenPositions, [3]);
+      assert.equal(h.state.getFlag("framing_position_id"), undefined);
+      await runAt(h, [0, 5]);
+      assert.deepEqual(h.calls, []);
+      assert.deepEqual(h.adapter.positionReturns, []);
+      h.state.close();
+    });
+
+    it("compares each frame with the last good one, and never with an off-target one", async () => {
+      const h = await guarded([steady, panned, steady]);
+      await runAt(h, [0, 5, 10]);
+      const name = (path: string): string => path.split("/").slice(-2, -1)[0] ?? "";
+      const [first, second, third] = h.calls as [[string, string], [string, string], [string, string]];
+      assert.equal(name(second[0]), name(first[1]), "the second frame is compared with the first");
+      assert.equal(name(third[0]), name(first[1]), "the off-target second frame isn't used for the third");
+      h.state.close();
+    });
+
+    it("never compares a new view with frames of the old one, even at the same time of day", async () => {
+      const h = await guarded([steady, steady]);
+      await runAt(h, [0, 5]);
+      h.clock.ms = AT_0800 + 7 * 60 * MINUTE;
+      await h.service.setFramingPosition(h.signal);
+      const newView = h.state.latestFramingCheck()?.capture_id ?? "none";
+      await runAt(h, [24 * 60]);
+      const [reference] = h.calls.at(-1) as [string, string];
+      assert.ok(reference.includes(newView), "the morning after a re-aim, the reference is the new view's frame");
+      h.state.close();
+    });
+
+    it("records steady frames and leaves the camera alone", async () => {
+      const h = await guarded([steady, steady]);
+      await runAt(h, [0, 5]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["on_target", "on_target"]);
+      assert.deepEqual(h.adapter.positionReturns, []);
+      assert.deepEqual(about(h), []);
+      h.state.close();
+    });
+
+    it("flags the first off-target frame, how far it moved, and doesn't move yet", async () => {
+      const h = await guarded([panned]);
+      await runAt(h, [0]);
+      assert.deepEqual(checks(h), [{ status: "off_target", dx: 400, dy: -16 }]);
+      assert.deepEqual(h.adapter.positionReturns, []);
+      h.state.close();
+    });
+
+    it("returns on the second off-target slot in a row, and says nothing, because that's it working", async () => {
+      const h = await guarded([panned, panned, steady]);
+      await runAt(h, [0, 5, 10]);
+      assert.deepEqual(h.adapter.positionReturns, [3]);
+      assert.deepEqual(about(h), []);
+      h.state.close();
+      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"), { readOnly: true });
+      assert.equal((raw.prepare("SELECT COUNT(*) AS count FROM events WHERE kind = 'framing_returned'").get() as { count: number }).count, 1);
+      raw.close();
+    });
+
+    it("counts a far pan with nothing to measure the same way", async () => {
+      const h = await guarded([farAway, farAway]);
+      await runAt(h, [0, 5]);
+      assert.deepEqual(checks(h)[0], { status: "off_target", dx: null, dy: null });
+      assert.deepEqual(h.adapter.positionReturns, [3]);
+      h.state.close();
+    });
+
+    it("gives a person who looks away and back the benefit of it", async () => {
+      const h = await guarded([panned, steady, panned]);
+      await runAt(h, [0, 5, 10]);
+      assert.deepEqual(h.adapter.positionReturns, []);
+      h.state.close();
+    });
+
+    it("adds up small moves until they're off target, and acts on the total", async () => {
+      const nudged: FrameComparison = { ...steady, dx: 24, dy: 0, matchingInPlace: 6 };
+      const h = await guarded([nudged, nudged, nudged]);
+      await runAt(h, [0, 5, 10]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["on_target", "off_target", "off_target"]);
+      assert.deepEqual(h.adapter.positionReturns, [3]);
+      h.state.close();
+    });
+
+    it("calls a frame back near the saved position on target, even far from a reference that had drifted", async () => {
+      const h = await guarded([{ ...steady, dx: -24, dy: -16 }, { ...steady, dx: 24, dy: 32 }]);
+      await runAt(h, [0, 5]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["on_target", "on_target"]);
+      const { offset_dx: offsetX, offset_dy: offsetY } = h.state.latestFramingCheck() ?? {};
+      assert.deepEqual([offsetX, offsetY], [0, 16]);
+      h.state.close();
+    });
+
+    it("counts an older check with no distance on record as on the saved position", async () => {
+      const h = await guarded([{ ...steady, dx: 16, dy: 0 }]);
+      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"));
+      raw.exec("UPDATE framing_checks SET offset_dx = NULL, offset_dy = NULL");
+      raw.close();
+      await runAt(h, [0]);
+      assert.equal(checks(h)[0]?.status, "on_target");
+      assert.equal(h.state.latestFramingCheck()?.offset_dx, 16);
+      h.state.close();
+    });
+
+    it("keeps no distance for a frame it couldn't measure", async () => {
+      const h = await guarded([murky]);
+      await runAt(h, [0]);
+      assert.equal(h.state.latestFramingCheck()?.offset_dx, null);
+      assert.equal(h.state.latestFramingCheck()?.offset_dy, null);
+      h.state.close();
+    });
+
+    it("never moves on unsure, however long that goes on", async () => {
+      const h = await guarded([murky, murky, murky, murky]);
+      await runAt(h, [0, 5, 10, 15]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["unsure", "unsure", "unsure", "unsure"]);
+      assert.deepEqual(h.adapter.positionReturns, []);
+      assert.deepEqual(about(h), []);
+      h.state.close();
+    });
+
+    it("doesn't move on unsure even after off-target frames, once the wait between returns is over", async () => {
+      const h = await guarded([panned, panned, ...Array.from({ length: 8 }, () => murky)]);
+      await runAt(h, [0, 5]);
+      assert.deepEqual(h.adapter.positionReturns, [3]);
+      await runAt(h, [10, 15, 20, 25, 30, 35, 40, 45]);
+      assert.deepEqual(h.adapter.positionReturns, [3], "45 minutes of unsure, past the 30-minute wait");
+      h.state.close();
+    });
+
+    it("doesn't let unsure frames between them reset the count", async () => {
+      const h = await guarded([panned, murky, panned]);
+      await runAt(h, [0, 5, 10]);
+      assert.deepEqual(h.adapter.positionReturns, [3]);
+      h.state.close();
+    });
+
+    it("waits the configured number of slots", async () => {
+      const config = serviceConfig();
+      config.framing = { ...config.framing, return_after_off_target_slots: 3 };
+      const h = await guarded([panned, panned, panned], config);
+      await runAt(h, [0, 5]);
+      assert.deepEqual(h.adapter.positionReturns, []);
+      await runAt(h, [10]);
+      assert.deepEqual(h.adapter.positionReturns, [3]);
+      h.state.close();
+    });
+
+    it("uses the configured tolerance", async () => {
+      const config = serviceConfig();
+      config.framing = { ...config.framing, tolerance_pixels: 500 };
+      const h = await guarded([panned], config);
+      await runAt(h, [0]);
+      assert.equal(checks(h)[0]?.status, "on_target");
+      h.state.close();
+    });
+
+    it("only watches when returning is turned off: it flags, but won't move or alert", async () => {
+      const config = serviceConfig();
+      config.framing = { ...config.framing, return_enabled: false };
+      const h = await guarded([panned, panned, panned, panned], config);
+      await runAt(h, [0, 5, 10, 15]);
+      assert.equal(checks(h).filter((check) => check.status === "off_target").length, 4);
+      assert.deepEqual(h.adapter.positionReturns, []);
+      assert.deepEqual(about(h), []);
+      h.state.close();
+    });
+
+    it("alerts if going back didn't fix it, and clears when it's on target again", async () => {
+      const h = await guarded([panned, panned, panned, steady]);
+      await runAt(h, [0, 5]);
+      assert.deepEqual(about(h), []);
+      await runAt(h, [10]);
+      assert.equal(about(h).length, 1);
+      assert.match(about(h)[0] ?? "", /framing set/);
+      await runAt(h, [15]);
+      assert.match(about(h).at(-1) ?? "", /recovered/);
+      h.state.close();
+    });
+
+    it("leaves 30 minutes between returns", async () => {
+      const h = await guarded(Array.from({ length: 8 }, () => panned));
+      await runAt(h, [0, 5, 10, 15, 20, 25, 30]);
+      assert.deepEqual(h.adapter.positionReturns, [3], "at 5 minutes, and not yet at 30");
+      await runAt(h, [35]);
+      assert.deepEqual(h.adapter.positionReturns, [3, 3]);
+      h.state.close();
+    });
+
+    it("stops at 6 returns in a day, whatever the frames say", async () => {
+      const h = await guarded(Array.from({ length: 100 }, () => panned));
+      const minutes = Array.from({ length: 100 }, (_, slot) => slot * 5).filter((minute) => minute < 8 * 60);
+      await runAt(h, minutes);
+      assert.equal(h.adapter.positionReturns.length, 6);
+      h.state.close();
+    });
+
+    it("says what to do when the saved position has been deleted, and doesn't count that as a return", async () => {
+      const h = await guarded([panned, panned]);
+      h.adapter.setPositionReturn(() => "gone");
+      await runAt(h, [0, 5]);
+      assert.match(h.notices.find((notice) => /no longer exists/.test(notice)) ?? "", /framing set/);
+      h.state.close();
+      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"), { readOnly: true });
+      assert.equal((raw.prepare("SELECT COUNT(*) AS count FROM events WHERE kind = 'framing_returned'").get() as { count: number }).count, 0);
+      raw.close();
+    });
+
+    it("clears that alert once a new position is saved", async () => {
+      const h = await guarded([panned, panned]);
+      h.adapter.setPositionReturn(() => "gone");
+      await runAt(h, [0, 5]);
+      await h.service.setFramingPosition(h.signal);
+      assert.equal(h.state.getAlert("framing_position_gone"), undefined);
+      h.state.close();
+    });
+
+    it("keeps the frame when the camera can't be turned, and tries again after the wait", async () => {
+      const h = await guarded(Array.from({ length: 10 }, () => panned));
+      h.adapter.setPositionReturn(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+      });
+      await runAt(h, [0, 5]);
+      assert.equal(h.state.getSlot(`${h.state.latestCapture()?.slot_id}`)?.state, "captured");
+      assert.equal(h.adapter.positionReturns.length, 1);
+      await runAt(h, [10, 15]);
+      assert.equal(h.adapter.positionReturns.length, 1);
+      await runAt(h, [35]);
+      assert.equal(h.adapter.positionReturns.length, 2);
+      h.state.close();
+    });
+
+    it("lets a bug in turning the camera through", async () => {
+      const h = await guarded([panned, panned]);
+      h.adapter.setPositionReturn(() => {
+        throw new TypeError("not a function");
+      });
+      await runAt(h, [0]);
+      h.clock.ms = AT_0800 + 5 * MINUTE;
+      await assert.rejects(async () => {
+        while ((await h.service.tick(h.signal)) === 0);
+      }, TypeError);
+      h.state.close();
+    });
+
+    it("calls a frame it can't read unsure, and keeps the frame", async () => {
+      const unreadable = await harness({
+        startMs: BEFORE_FIRST_SLOT,
+        compareFrames: async () => {
+          throw new CaptureFailure("decode_failed", "decode", "FFmpeg can't read it");
+        },
+      });
+      await unreadable.service.setFramingPosition(unreadable.signal);
+      await runAt(unreadable, [0]);
+      assert.equal(checks(unreadable)[0]?.status, "unsure");
+      assert.equal(unreadable.state.latestCapture() !== undefined, true);
+      unreadable.state.close();
+    });
+
+    it("lets a bug in the comparison through", async () => {
+      const h = await harness({
+        startMs: BEFORE_FIRST_SLOT,
+        compareFrames: async () => {
+          throw new TypeError("not a function");
+        },
+      });
+      await h.service.setFramingPosition(h.signal);
+      await assert.rejects(runAt(h, [0]), TypeError);
+      h.state.close();
+    });
+
+    it("reads real stored frames with the real comparison, and finds the same view on target", async () => {
+      const h = await harness({ startMs: BEFORE_FIRST_SLOT });
+      await h.service.setFramingPosition(h.signal);
+      await runAt(h, [0]);
+      assert.equal(checks(h)[0]?.status, "on_target");
+      h.state.close();
+    });
+
+    it("calls a stored frame that's gone unsure, using the real comparison", async () => {
+      const h = await harness({ startMs: BEFORE_FIRST_SLOT });
+      await h.service.setFramingPosition(h.signal);
+      const reference = h.state.framingReferences("2000-01-01T00:00:00.000Z", "")[0];
+      await rm(join(h.dataDir, reference?.relative_dir ?? "missing", "frame.jpg"));
+      await runAt(h, [0]);
+      assert.equal(checks(h)[0]?.status, "unsure");
+      h.state.close();
+    });
+
+    it("counts every try toward the day's limit, even one that can't get through", async () => {
+      const h = await guarded(Array.from({ length: 100 }, () => panned));
+      h.adapter.setPositionReturn(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+      });
+      await runAt(h, Array.from({ length: 100 }, (_, slot) => slot * 5).filter((minute) => minute < 8 * 60));
+      assert.equal(h.adapter.positionReturns.length, 6);
+      h.state.close();
+    });
+
+    it("shows up in the status report", async () => {
+      const h = await guarded([panned]);
+      assert.deepEqual(buildStatus(h.state, serviceConfig(), new Date(AT_0800), 50_000).framing.position_saved, true);
+      await runAt(h, [0]);
+      const { framing } = buildStatus(h.state, serviceConfig(), new Date(AT_0800 + MINUTE), 50_000);
+      assert.equal(framing.last_check?.status, "off_target");
+      assert.equal(framing.last_check?.dx, 400);
+      assert.deepEqual([framing.last_check?.offset_dx, framing.last_check?.offset_dy], [400, -16]);
+      assert.equal(framing.off_target_slots_in_a_row, 1);
+      h.state.close();
+    });
+
+    it("says it has no position in the status report before one is saved", async () => {
+      const h = await harness();
+      const { framing } = buildStatus(h.state, serviceConfig(), new Date(AT_0800), 50_000);
+      assert.deepEqual(framing, { position_saved: false, last_check: null, off_target_slots_in_a_row: 0 });
+      h.state.close();
+    });
+
+    it("keeps the new position when the old one can't be deleted", async () => {
+      const h = await guarded([]);
+      h.adapter.forgetFailure = new CaptureFailure("camera_unreachable", "position", "no connection");
+      assert.equal(await h.service.setFramingPosition(h.signal), 4);
+      assert.equal(h.state.getFlag("framing_position_id"), "4");
+      h.state.close();
+    });
+
+    it("keeps watching when the position can't be deleted, and says so", async () => {
+      const h = await guarded([]);
+      h.adapter.forgetFailure = new CaptureFailure("camera_unreachable", "position", "no connection");
+      const result = await h.service.forgetFramingPosition();
+      assert.ok(result instanceof CaptureFailure);
+      assert.equal(h.state.getFlag("framing_position_id"), "3");
+      h.state.close();
+    });
+
+    it("doesn't check a manual frame", async () => {
+      const h = await guarded([panned]);
+      const before = h.calls.length;
+      await h.service.captureManual(h.signal);
+      assert.equal(h.calls.length, before);
+      h.state.close();
+    });
+
+    it("leaves nothing changed when the first frame can't be taken", async () => {
+      const h = await harness({
+        open: async () => {
+          throw new CaptureFailure("camera_unreachable", "connect", "no connection");
+        },
+      });
+      const result = await h.service.setFramingPosition(h.signal);
+      assert.ok(result instanceof CaptureFailure);
+      assert.deepEqual(h.adapter.savedPositions, []);
+      assert.equal(h.state.getFlag("framing_position_id"), undefined);
       h.state.close();
     });
   });

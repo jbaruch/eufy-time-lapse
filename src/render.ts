@@ -32,6 +32,8 @@ export interface RenderOptions {
   includeManual: boolean;
   /** Takes frames below the required size too, which pulls the whole video down to the smallest one. */
   includeDegraded: boolean;
+  /** Takes frames the framing check found pointing away from the saved position too. */
+  includeOffTarget: boolean;
   now: () => Date;
 }
 
@@ -53,12 +55,13 @@ export interface RenderManifest {
   exclusions: Array<{ capture_id: string; reason: string }>;
 }
 
-export function selectFrames(captures: CaptureRow[], options: { includeManual: boolean; includeDegraded: boolean }): { selected: CaptureRow[]; exclusions: RenderManifest["exclusions"] } {
+export function selectFrames(captures: CaptureRow[], options: { includeManual: boolean; includeDegraded: boolean; includeOffTarget: boolean; offTarget: ReadonlySet<string> }): { selected: CaptureRow[]; exclusions: RenderManifest["exclusions"] } {
   const selected: CaptureRow[] = [];
   const exclusions: RenderManifest["exclusions"] = [];
   for (const capture of captures) {
     if (capture.kind === "manual" && !options.includeManual) exclusions.push({ capture_id: capture.capture_id, reason: "manual capture" });
     else if (capture.quality_status !== "ok" && !options.includeDegraded) exclusions.push({ capture_id: capture.capture_id, reason: `below the required size: ${capture.width}x${capture.height}` });
+    else if (options.offTarget.has(capture.capture_id) && !options.includeOffTarget) exclusions.push({ capture_id: capture.capture_id, reason: "the camera was pointing away from its saved position" });
     else selected.push(capture);
   }
   return { selected, exclusions };
@@ -135,7 +138,7 @@ export async function render(options: RenderOptions): Promise<RenderManifest> {
   const manifestPath = `${options.outputPath}.manifest.json`;
   await refuseServiceFiles([options.outputPath, listPath, manifestPath], options.dataDir);
 
-  const chosen = selectFrames(options.state.capturesBetween(options.from, options.to), options);
+  const chosen = selectFrames(options.state.capturesBetween(options.from, options.to), { ...options, offTarget: options.state.offTargetCaptureIds(options.from, options.to) });
   const { selected, exclusions } = await verifyFrames(chosen, options);
   if (selected.length === 0) {
     throw new RenderError(`No frames to render between ${options.from} and ${options.to} (${exclusions.length} excluded). Check the dates, or use --include-degraded.`);

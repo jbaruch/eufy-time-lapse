@@ -36,6 +36,7 @@ export interface ServiceConfig {
   storage: { min_free_disk_mb: number; keep_failed_work_days: number; keep_logs_days: number };
   alerts: { telegram: TelegramConfig | null; consecutive_failed_slots: number; reminder_hours: number; first_try_warn_percent: number; first_try_window: number };
   http: { bind: string; port: number };
+  framing: { tolerance_pixels: number; return_after_off_target_slots: number; return_enabled: boolean };
   logging: { sdk_debug: boolean };
 }
 
@@ -67,6 +68,8 @@ export const DEFAULT_SERVICE_CONFIG: ServiceConfig = {
   storage: { min_free_disk_mb: 1024, keep_failed_work_days: 3, keep_logs_days: 30 },
   alerts: { telegram: null, consecutive_failed_slots: 3, reminder_hours: 24, first_try_warn_percent: 80, first_try_window: 50 },
   http: { bind: "127.0.0.1", port: 8787 },
+  // 32 clears the 10 to 18 pixels a return to a saved position was measured to land off, so a return can't look like a new move.
+  framing: { tolerance_pixels: 32, return_after_off_target_slots: 2, return_enabled: true },
   logging: { sdk_debug: false },
 };
 
@@ -116,7 +119,7 @@ function validate(config: ServiceConfig): void {
     if (typeof value !== "string" || !SAFE_ID.test(value)) fail(`${path} must start with a letter or digit and hold only letters, digits, dots, dashes and underscores, got ${JSON.stringify(value)}.`);
   };
 
-  for (const name of ["project", "camera", "schedule", "cadence", "battery", "capture", "traffic", "storage", "alerts", "http", "logging"] as const) section(name);
+  for (const name of ["project", "camera", "schedule", "cadence", "battery", "capture", "framing", "traffic", "storage", "alerts", "http", "logging"] as const) section(name);
 
   id("project.id", config.project.id);
   id("camera.id", config.camera.id);
@@ -174,6 +177,11 @@ function validate(config: ServiceConfig): void {
   whole("capture.target_keyframes", keyframes, 1);
   whole("capture.max_attempts", tries, 1);
   if ((acquire + cleanup) * tries + retry * (tries - 1) > deadline) fail("capture.slot_deadline_seconds is too short for max_attempts to finish.");
+
+  const { tolerance_pixels: tolerance, return_after_off_target_slots: returnAfter, return_enabled: returnEnabled } = config.framing;
+  positive("framing.tolerance_pixels", tolerance);
+  whole("framing.return_after_off_target_slots", returnAfter, 1);
+  if (typeof returnEnabled !== "boolean") fail(`framing.return_enabled must be true or false, got ${JSON.stringify(returnEnabled)}.`);
 
   const { monthly_budget_mb: budget, warn_fraction: warnFraction, pause_fraction: pauseFraction } = config.traffic;
   if (budget !== null) positive("traffic.monthly_budget_mb", budget);

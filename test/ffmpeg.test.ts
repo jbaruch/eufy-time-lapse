@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { promisify } from "node:util";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
-import { isToolFailure, probeImage } from "../src/media/ffmpeg.ts";
+import { GRAY_HEIGHT, GRAY_WIDTH } from "../src/framing.ts";
+import { isToolFailure, probeImage, readGrayFrame } from "../src/media/ffmpeg.ts";
 import { tempDir } from "./helpers/fixtures.ts";
 
 const run = promisify(execFile);
@@ -58,5 +59,32 @@ describe("running a tool", () => {
 
   it("lets a bug through as itself, not as a missed frame", async () => {
     await assert.rejects(probeImage("a\0b"), (error: Error) => error instanceof TypeError && !(error instanceof CaptureFailure));
+  });
+});
+
+describe("readGrayFrame", () => {
+  let dir: { path: string; remove: () => Promise<void> };
+
+  before(async () => {
+    dir = await tempDir();
+  });
+  after(async () => {
+    await dir.remove();
+  });
+
+  it("shrinks a frame of any size to the comparison's size, in gray", async () => {
+    const path = join(dir.path, "frame.jpg");
+    await run("ffmpeg", ["-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=white:s=640x360", "-frames:v", "1", "-update", "1", path]);
+    const gray = await readGrayFrame(path);
+    assert.equal(gray.length, GRAY_WIDTH * GRAY_HEIGHT);
+    assert.ok((gray[0] ?? 0) > 200, "white stays bright");
+  });
+
+  it("calls a frame it can't read a decode failure", async () => {
+    await assert.rejects(readGrayFrame(join(dir.path, "not-there.jpg")), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "decode_failed");
+  });
+
+  it("lets a bug on the way there through as itself", async () => {
+    await assert.rejects(readGrayFrame("a\0b"), (error: Error) => error instanceof TypeError && !(error instanceof CaptureFailure));
   });
 });

@@ -12,7 +12,7 @@ export type FailureReason =
   | "storage_full"
   | "aborted";
 
-export type FailurePhase = "auth" | "discovery" | "connect" | "stream_start" | "first_media" | "decode" | "cleanup";
+export type FailurePhase = "auth" | "discovery" | "connect" | "stream_start" | "first_media" | "decode" | "cleanup" | "position";
 
 export class CaptureFailure extends Error {
   readonly reason: FailureReason;
@@ -114,6 +114,12 @@ export interface CameraAdapter {
   /** Stops the stream and the camera connection. Reports problems in its result. */
   /** Resolves with the outcome, including one that failed in a way the adapter understands. A rejection means a bug. */
   teardown(cameraKey: string, timeoutMs: number): Promise<CleanupResult>;
+  /** Saves where the camera points now, in the first empty slot, and answers which slot. Rejects with CaptureFailure if the camera didn't keep it. */
+  savePosition(cameraKey: string): Promise<number>;
+  /** Turns the camera to a saved position, or answers "gone", without moving, if that position no longer exists. Rejects with CaptureFailure. */
+  returnToPosition(cameraKey: string, positionId: number): Promise<"returned" | "gone">;
+  /** Deletes a saved position, if it's still there. Rejects with CaptureFailure. */
+  forgetPosition(cameraKey: string, positionId: number): Promise<void>;
   /** Connections to the camera that opened outside an attempt. Each one wakes it. */
   unexpectedConnectionCount(): number;
   shutdown(): Promise<void>;

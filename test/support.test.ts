@@ -13,6 +13,7 @@ import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "../src
 import { runLogin } from "../src/login.ts";
 import { createRedactingLogger, Redactor } from "../src/logging.ts";
 import { State } from "../src/state.ts";
+import type { CaptureRow, FramingCheckRow, FramingCheckStatus } from "../src/state.ts";
 import { MockAdapter, tempDir } from "./helpers/fixtures.ts";
 
 describe("loadConfig", () => {
@@ -441,6 +442,12 @@ describe("the command line", () => {
     assert.match(stdout, /^Usage: timelapse/);
   });
 
+  it("asks what the framing command should do, rather than guessing", async () => {
+    const dir = await tempDir();
+    await assert.rejects(run(process.execPath, [cli, "framing", "nonsense"], { env: { ...process.env, TIMELAPSE_DATA_DIR: dir.path } }), (error: { stderr: string }) => /framing needs "set"/.test(error.stderr));
+    await dir.remove();
+  });
+
   it("refuses an unknown command, with the usage and a failing exit code", async () => {
     await assert.rejects(run(process.execPath, [cli, "nonsense"]), (error: { code: number; stderr: string }) => error.code === 2 && /Usage: timelapse/.test(error.stderr));
   });
@@ -504,7 +511,7 @@ describe("State migrations", () => {
     const path = join(dir.path, "old.sqlite");
     new State(path).close();
     const raw = new DatabaseSync(path);
-    raw.exec("ALTER TABLE alerts DROP COLUMN recovery_owed_since; PRAGMA user_version = 1");
+    raw.exec("DROP TABLE framing_checks; ALTER TABLE alerts DROP COLUMN recovery_owed_since; PRAGMA user_version = 1");
     raw.prepare("INSERT INTO alerts (key, detail, active_since, last_sent_at) VALUES ('x', 'broken', 'then', 'then')").run();
     raw.close();
     const state = new State(path);
@@ -513,6 +520,115 @@ describe("State migrations", () => {
     assert.deepEqual(state.listAlerts().map((alert) => alert.key), ["x"]);
     state.close();
     await dir.remove();
+  });
+});
+
+describe("State framing checks", () => {
+  const capture = (id: string, at: string, date = at.slice(0, 10)): CaptureRow => ({ capture_id: id, slot_id: null, kind: "scheduled", local_date: date, frame_received_at: at, width: 3840, height: 2160, jpeg_bytes: 1, sha256: "x", quality_status: "ok", relative_dir: `spool/${id}`, archive_status: "disabled", created_at: at });
+  const check = (id: string, at: string, status: FramingCheckStatus): FramingCheckRow => ({ capture_id: id, checked_at: at, status, reference_capture_id: null, dx: null, dy: null, offset_dx: null, offset_dy: null, detail: "test" });
+
+  async function opened(): Promise<{ state: State; done: () => Promise<void> }> {
+    const dir = await tempDir();
+    const state = new State(join(dir.path, "state.sqlite"));
+    return {
+      state,
+      done: async () => {
+        state.close();
+        await dir.remove();
+      },
+    };
+  }
+
+  it("adds its table to a database from before there were any", async () => {
+    const dir = await tempDir();
+    const path = join(dir.path, "old.sqlite");
+    new State(path).close();
+    const raw = new DatabaseSync(path);
+    raw.exec("DROP TABLE framing_checks; PRAGMA user_version = 2");
+    raw.close();
+    const state = new State(path);
+    state.recordFramingCheck(check("a", "2026-11-03T15:00:00.000Z", "on_target"));
+    assert.equal(state.latestFramingCheck()?.capture_id, "a");
+    state.close();
+    await dir.remove();
+  });
+
+  it("keeps a frame's first verdict", async () => {
+    const { state, done } = await opened();
+    state.recordFramingCheck(check("a", "2026-11-03T15:00:00.000Z", "off_target"));
+    state.recordFramingCheck(check("a", "2026-11-03T15:01:00.000Z", "on_target"));
+    assert.equal(state.latestFramingCheck()?.status, "off_target");
+    await done();
+  });
+
+  it("counts off-target slots since the last good one, and unsure neither adds nor resets", async () => {
+    const { state, done } = await opened();
+    assert.equal(state.offTargetSlotsInARow(), 0);
+    state.recordFramingCheck(check("a", "2026-11-03T15:00:00.000Z", "off_target"));
+    state.recordFramingCheck(check("b", "2026-11-03T15:05:00.000Z", "on_target"));
+    assert.equal(state.offTargetSlotsInARow(), 0);
+    state.recordFramingCheck(check("c", "2026-11-03T15:10:00.000Z", "off_target"));
+    state.recordFramingCheck(check("d", "2026-11-03T15:15:00.000Z", "unsure"));
+    assert.equal(state.offTargetSlotsInARow(), 1);
+    state.recordFramingCheck(check("e", "2026-11-03T15:20:00.000Z", "off_target"));
+    assert.equal(state.offTargetSlotsInARow(), 2);
+    await done();
+  });
+
+  it("offers only on-target frames as references, and the newest one of any age when none are recent", async () => {
+    const { state, done } = await opened();
+    state.insertCapture(capture("old", "2026-10-01T15:00:00.000Z"));
+    state.insertCapture(capture("older", "2026-09-01T15:00:00.000Z"));
+    state.insertCapture(capture("bad", "2026-11-03T15:00:00.000Z"));
+    state.recordFramingCheck(check("old", "2026-10-01T15:00:01.000Z", "on_target"));
+    state.recordFramingCheck(check("older", "2026-09-01T15:00:01.000Z", "on_target"));
+    state.recordFramingCheck(check("bad", "2026-11-03T15:00:01.000Z", "off_target"));
+    assert.deepEqual(state.framingReferences("2026-11-01T00:00:00.000Z", "").map((row) => row.capture_id), ["old"]);
+    assert.deepEqual(state.framingReferences("2026-09-15T00:00:00.000Z", "").map((row) => row.capture_id), ["old"]);
+    await done();
+  });
+
+  it("gives back how far a reference sat from the saved position", async () => {
+    const { state, done } = await opened();
+    state.insertCapture(capture("good", "2026-11-03T15:00:00.000Z"));
+    state.recordFramingCheck({ ...check("good", "2026-11-03T15:00:01.000Z", "on_target"), offset_dx: -16, offset_dy: 8 });
+    const [reference] = state.framingReferences("2026-11-01T00:00:00.000Z", "");
+    assert.deepEqual([reference?.offset_dx, reference?.offset_dy], [-16, 8]);
+    await done();
+  });
+
+  it("offers nothing from before the position was saved, however good", async () => {
+    const { state, done } = await opened();
+    state.insertCapture(capture("old-view", "2026-11-02T15:00:00.000Z"));
+    state.insertCapture(capture("new-view", "2026-11-03T15:00:00.000Z"));
+    state.recordFramingCheck(check("old-view", "2026-11-02T15:00:01.000Z", "on_target"));
+    state.recordFramingCheck(check("new-view", "2026-11-03T15:00:01.000Z", "on_target"));
+    const saved = "2026-11-03T15:00:00.000Z";
+    assert.deepEqual(state.framingReferences("2026-11-01T00:00:00.000Z", saved).map((row) => row.capture_id), ["new-view"]);
+    assert.deepEqual(state.framingReferences("2026-11-10T00:00:00.000Z", saved).map((row) => row.capture_id), ["new-view"], "nor as the one of any age");
+    assert.deepEqual(state.framingReferences("2026-11-10T00:00:00.000Z", "2026-11-04T00:00:00.000Z"), []);
+    await done();
+  });
+
+  it("names off-target frames by date for a render to leave out", async () => {
+    const { state, done } = await opened();
+    state.insertCapture(capture("in", "2026-11-03T15:00:00.000Z"));
+    state.insertCapture(capture("fine", "2026-11-03T15:05:00.000Z"));
+    state.insertCapture(capture("out", "2026-11-05T15:00:00.000Z"));
+    state.recordFramingCheck(check("in", "2026-11-03T15:00:01.000Z", "off_target"));
+    state.recordFramingCheck(check("fine", "2026-11-03T15:05:01.000Z", "on_target"));
+    state.recordFramingCheck(check("out", "2026-11-05T15:00:01.000Z", "off_target"));
+    assert.deepEqual([...state.offTargetCaptureIds("2026-11-03", "2026-11-04")], ["in"]);
+    await done();
+  });
+
+  it("counts events of one kind from a time on", async () => {
+    const { state, done } = await opened();
+    state.addEvent("framing_returned", "x");
+    state.addEvent("other", "y");
+    assert.equal(state.countEventsSince("framing_returned", "2000-01-01T00:00:00.000Z"), 1);
+    assert.equal(state.countEventsSince("framing_returned", "2999-01-01T00:00:00.000Z"), 0);
+    await done();
   });
 });
 

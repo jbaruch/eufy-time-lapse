@@ -3,6 +3,7 @@ import { readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { CaptureFailure } from "../adapters/adapter.ts";
+import { GRAY_HEIGHT, GRAY_WIDTH } from "../framing.ts";
 import type { VideoCodecName } from "../adapters/adapter.ts";
 import { splitKeyframes } from "./annexb.ts";
 import type { RawFormat } from "./annexb.ts";
@@ -31,17 +32,19 @@ export function isToolFailure(error: unknown): error is ToolFailure {
   return error instanceof Error && typeof (error as ToolFailure).cmd === "string";
 }
 
+function toolProblem(tool: "ffmpeg" | "ffprobe", error: ToolFailure, timeoutMs: number): Error {
+  if (error.code === "ENOENT") return new Error(`${tool} is not installed or not on PATH. Install FFmpeg and run this again.`, { cause: error });
+  const detail = error.killed === true ? `timed out after ${timeoutMs} ms` : String(error.stderr ?? error.message).trim();
+  return new CaptureFailure("decode_failed", "decode", `${tool} failed: ${detail}`, { cause: error });
+}
+
 async function runTool(tool: "ffmpeg" | "ffprobe", args: string[], timeoutMs: number): Promise<string> {
   try {
     const { stdout } = await run(tool, args, { timeout: timeoutMs, killSignal: "SIGKILL", maxBuffer: 4 * 1024 * 1024 });
     return stdout;
   } catch (error) {
     if (!isToolFailure(error)) throw error;
-    if (error.code === "ENOENT") {
-      throw new Error(`${tool} is not installed or not on PATH. Install FFmpeg and run this again.`, { cause: error });
-    }
-    const detail = error.killed === true ? `timed out after ${timeoutMs} ms` : (error.stderr ?? error.message).trim();
-    throw new CaptureFailure("decode_failed", "decode", `${tool} failed: ${detail}`, { cause: error });
+    throw toolProblem(tool, error, timeoutMs);
   }
 }
 
@@ -126,4 +129,21 @@ export async function probeImage(path: string): Promise<StreamProperties> {
     throw new CaptureFailure("decode_failed", "decode", `FFmpeg wrote an image it can't read back: ${path}`);
   }
   return properties;
+}
+
+const GRAY_FRAME_TIMEOUT_MS = 60_000;
+
+/** A stored frame, shrunk to what the framing check compares. */
+export async function readGrayFrame(path: string): Promise<Uint8Array> {
+  const size = GRAY_WIDTH * GRAY_HEIGHT;
+  const args = ["-nostdin", "-v", "error", "-i", path, "-vf", `scale=${GRAY_WIDTH}:${GRAY_HEIGHT}:flags=area,format=gray`, "-f", "rawvideo", "-"];
+  let stdout: Buffer;
+  try {
+    ({ stdout } = await run("ffmpeg", args, { timeout: GRAY_FRAME_TIMEOUT_MS, killSignal: "SIGKILL", maxBuffer: size * 2, encoding: "buffer" }));
+  } catch (error) {
+    if (!isToolFailure(error)) throw error;
+    throw toolProblem("ffmpeg", error, GRAY_FRAME_TIMEOUT_MS);
+  }
+  if (stdout.length !== size) throw new CaptureFailure("decode_failed", "decode", `FFmpeg gave ${stdout.length} bytes for ${path}, where ${size} were due.`);
+  return stdout;
 }

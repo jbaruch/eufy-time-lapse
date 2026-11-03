@@ -75,7 +75,7 @@ describe("ffmpegVersionLine", () => {
 
 describe("selectFrames", () => {
   it("takes scheduled frames at quality, and lists everything it leaves out", () => {
-    const { selected, exclusions } = selectFrames([capture("1"), capture("2", { kind: "manual" }), capture("3", { quality_status: "degraded", width: 320, height: 180 })], { includeManual: false, includeDegraded: false });
+    const { selected, exclusions } = selectFrames([capture("1"), capture("2", { kind: "manual" }), capture("3", { quality_status: "degraded", width: 320, height: 180 })], { includeManual: false, includeDegraded: false, includeOffTarget: false, offTarget: new Set() });
     assert.deepEqual(selected.map((frame) => frame.capture_id), ["1"]);
     assert.deepEqual(exclusions, [
       { capture_id: "2", reason: "manual capture" },
@@ -83,8 +83,20 @@ describe("selectFrames", () => {
     ]);
   });
 
+  it("leaves out frames the framing check found off target, and says why", () => {
+    const { selected, exclusions } = selectFrames([capture("1"), capture("2")], { includeManual: false, includeDegraded: false, includeOffTarget: false, offTarget: new Set(["2"]) });
+    assert.deepEqual(selected.map((frame) => frame.capture_id), ["1"]);
+    assert.deepEqual(exclusions, [{ capture_id: "2", reason: "the camera was pointing away from its saved position" }]);
+  });
+
+  it("takes off-target frames when asked", () => {
+    const { selected, exclusions } = selectFrames([capture("2")], { includeManual: false, includeDegraded: false, includeOffTarget: true, offTarget: new Set(["2"]) });
+    assert.equal(selected.length, 1);
+    assert.deepEqual(exclusions, []);
+  });
+
   it("takes them when asked", () => {
-    const { selected, exclusions } = selectFrames([capture("2", { kind: "manual" }), capture("3", { quality_status: "degraded" })], { includeManual: true, includeDegraded: true });
+    const { selected, exclusions } = selectFrames([capture("2", { kind: "manual" }), capture("3", { quality_status: "degraded" })], { includeManual: true, includeDegraded: true, includeOffTarget: false, offTarget: new Set() });
     assert.equal(selected.length, 2);
     assert.deepEqual(exclusions, []);
   });
@@ -143,7 +155,7 @@ describe("render", () => {
     await dir.remove();
   });
 
-  const base = { dataDir: "", owner: OWNER, from: "2026-07-01", to: "2026-07-01", fps: 30, includeManual: false, includeDegraded: false, now: () => new Date("2026-07-03T00:00:00Z") };
+  const base = { dataDir: "", owner: OWNER, from: "2026-07-01", to: "2026-07-01", fps: 30, includeManual: false, includeDegraded: false, includeOffTarget: false, now: () => new Date("2026-07-03T00:00:00Z") };
 
   it("builds a silent H.264 video at the frames' own size, and the duration the spec defines", async () => {
     const outputPath = join(dir.path, "renders", "plain.mp4");
@@ -181,6 +193,19 @@ describe("render", () => {
     assert.deepEqual([video.width, video.height], [320, 180]);
     assert.ok(manifest.warnings.some((warning) => warning.includes("below the required size")));
     assert.ok(manifest.warnings.some((warning) => warning.includes("scaled")));
+  });
+
+  it("leaves out a frame the framing check flagged, and keeps it when asked", async () => {
+    const day = { local_date: "2026-07-03" };
+    await keep(state, capture("10", { ...(await frame("10", 640, 360, "2026-07-03")), ...day, frame_received_at: "2026-07-03T13:00:00.000Z" }));
+    await keep(state, capture("11", { ...(await frame("11", 640, 360, "2026-07-03")), ...day, frame_received_at: "2026-07-03T13:05:00.000Z" }));
+    state.recordFramingCheck({ capture_id: "11", checked_at: "2026-07-03T13:05:01.000Z", status: "off_target", reference_capture_id: "10", dx: 400, dy: 0, offset_dx: 400, offset_dy: 0, detail: "test" });
+    const range = { from: "2026-07-03", to: "2026-07-03" };
+    const left = await render({ ...base, ...range, state, dataDir: dir.path, outputPath: join(dir.path, "renders", "on-target.mp4") });
+    assert.deepEqual(left.inputs.map((input) => input.capture_id), ["10"]);
+    assert.deepEqual(left.exclusions.map((exclusion) => exclusion.capture_id), ["11"]);
+    const kept = await render({ ...base, ...range, state, dataDir: dir.path, outputPath: join(dir.path, "renders", "all.mp4"), includeOffTarget: true });
+    assert.deepEqual(kept.inputs.map((input) => input.capture_id), ["10", "11"]);
   });
 
   it("explains an empty selection", async () => {

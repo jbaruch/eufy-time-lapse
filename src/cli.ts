@@ -34,10 +34,11 @@ Commands:
   capture          Take one manual frame now
   status           Show service status (--json for the full report)
   calibration      Battery against capture load, hour by hour (--hours <n>, default 24)
+  framing          Keep the camera on target: "framing set" saves where it points now, "framing off" stops
   pause            Stop new captures until resumed
   resume           Clear an operator pause (--battery-checked also overrides a low-battery pause)
   render           Build a video: --from YYYY-MM-DD --to YYYY-MM-DD [--output <file>] [--fps <n>]
-                   [--include-manual] [--include-degraded]
+                   [--include-manual] [--include-degraded] [--include-off-target]
   export-manifest  Print every capture as one JSON object per line
   notify-test      Send one test message to the alert destination
 
@@ -291,6 +292,7 @@ async function commandStatus(settings: AppSettings, paths: Paths, args: string[]
     `Skipped:    ${JSON.stringify(c.skipped_by_reason)}`,
     `Battery:    ${report.battery.percent ?? "unknown"}%${report.battery.every_minutes === null ? "" : `, capturing every ${report.battery.every_minutes} min`}`,
     `Paused:     ${report.pause_reasons.join(", ") || "no"}`,
+    `Framing:    ${report.framing.position_saved ? (report.framing.last_check?.status ?? "no frames checked yet") : "no saved position"}`,
     `Alerts:     ${report.active_alerts.join(", ") || "none"}`,
   ];
   process.stdout.write(`${lines.join("\n")}\n`);
@@ -304,6 +306,20 @@ async function commandCalibration(settings: AppSettings, paths: Paths, args: str
   const report = buildCalibration(state, serviceConfigFor(settings, paths), new Date(Date.now() - hours * 3_600_000));
   state.close();
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  return 0;
+}
+
+async function commandFraming(paths: Paths, args: string[]): Promise<number> {
+  const action = args[0];
+  if (action !== "set" && action !== "off") throw new ConfigError('framing needs "set", to save where the camera points now, or "off", to stop.');
+  const config = loadConfig(process.env);
+  const serviceConfig = serviceConfigFor(config, paths);
+  const state = new State(paths.databasePath);
+  const service = buildService(config, serviceConfig, paths, state, fileWriter(join(paths.dataDir, "capture.log")));
+  const result = action === "set" ? await service.setFramingPosition(terminationSignal()) : await service.forgetFramingPosition();
+  state.close();
+  if (result instanceof CaptureFailure) throw result;
+  log(action === "set" ? `saved this view in slot ${String(result)}. From the next slot on, frames are compared with it.` : "stopped watching the framing, and removed the saved position");
   return 0;
 }
 
@@ -345,6 +361,7 @@ async function commandRender(settings: AppSettings, paths: Paths, args: string[]
       fps: { type: "string" },
       "include-manual": { type: "boolean" },
       "include-degraded": { type: "boolean" },
+      "include-off-target": { type: "boolean" },
     },
   });
   if (values.from === undefined || values.to === undefined) throw new ConfigError("render needs --from YYYY-MM-DD and --to YYYY-MM-DD.");
@@ -360,6 +377,7 @@ async function commandRender(settings: AppSettings, paths: Paths, args: string[]
     fps: positiveNumber(values.fps, "fps", 30),
     includeManual: values["include-manual"] === true,
     includeDegraded: values["include-degraded"] === true,
+    includeOffTarget: values["include-off-target"] === true,
     now: () => new Date(),
   });
   state.close();
@@ -405,6 +423,8 @@ async function main(argv: string[]): Promise<number> {
       const loaded = settings();
       return await commandCalibration(loaded.settings, loaded.paths, rest);
     }
+    case "framing":
+      return await commandFraming(settings().paths, rest);
     case "pause":
       return commandPause(settings().paths);
     case "resume":

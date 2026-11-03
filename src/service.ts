@@ -8,8 +8,11 @@ import type { Notify } from "./alerts.ts";
 import { recoverAttempt, TRAFFIC_BASIS } from "./capture/acquire.ts";
 import type { AttemptRecord, RecoveredAttempt } from "./capture/acquire.ts";
 import { abortableSleep, captureSlot, chooseBest, tryDirectory } from "./capture/slot.ts";
+import { chooseReference, compareFrames, judgeFraming } from "./framing.ts";
+import type { FrameComparison, FramingVerdict } from "./framing.ts";
 import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "./lock.ts";
 import type { LockOptions } from "./lock.ts";
+import { readGrayFrame } from "./media/ffmpeg.ts";
 import { dataBudgetSpent, decide, nextBatteryPaused, reservedSessionMs, sessionBudgetSpent } from "./policy.ts";
 import type { PolicyInput } from "./policy.ts";
 import type { CameraLink } from "./probe/report.ts";
@@ -18,7 +21,7 @@ import { EXPOSURE_TIME_NOTE, readStoredCapture, spoolDirectory, storedCapturePro
 import type { CaptureMetadata, CaptureOwner } from "./stored-capture.ts";
 import type { ScheduleConfig } from "./schedule.ts";
 import type { ServiceConfig } from "./service-config.ts";
-import type { AttemptRow, CaptureRow, SlotRow, State } from "./state.ts";
+import type { AttemptRow, CaptureRow, FramingReference, SlotRow, State } from "./state.ts";
 
 const IDLE_WAKE_MS = 60_000;
 /** Nothing in a tick waits this long when it's working: the slot deadline bounds a capture, and the lock refuses rather than waits. */
@@ -55,6 +58,19 @@ export interface ServiceOptions {
   watchdogCheckMs?: number;
   /** Gets a stuck loop's error. By default it ends the process, which the restart policy brings back. */
   onStuck?: (error: Error) => void;
+  /** How two stored frames compare. By default it reads and measures them. */
+  compareFrames?: (referencePath: string, framePath: string) => Promise<FrameComparison>;
+}
+
+/** How far back to look for a frame taken at this time of day. */
+const FRAMING_REFERENCE_DAYS = 3;
+/** Each return runs the motor, so a frame that keeps saying off target can't run it often, whatever the cause. */
+const FRAMING_RETURN_COOLDOWN_MS = 30 * 60_000;
+const FRAMING_MAX_RETURNS_PER_DAY = 6;
+const DAY_MS = 86_400_000;
+
+async function compareStoredFrames(referencePath: string, framePath: string): Promise<FrameComparison> {
+  return compareFrames(await readGrayFrame(referencePath), await readGrayFrame(framePath));
 }
 
 function crash(error: Error): void {
@@ -738,6 +754,7 @@ export class CaptureService {
         everyMinutes,
       });
       this.state.setSlot(slot.slot_id, chosen.status === "captured" ? "captured" : "captured_degraded", { captureId, everyMinutes });
+      await this.checkFraming(captureId, camera);
       // Every try's directory, the kept one included. Each holds raw 4K video.
       for (const record of [chosen, ...otherTries]) await rm(join(this.options.dataDir, "work", record.attempt_id), { recursive: true, force: true });
       this.options.log(`${slot.local_date} ${slot.local_time}: ${chosen.status} ${chosen.frame.width}x${chosen.frame.height} via ${chosen.connection_path ?? "unknown"} in ${chosen.timing.session_ms} ms, ${otherTries.length + 1} tries (${relativeDir})`);
@@ -864,6 +881,131 @@ export class CaptureService {
     await rename(tempDir, join(this.options.dataDir, relativeDir));
     this.insertCaptureRow(metadata, relativeDir);
     return relativeDir;
+  }
+
+  /** The frame is already safe, so nothing here can cost it. A verdict only says how to use it, and whether to turn the camera. */
+  private async checkFraming(captureId: string, camera: CameraInfo): Promise<void> {
+    const flagged = this.state.getFlag("framing_position_id");
+    if (flagged === undefined) return;
+    const capture = this.state.getCapture(captureId);
+    if (capture === undefined) throw new Error(`capture ${captureId} was published but has no row`);
+    const { reference, verdict } = await this.judgeFrame(capture);
+    this.state.recordFramingCheck({ capture_id: captureId, checked_at: this.now().toISOString(), status: verdict.status, reference_capture_id: reference?.capture_id ?? null, dx: verdict.dx, dy: verdict.dy, offset_dx: verdict.offset?.dx ?? null, offset_dy: verdict.offset?.dy ?? null, detail: verdict.detail });
+    if (verdict.status === "unsure") return;
+    if (verdict.status === "on_target") {
+      await this.alerts.clear("framing_off_target");
+      return;
+    }
+    this.options.log(`${capture.local_date}: this frame is off target: ${verdict.detail}`);
+    await this.returnIfStillOff(camera, Number(flagged));
+  }
+
+  private async judgeFrame(capture: CaptureRow): Promise<{ reference: FramingReference | undefined; verdict: FramingVerdict }> {
+    const at = new Date(capture.frame_received_at);
+    const references = this.state.framingReferences(new Date(at.getTime() - FRAMING_REFERENCE_DAYS * DAY_MS).toISOString(), this.state.getFlag("framing_position_saved_at") ?? "");
+    const reference = chooseReference(references, at);
+    if (reference === undefined) return { reference, verdict: { status: "unsure", dx: null, dy: null, offset: null, detail: "there's no earlier on-target frame to compare with" } };
+    try {
+      const comparison = await (this.options.compareFrames ?? compareStoredFrames)(join(this.options.dataDir, reference.relative_dir, "frame.jpg"), join(this.options.dataDir, capture.relative_dir, "frame.jpg"));
+      return { reference, verdict: judgeFraming(comparison, { referenceAgeMs: at.getTime() - Date.parse(reference.frame_received_at), referenceOffset: { dx: reference.offset_dx ?? 0, dy: reference.offset_dy ?? 0 }, tolerancePixels: this.config.framing.tolerance_pixels }) };
+    } catch (error) {
+      if (!(error instanceof CaptureFailure)) throw error;
+      return { reference, verdict: { status: "unsure", dx: null, dy: null, offset: null, detail: `couldn't compare the frames: ${error.message}` } };
+    }
+  }
+
+  private async returnIfStillOff(camera: CameraInfo, positionId: number): Promise<void> {
+    const { return_after_off_target_slots: returnAfter, return_enabled: returnEnabled } = this.config.framing;
+    const inARow = this.state.offTargetSlotsInARow();
+    if (!returnEnabled || inARow < returnAfter) return;
+    if (inARow > returnAfter) {
+      await this.alerts.raise("framing_off_target", `the camera has been pointing away from its saved position for ${inARow} slots, and going back hasn't fixed it. Those frames are left out of renders. Look at the latest frame, and if this is the view you want, run framing set`);
+    }
+    const now = this.now();
+    const lastTried = this.state.getFlag("framing_returned_at");
+    if (lastTried !== undefined && now.getTime() - Date.parse(lastTried) < FRAMING_RETURN_COOLDOWN_MS) return;
+    if (this.state.countEventsSince("framing_return_tried", new Date(now.getTime() - DAY_MS).toISOString()) >= FRAMING_MAX_RETURNS_PER_DAY) return;
+    const adapter = this.adapter;
+    if (adapter === undefined) return;
+    // Recorded first, so a crash halfway through can't turn into a motor that never rests.
+    this.state.setFlag("framing_returned_at", now.toISOString());
+    this.state.addEvent("framing_return_tried", `going back to saved position ${positionId}`);
+    let outcome: "returned" | "gone";
+    try {
+      outcome = await withCameraLock(this.lockPath, () => adapter.returnToPosition(camera.key, positionId), this.lockOptions);
+    } catch (error) {
+      if (error instanceof CameraLockHeldError || error instanceof CameraLockLostError || error instanceof CaptureFailure) {
+        this.state.addEvent("framing_return_failed", error.message);
+        this.options.log(`couldn't turn the camera back to its saved position, and will try again: ${error.message}`);
+        return;
+      }
+      throw error;
+    }
+    if (outcome === "gone") {
+      await this.alerts.raise("framing_position_gone", "the camera's saved position no longer exists, so it can't go back to it. Aim it where it should be, then run framing set");
+      return;
+    }
+    this.state.addEvent("framing_returned", `returned to saved position ${positionId} after ${inARow} off-target slots`);
+    this.options.log(`turned the camera back to its saved position after ${inARow} off-target slots`);
+  }
+
+  /** One piece of camera work outside a slot, for a command that ends straight after. */
+  private async onCamera<T>(work: (adapter: CameraAdapter, camera: CameraInfo) => Promise<T>): Promise<T | CaptureFailure> {
+    await this.readCamera();
+    const { adapter, camera } = this;
+    if (adapter === undefined || camera === undefined) return new CaptureFailure("camera_unreachable", "discovery", "The camera can't be reached right now. The log line above says why.");
+    try {
+      return await withCameraLock(this.lockPath, () => work(adapter, camera), this.lockOptions);
+    } catch (error) {
+      if (error instanceof CaptureFailure) return error;
+      throw error;
+    } finally {
+      await adapter.shutdown();
+      this.adapter = undefined;
+    }
+  }
+
+  /** Makes where the camera points now the position it comes back to. The frame comes first: it proves the camera answers, and nothing has changed yet if it doesn't. */
+  async setFramingPosition(signal: AbortSignal): Promise<number | CaptureFailure> {
+    const frame = await this.captureManual(signal);
+    if (frame instanceof CaptureFailure) return frame;
+    const earlier = this.state.getFlag("framing_position_id");
+    const saved = await this.onCamera(async (adapter, camera) => {
+      const positionId = await adapter.savePosition(camera.key);
+      if (earlier !== undefined) {
+        try {
+          await adapter.forgetPosition(camera.key, Number(earlier));
+        } catch (error) {
+          if (!(error instanceof CaptureFailure)) throw error;
+          this.options.log(`saved the new position, but couldn't delete the old one in slot ${earlier}. Delete it in the Eufy app if you don't want it: ${error.message}`);
+        }
+      }
+      return positionId;
+    });
+    if (saved instanceof CaptureFailure) return saved;
+    this.state.recordFramingCheck({ capture_id: frame.capture_id, checked_at: this.now().toISOString(), status: "on_target", reference_capture_id: null, dx: 0, dy: 0, offset_dx: 0, offset_dy: 0, detail: "this frame was taken when the position was saved" });
+    this.state.setFlag("framing_position_id", String(saved));
+    this.state.setFlag("framing_position_saved_at", frame.frame_received_at);
+    this.state.setFlag("framing_returned_at", null);
+    this.state.addEvent("framing_position_saved", `saved position ${saved}`);
+    await this.alerts.clear("framing_off_target");
+    await this.alerts.clear("framing_position_gone");
+    return saved;
+  }
+
+  /** Stops watching the framing, and removes the saved position from the camera. */
+  async forgetFramingPosition(): Promise<CaptureFailure | undefined> {
+    const flagged = this.state.getFlag("framing_position_id");
+    if (flagged === undefined) return undefined;
+    const forgotten = await this.onCamera((adapter, camera) => adapter.forgetPosition(camera.key, Number(flagged)));
+    if (forgotten instanceof CaptureFailure) return forgotten;
+    this.state.setFlag("framing_position_id", null);
+    this.state.setFlag("framing_position_saved_at", null);
+    this.state.setFlag("framing_returned_at", null);
+    this.state.addEvent("framing_position_forgotten", `forgot position ${flagged}`);
+    await this.alerts.clear("framing_off_target");
+    await this.alerts.clear("framing_position_gone");
+    return undefined;
   }
 
   /** Each condition stands on its own. Reading them from the one skip reason that won would call one condition's end whenever another outranked it. */
