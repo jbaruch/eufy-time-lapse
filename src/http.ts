@@ -30,7 +30,8 @@ export function createStatusServer(report: () => Promise<unknown>): Server {
           (body) => response.writeHead(200, { "content-type": "application/json" }).end(body),
           // outer-boundary-process-contract: a monitor reads a non-200 as this report failing. This emits that 500 with the
           // reason. Letting any error propagate would be an unhandled rejection, which ends the process and stops captures.
-          (error: Error) => response.writeHead(500, { "content-type": "text/plain" }).end(`${error.message}\n`),
+          // A rejection can be anything at run time, and reading a message off one that isn't an Error would throw right here.
+          (error: unknown) => response.writeHead(500, { "content-type": "text/plain" }).end(`${error instanceof Error ? error.message : String(error)}\n`),
         );
       return;
     }
