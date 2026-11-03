@@ -40,6 +40,8 @@ const CLOSE_POLL_MS = 100;
 const SWEEP_INTERVAL_MS = 5_000;
 const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set(["ENETUNREACH", "ENETDOWN", "EHOSTUNREACH", "EHOSTDOWN", "ENOTFOUND", "EAI_AGAIN", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE"]);
 const SOCKET_GONE_CODES: ReadonlySet<string> = new Set(["ERR_SOCKET_DGRAM_NOT_RUNNING", "ERR_SOCKET_CLOSED", "ERR_STREAM_DESTROYED", "EBADF"]);
+/** Eufy's answer to a wrong password, from either login. */
+const WRONG_PASSWORD = 26006;
 /** What the pinned SDK says when it can't set up a session. test/mega-adapter.test.ts holds these wordings. */
 const SDK_CONNECT_FAILURE = /^P2P connect timeout for |^station .* is not in the device list$|^no P2P endpoint \(p2p_did\) for station /;
 const TELEMETRY_NAME = /signal|rssi|band|cellular|network|lte|charging|solar|power|quality|batteryTemperature|batteryHealth/i;
@@ -418,6 +420,8 @@ export class MegaAdapter implements CameraAdapter {
       await this.client.earnTrust(answer);
       return await this.client.isTrustedDevice();
     } catch (error) {
+      // Running login again would only send the same password, and repeating a wrong one locks the account.
+      if (error instanceof MegaApiError && error.code === WRONG_PASSWORD) throw this.authFailure(error);
       if (!isTrustFailure(error)) throw error;
       this.warn(`logged in, but Eufy didn't make this device trusted, so renewing the login will ask for a code again. Run login again to retry: ${this.scrub(error.message)}`);
       return false;
