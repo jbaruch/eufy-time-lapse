@@ -87,6 +87,15 @@ describe("captureSlot", () => {
     assert.match(logged[0] ?? "", /camera_unreachable/);
   });
 
+  it("retries a stream the camera hung up on, the way most bad connects end", async () => {
+    const hungUp = async (): Promise<LiveSession> => {
+      throw new CaptureFailure("stream_lost", "first_media", "gone");
+    };
+    const { adapter, result } = slot([hungUp, good]);
+    assert.equal((await result).chosen.status, "captured");
+    assert.equal(adapter.opens, 2);
+  });
+
   it("retries a frame below the required size, and keeps the larger one", async () => {
     const { result, slotDir } = slot([small, good]);
     const { chosen, otherTries, firstTryStatus } = await result;

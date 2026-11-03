@@ -5,7 +5,7 @@ import type { AttemptRecord } from "../capture/acquire.ts";
  * Probe report schema. Owner and sole writer: src/probe/probe.ts. Readers are humans and the Phase 1
  * sign-off. Bump REPORT_SCHEMA_VERSION on any shape change.
  */
-export const REPORT_SCHEMA_VERSION = 5;
+export const REPORT_SCHEMA_VERSION = 6;
 
 export type CameraLink = "cellular" | "wifi";
 
@@ -81,6 +81,10 @@ function summarize(attempts: ProbeAttempt[], failed: (attempt: ProbeAttempt) => 
 function chooseNextExperiment(criteria: ProbeVerdict["criteria"], attempts: ProbeAttempt[], unexpected: number): string | null {
   const firstFailure = attempts.find((attempt) => attempt.failure !== null)?.failure;
   if (firstFailure !== undefined && firstFailure !== null) {
+    // A longer timeout wouldn't help a stream the camera ended itself, before any deadline.
+    if (firstFailure.reason === "stream_lost") {
+      return "P2P connected, but the camera ended the stream before any video. Read library.log around the stream's end for the relay's or camera's reason, check the camera's signal in the app, then rerun the probe.";
+    }
     switch (firstFailure.phase) {
       case "auth":
         return "Run the login command, complete any 2FA or captcha, then rerun the probe.";

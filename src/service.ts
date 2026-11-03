@@ -1097,7 +1097,7 @@ export class CaptureService {
     const { first_try_window: window, first_try_warn_percent: warnPercent } = this.config.alerts;
     const tries = this.state.recentFirstTries(window);
     const percent = tries.length > 0 ? Math.round((tries.filter((attempt) => attempt.status === "captured").length / tries.length) * 100) : 100;
-    await this.alerts.set("first_try_drift", tries.length >= window && percent < warnPercent, `only ${percent}% of the last ${window} slots got their frame on the first try, where about 98% is normal. Retries are spending battery, so check the service log and the attempts in status`);
+    await this.alerts.set("first_try_drift", tries.length >= window && percent < warnPercent, `only ${percent}% of the last ${window} slots got their frame on the first try, under the ${warnPercent}% this warns at. Retries are spending battery, so check the service log and the attempts in status`);
   }
 
   /** A one-off frame. It holds the same lock, spends the same budgets, and never affects completeness. */

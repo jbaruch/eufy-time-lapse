@@ -3006,6 +3006,7 @@ describe("CaptureService", () => {
       await runAt(h, [0, 5, 10, 15]);
       assert.equal(h.state.allCaptures().length, 4, "retries got every frame");
       assert.ok(h.notices.some((notice) => notice.includes("first try")), h.notices.join("; "));
+      assert.ok(h.notices.some((notice) => /first try, under the 80% this warns at\./.test(notice)), "says what it's measured against, which is the setting and not a guess at normal");
       healthy = true;
       await runAt(h, [20, 25, 30, 35]);
       assert.ok(h.notices.some((notice) => notice.includes("recovered") && notice.includes("first try")), h.notices.join("; "));

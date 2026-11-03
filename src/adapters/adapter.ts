@@ -5,6 +5,7 @@ export type FailureReason =
   | "camera_not_found"
   | "camera_unreachable"
   | "capture_timeout"
+  | "stream_lost"
   | "decode_failed"
   | "stale_source"
   | "budget_spent"

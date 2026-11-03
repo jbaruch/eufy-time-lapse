@@ -133,6 +133,13 @@ describe("evaluateProbe", () => {
       assert.match(verdict([failed(phase)]).next_experiment ?? "", expected, phase);
     }
   });
+
+  it("doesn't suggest a longer timeout for a stream the camera ended itself", () => {
+    const lost = captured({ status: "failed", frame: null, failure: { reason: "stream_lost", phase: "first_media", message: "the stream ended with no video" } });
+    const advice = verdict([lost]).next_experiment ?? "";
+    assert.match(advice, /ended the stream before any video/);
+    assert.doesNotMatch(advice, /longer acquisition timeout/);
+  });
 });
 
 describe("maskSerial", () => {

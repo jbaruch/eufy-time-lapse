@@ -132,7 +132,7 @@ function collectStream(
     };
     const onStreamGone = (): void => {
       if (stats.firstMediaAt === null) {
-        finish("stream_ended", new CaptureFailure("capture_timeout", "first_media", "The live stream ended before any video arrived."));
+        finish("stream_ended", new CaptureFailure("stream_lost", "first_media", "The live stream ended before any video arrived."));
       } else {
         finish("stream_ended");
       }
@@ -153,7 +153,7 @@ function collectStream(
     session.video.once("end", onStreamGone);
     session.video.once("close", onStreamGone);
     session.video.once("error", (error: Error) => {
-      finish("stream_ended", new CaptureFailure("capture_timeout", "first_media", `The video stream failed: ${error.message}`, { cause: error }));
+      finish("stream_ended", new CaptureFailure("stream_lost", "first_media", `The video stream failed: ${error.message}`, { cause: error }));
     });
     session.audio.on("data", (chunk: Buffer) => {
       if (!settled) stats.audioBytes += chunk.length;
