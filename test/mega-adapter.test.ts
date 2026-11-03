@@ -556,6 +556,19 @@ describe("MegaAdapter saved positions", () => {
     });
   }
 
+  for (const code of ["ERR_SOCKET_DGRAM_NOT_RUNNING", "ERR_SOCKET_CLOSED"]) {
+    it(`calls a socket closed under a command (${code}) a capture failure, because the connection went away`, async () => {
+      const c = camera([0, 3]);
+      const { adapter, client } = withPositions(c.positions);
+      // What the SDK did on 2026-11-03 at 09:00: it sent on a session whose socket had already closed.
+      client.onRoute = () => {
+        throw Object.assign(new Error("Not running"), { code });
+      };
+      await assert.rejects(adapter.resumeTracking(SERIAL), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "camera_unreachable" && error.phase === "position");
+      await adapter.shutdown();
+    });
+  }
+
   it("lets a plain error that isn't about the camera through as itself", async () => {
     const c = camera([0, 3]);
     c.positions.list = async () => {

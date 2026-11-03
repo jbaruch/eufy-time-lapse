@@ -274,6 +274,8 @@ function isCameraError(error: unknown): error is Error {
     error instanceof CameraDisabledError ||
     error instanceof MegaApiError ||
     isNetworkError(error) ||
+    // The SDK sending on a session the camera already closed. The connection went away, as with a timeout.
+    (error instanceof Error && SOCKET_GONE_CODES.has((error as NodeJS.ErrnoException).code ?? "")) ||
     // The SDK rejects these as plain Errors, so their wording is all there is to go on. A bug propagates instead.
     (error instanceof Error && error.name === "Error" && SDK_CONNECT_FAILURE.test(error.message))
   );
