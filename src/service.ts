@@ -66,7 +66,6 @@ export interface ServiceOptions {
 
 /** How far back to look for a frame taken at this time of day. */
 const FRAMING_REFERENCE_DAYS = 3;
-/** Each return runs the motor, so a frame that keeps saying off target can't run it often, whatever the cause. */
 /** How many times to try getting the camera ready for one frame. */
 const FRAME_RESET_TRIES = 2;
 const FRAME_STEP_MS = FRAME_STEP_SECONDS * 1000;
@@ -1026,9 +1025,9 @@ export class CaptureService {
 
   /**
    * Stops the camera chasing what it detects, and sends it back to its position. This can't cost a frame: a failed reset
-   * usually leaves the camera where it belongs, and the check on the frame catches it when it doesn't.
+   * usually leaves the camera where it belongs, and the check on the frame catches it when it doesn't. Says whether the
+   * camera went to its saved position.
    */
-  /** Says whether the camera went to its saved position. */
   private async resetCamera(adapter: CameraAdapter, camera: CameraInfo, positionId: number, deadlineAtMs: number): Promise<boolean> {
     const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup } = this.config.capture;
     for (let attempt = 1; attempt <= FRAME_RESET_TRIES; attempt += 1) {

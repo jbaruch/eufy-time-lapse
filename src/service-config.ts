@@ -71,7 +71,6 @@ export const DEFAULT_SERVICE_CONFIG: ServiceConfig = {
   storage: { min_free_disk_mb: 1024, keep_failed_work_days: 3, keep_logs_days: 30 },
   alerts: { telegram: null, consecutive_failed_slots: 3, reminder_hours: 24, first_try_warn_percent: 80, first_try_window: 50, daily_report: true },
   http: { bind: "127.0.0.1", port: 8787 },
-  // 32 clears the 10 to 18 pixels a return to a saved position was measured to land off, so a return can't look like a new move.
   // Wide enough for where a go-to lands and for the edit to line up. What needs catching is a camera pointing somewhere else.
   framing: { tolerance_pixels: 64, alert_after_off_target_slots: 2, reset_before_frame: true },
   logging: { sdk_debug: false },
