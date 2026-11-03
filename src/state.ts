@@ -448,4 +448,14 @@ export class State {
   deleteAlert(key: string): void {
     this.db.prepare("DELETE FROM alerts WHERE key = ?").run(key);
   }
+
+  /** Records that a problem's first message went out. One that ended meanwhile stays ended. */
+  markAlertSent(key: string, at: string): void {
+    this.db.prepare("UPDATE alerts SET last_sent_at = ? WHERE key = ?").run(at, key);
+  }
+
+  /** Removes an alert whose recovery went out, unless the problem came back since: that's a new problem, still owed its message. */
+  deleteOwedRecovery(key: string, owedSince: string): void {
+    this.db.prepare("DELETE FROM alerts WHERE key = ? AND recovery_owed_since = ?").run(key, owedSince);
+  }
 }
