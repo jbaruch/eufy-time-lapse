@@ -419,6 +419,13 @@ describe("MegaAdapter device trust", () => {
     assert.match(warnings.join(), /Run login again/);
   });
 
+  it("says to check the credentials, not to retry, when the older login refuses the password", async () => {
+    const { adapter, client, warnings } = setup();
+    client.trustError = new MegaApiError("/v1/passport/login failed (200/26006)", 26006, 200);
+    await assert.rejects(adapter.trustDevice(async () => ({ verifyCode: "123456" })), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "auth_required" && /Check the Eufy credentials/.test(error.message));
+    assert.doesNotMatch(warnings.join(), /Run login again/);
+  });
+
   it("doesn't call a bug in this code a refusal from Eufy", async () => {
     const { adapter, client } = setup();
     client.trustError = new TypeError("not a function");
