@@ -37,6 +37,8 @@ const CAMERA_MODEL_PREFIX = "T86P2";
 /** The spec caps the idle window at five seconds. Teardown closes the session sooner than this anyway. */
 const P2P_IDLE_MS = 5_000;
 const CLOSE_POLL_MS = 100;
+/** What a teardown keeps for closing the connection when it turns tracking back on first. Closes have taken well under a second. */
+const CLOSE_ROOM_MS = 2_000;
 const SWEEP_INTERVAL_MS = 5_000;
 const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set(["ENETUNREACH", "ENETDOWN", "EHOSTUNREACH", "EHOSTDOWN", "ENOTFOUND", "EAI_AGAIN", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE"]);
 const SOCKET_GONE_CODES: ReadonlySet<string> = new Set(["ERR_SOCKET_DGRAM_NOT_RUNNING", "ERR_SOCKET_CLOSED", "ERR_STREAM_DESTROYED", "EBADF"]);
@@ -636,8 +638,10 @@ export class MegaAdapter implements CameraAdapter {
     const afterFrame = this.stream !== undefined;
     this.stream?.stop();
     this.stream = undefined;
-    // While the frame's connection is still open. A new one straight after it closes is the one the camera tends to drop.
-    if (afterFrame && (this.tracking === "off" || this.tracking === "turning-off") && (await this.setTrackingInPlace(cameraKey, true))) {
+    // While the frame's connection is still open. A new one straight after it closes is the one the camera tends to drop. Only
+    // with room left to close in, since the caller gives up on the whole teardown at timeoutMs; without it, resumeTracking does it.
+    const room = timeoutMs - this.settle.inPlaceMs - this.settle.settingMs >= CLOSE_ROOM_MS;
+    if (afterFrame && room && (this.tracking === "off" || this.tracking === "turning-off") && (await this.setTrackingInPlace(cameraKey, true))) {
       // As with a move, closing the connection straight away could lose it.
       await delay(this.settle.settingMs);
       this.tracking = "on";
@@ -752,11 +756,17 @@ export class MegaAdapter implements CameraAdapter {
     const what = on ? "take tracking back" : "turn tracking off for this frame";
     const then = on ? ", so it's tried again on a new one" : "";
     let timer: NodeJS.Timeout | undefined;
+    let decided = false;
     const expired = new Promise<"expired">((resolve) => {
       timer = setTimeout(() => resolve("expired"), this.settle.inPlaceMs);
     });
+    const command = this.setMotionTracking(cameraKey, on);
+    // The race below would quietly absorb a rejection that comes after the deadline has won. A bug still has to surface.
+    command.catch((error: unknown) => {
+      if (decided && !isCameraError(error)) this.onFatal(error instanceof Error ? error : new Error(String(error)));
+    });
     try {
-      if ((await Promise.race([this.setMotionTracking(cameraKey, on).then(() => "sent" as const), expired])) === "sent") return true;
+      if ((await Promise.race([command.then(() => "sent" as const), expired])) === "sent") return true;
       this.warn(`the frame's connection didn't ${what} within ${this.settle.inPlaceMs / 1000} seconds${then}`);
       return false;
     } catch (error) {
@@ -764,6 +774,7 @@ export class MegaAdapter implements CameraAdapter {
       this.warn(`the frame's connection couldn't ${what}${then}: ${this.scrub(error.message)}`);
       return false;
     } finally {
+      decided = true;
       clearTimeout(timer);
     }
   }
