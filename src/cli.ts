@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { appendFileSync, createWriteStream, mkdirSync } from "node:fs";
+import { appendFileSync, createWriteStream, mkdirSync, readFileSync } from "node:fs";
 import { statfs } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -9,7 +9,7 @@ import type { CameraAdapter } from "./adapters/adapter.ts";
 import { createMegaClient, MegaAdapter } from "./adapters/mega.ts";
 import type { MegaClient } from "./adapters/mega.ts";
 import { createNotifier } from "./alerts.ts";
-import { ConfigError, loadConfig, loadSettings } from "./config.ts";
+import { ConfigError, isFileSystemError, loadConfig, loadSettings } from "./config.ts";
 import type { AppConfig, AppSettings } from "./config.ts";
 import { createStatusServer, listenForStatus } from "./http.ts";
 import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "./lock.ts";
@@ -18,10 +18,12 @@ import { createRedactingLogger, Redactor } from "./logging.ts";
 import { runProbe } from "./probe/probe.ts";
 import { render, RenderError } from "./render.ts";
 import { loadServiceConfig } from "./service-config.ts";
-import type { ServiceConfig } from "./service-config.ts";
+import type { ServiceConfig, TelegramConfig } from "./service-config.ts";
 import { CaptureService } from "./service.ts";
 import { State } from "./state.ts";
 import { buildCalibration, buildStatus } from "./status.ts";
+import { checkRoute, sendTelegram, TelegramDeliveryError } from "./telegram.ts";
+import type { TelegramRoute } from "./telegram.ts";
 
 const USAGE = `Usage: timelapse <command> [options]
 
@@ -37,6 +39,7 @@ Commands:
   render           Build a video: --from YYYY-MM-DD --to YYYY-MM-DD [--output <file>] [--fps <n>]
                    [--include-manual] [--include-degraded]
   export-manifest  Print every capture as one JSON object per line
+  notify-test      Send one test message to the alert destination
 
 Probe options:
   --attempts <n>           Capture attempts (default 3)
@@ -213,6 +216,22 @@ async function commandProbe(paths: Paths, args: string[]): Promise<number> {
   }
 }
 
+/** Reads the way to the gateway at startup, so a bad path stops the service where someone will see it, not at the first alert. */
+function telegramRoute(telegram: TelegramConfig | null): TelegramRoute | null {
+  if (telegram === null) return null;
+  const read = (path: string, setting: string): string => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch (error) {
+      if (!isFileSystemError(error)) throw error;
+      throw new ConfigError(`Can't read alerts.telegram.${setting} at ${path}: ${error.code}. See "Alerts" in the README.`);
+    }
+  };
+  const route = { botId: telegram.bot_id, chatId: telegram.chat_id, proxyUrl: read(telegram.proxy_url_file, "proxy_url_file").trim(), ca: read(telegram.ca_file, "ca_file") };
+  checkRoute(route);
+  return route;
+}
+
 function buildService(config: AppConfig, service: ServiceConfig, paths: Paths, state: State, write: (line: string) => void): CaptureService {
   return new CaptureService({
     config: service,
@@ -225,7 +244,7 @@ function buildService(config: AppConfig, service: ServiceConfig, paths: Paths, s
     link: config.link,
     operator: config.operator,
     log,
-    notify: createNotifier(service.alerts.webhook_url_file, log),
+    notify: createNotifier(telegramRoute(service.alerts.telegram), log),
   });
 }
 
@@ -245,6 +264,14 @@ async function commandRun(paths: Paths): Promise<number> {
   server.close();
   state.close();
   return signal.aborted ? EXIT_INTERRUPTED : 0;
+}
+
+async function commandNotifyTest(settings: AppSettings, paths: Paths): Promise<number> {
+  const route = telegramRoute(serviceConfigFor(settings, paths).alerts.telegram);
+  if (route === null) throw new ConfigError('No alert destination is set, so alerts go only to the service log. See "Alerts" in the README.');
+  await sendTelegram(route, `Time-lapse: test message from revision ${REVISION}. Alerts reach this chat.`);
+  log("the test message was accepted");
+  return 0;
 }
 
 async function commandCapture(paths: Paths): Promise<number> {
@@ -400,6 +427,10 @@ async function main(argv: string[]): Promise<number> {
     }
     case "export-manifest":
       return commandExportManifest(settings().paths);
+    case "notify-test": {
+      const loaded = settings();
+      return await commandNotifyTest(loaded.settings, loaded.paths);
+    }
     default:
       process.stderr.write(USAGE);
       return EXIT_USAGE;
@@ -414,7 +445,7 @@ if (import.meta.main) {
     await new Promise<void>((resolve) => process.stdout.write("", () => resolve()));
     process.exit(code);
   } catch (error) {
-    if (!(error instanceof ConfigError || error instanceof CaptureFailure || error instanceof CameraLockHeldError || error instanceof CameraLockLostError || error instanceof RenderError)) throw error;
+    if (!(error instanceof ConfigError || error instanceof CaptureFailure || error instanceof CameraLockHeldError || error instanceof CameraLockLostError || error instanceof TelegramDeliveryError || error instanceof RenderError)) throw error;
     process.stderr.write(`${error.message}\n`);
     process.exit(error instanceof ConfigError ? EXIT_USAGE : EXIT_FAILURE);
   }

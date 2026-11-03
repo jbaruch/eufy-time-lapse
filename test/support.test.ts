@@ -498,6 +498,24 @@ describe("createRedactingLogger", () => {
   });
 });
 
+describe("State migrations", () => {
+  it("keeps an alert from before recoveries could be owed, owing nothing", async () => {
+    const dir = await tempDir();
+    const path = join(dir.path, "old.sqlite");
+    new State(path).close();
+    const raw = new DatabaseSync(path);
+    raw.exec("ALTER TABLE alerts DROP COLUMN recovery_owed_since; PRAGMA user_version = 1");
+    raw.prepare("INSERT INTO alerts (key, detail, active_since, last_sent_at) VALUES ('x', 'broken', 'then', 'then')").run();
+    raw.close();
+    const state = new State(path);
+    assert.equal(state.getAlert("x")?.detail, "broken");
+    assert.equal(state.getAlert("x")?.recovery_owed_since, null);
+    assert.deepEqual(state.listAlerts().map((alert) => alert.key), ["x"]);
+    state.close();
+    await dir.remove();
+  });
+});
+
 describe("runLogin", () => {
   let dir: { path: string; remove: () => Promise<void> };
 
