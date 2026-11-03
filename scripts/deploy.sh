@@ -72,7 +72,11 @@ main() {
     printf '%s\n' "$links" >&2
     exit 1
   fi
-  shipping="$(printf '%s\n' "$tracked" | while IFS= read -r file; do shasum -a 256 "$file"; done)"
+  # One shasum over every file, so a file that can't be read fails the whole list. A loop would answer for its last file only.
+  if ! shipping="$(printf '%s\n' "$tracked" | tr '\n' '\0' | xargs -0 shasum -a 256)"; then
+    echo "Couldn't hash this commit's files, so nothing was deployed. The error above names the file." >&2
+    exit 1
+  fi
 
   # From here to the first write_manifest, this only reads the host.
   local manifest_state previous
@@ -147,7 +151,10 @@ main() {
 
   local remote_hashes
   # shellcheck disable=SC2016 # These expand on the host.
-  remote_hashes="$(printf '%s\n' "$tracked" | on_host 'while IFS= read -r file; do sha256sum "$file"; done')"
+  if ! remote_hashes="$(printf '%s\n' "$tracked" | on_host 'tr "\n" "\0" | xargs -0 sha256sum')"; then
+    echo "Couldn't hash the files on $host, so the service wasn't restarted. The error above names the file." >&2
+    exit 1
+  fi
   if [[ "$shipping" != "$remote_hashes" ]]; then
     echo "The files on $host don't match this commit, so the service wasn't restarted:" >&2
     diff <(printf '%s\n' "$shipping") <(printf '%s\n' "$remote_hashes") >&2
