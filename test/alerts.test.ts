@@ -212,6 +212,45 @@ describe("AlertTracker, when a message doesn't arrive", () => {
     state.close();
   });
 
+  it("sends an alert raised only once when delivery returns, the way the storage audit raises one", async () => {
+    const { tracker, sent, delivering, clock, state } = setup();
+    await tracker.raise("stored_frames_damaged", "2 stored frames are damaged");
+    clock.ms += 300_000;
+    delivering.now = true;
+    await tracker.retryOwed();
+    assert.deepEqual(sent, ["Time-lapse problem since 2026-07-01T00:00:00.000Z: 2 stored frames are damaged"]);
+    await tracker.retryOwed();
+    assert.equal(sent.length, 1, "and only once");
+    state.close();
+  });
+
+  it("keeps a problem that came back while its recovery was on the way", async () => {
+    const { state, clock } = setup();
+    let reraise: (() => Promise<void>) | undefined;
+    const sent: string[] = [];
+    const tracker = new AlertTracker(
+      state,
+      async (text) => {
+        sent.push(text);
+        // Another process raises it again while this recovery is being sent.
+        await reraise?.();
+        return true;
+      },
+      24,
+      () => new Date(clock.ms),
+    );
+    await tracker.raise("x", "broken");
+    const other = new AlertTracker(state, async () => true, 24, () => new Date(clock.ms));
+    reraise = async () => {
+      reraise = undefined;
+      await other.raise("x", "broken again");
+    };
+    await tracker.clear("x");
+    assert.equal(state.getAlert("x")?.detail, "broken again");
+    assert.deepEqual(state.listAlerts().map((alert) => alert.key), ["x"]);
+    state.close();
+  });
+
   it("survives a restart still owing a recovery", async () => {
     const { tracker, sent, delivering, clock, state, path } = setup();
     delivering.now = true;

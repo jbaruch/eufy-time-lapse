@@ -123,7 +123,7 @@ function validate(config: ServiceConfig): void {
     if (typeof value !== "string" || !SAFE_ID.test(value)) fail(`${path} must start with a letter or digit and hold only letters, digits, dots, dashes and underscores, got ${JSON.stringify(value)}.`);
   };
 
-  for (const name of ["project", "camera", "schedule", "cadence", "battery", "capture", "traffic", "storage", "alerts", "http", "logging"] as const) section(name);
+  for (const name of ["project", "camera", "schedule", "cadence", "battery", "capture", "framing", "traffic", "storage", "alerts", "http", "logging"] as const) section(name);
 
   id("project.id", config.project.id);
   id("camera.id", config.camera.id);
