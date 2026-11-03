@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EufyMega, FileSessionStore, LoginStatus, MegaApiError, SessionExpiredError, StationUnreachableError } from "@mega-yfue/eufy-sdk";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
-import { addTrustedDevice, createMegaClient, isProgrammingError, isTrustedDevice, MegaAdapter } from "../src/adapters/mega.ts";
+import type { AuthChallenge, AuthInput } from "../src/adapters/adapter.ts";
+import { createMegaClient, isProgrammingError, isTrustedDevice, MegaAdapter } from "../src/adapters/mega.ts";
 import type { MegaClient, MegaDevice, MegaLiveStream, MegaLoginResult, SecurityApi } from "../src/adapters/mega.ts";
 
 const SERIAL = "T86P2FULLSERIAL1234";
@@ -58,7 +59,7 @@ class FakeClient implements MegaClient {
   listError: Error | undefined;
   loginError: Error | undefined;
   lastSeenMs: number | undefined;
-  trustedCodes: string[] = [];
+  trustAnswers: string[] = [];
   trustError: Error | undefined;
   trustedNow = false;
   /** What a real client persists once a login completes. */
@@ -79,9 +80,10 @@ class FakeClient implements MegaClient {
   private async persist(): Promise<void> {
     if (this.sessionFile !== undefined) await writeFile(this.sessionFile, FRESH_SESSION);
   }
-  async addTrustedDevice(code: string): Promise<void> {
+  async earnTrust(answer: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<void> {
     if (this.trustError !== undefined) throw this.trustError;
-    this.trustedCodes.push(code);
+    const input = await answer({ status: "tfa_required" });
+    if ("verifyCode" in input) this.trustAnswers.push(input.verifyCode);
     this.trustedNow = true;
   }
   async isTrustedDevice(): Promise<boolean> {
@@ -329,7 +331,7 @@ describe("MegaAdapter login renewal", () => {
 
   it("swaps in a login that needed nobody, and leaves nothing behind", async () => {
     const t = await renewalSetup();
-    assert.deepEqual(await t.adapter.renewLogin(), { status: "renewed", trusted: null });
+    assert.deepEqual(await t.adapter.renewLogin(), { status: "renewed" });
     assert.equal(await t.held(), FRESH_SESSION);
     assert.deepEqual(await t.leftovers(), []);
     assert.ok(t.spare.disconnects >= 1);
@@ -343,28 +345,6 @@ describe("MegaAdapter login renewal", () => {
     assert.deepEqual(await t.adapter.renewLogin(), { status: "needs_person" });
     assert.equal(await t.held(), HELD_SESSION);
     assert.deepEqual(await t.leftovers(), []);
-    await t.done();
-  });
-
-  it("spends a person's code on the login and on trust", async () => {
-    const t = await renewalSetup((spare) => {
-      spare.loginResults = [{ status: "2fa" }];
-    });
-    assert.deepEqual(await t.adapter.renewLogin(async () => ({ verifyCode: "123456" })), { status: "renewed", trusted: true });
-    assert.deepEqual(t.spare.codes, ["123456"]);
-    assert.deepEqual(t.spare.trustedCodes, ["123456"]);
-    assert.equal(await t.held(), FRESH_SESSION);
-    await t.done();
-  });
-
-  it("keeps a good login when only the trust step fails", async () => {
-    const t = await renewalSetup((spare) => {
-      spare.loginResults = [{ status: "2fa" }];
-      spare.trustError = new MegaApiError("Failed to request.", 26050, 200);
-    });
-    assert.deepEqual(await t.adapter.renewLogin(async () => ({ verifyCode: "123456" })), { status: "renewed", trusted: false });
-    assert.equal(await t.held(), FRESH_SESSION);
-    assert.match(t.warnings.join(), /ask for a code again/);
     await t.done();
   });
 
@@ -413,22 +393,43 @@ describe("MegaAdapter login renewal", () => {
 });
 
 describe("MegaAdapter device trust", () => {
-  const api = (posted: Array<[string, Record<string, unknown>]> = []): SecurityApi => ({
-    securityAppPost: async (path, body) => {
-      posted.push([path, body]);
-      return {};
-    },
+  const api = (): SecurityApi => ({
     securityAppHost: () => "security-app.example",
     baseHeaders: () => ({ openudid: "device" }),
     authTokenHeaders: () => ({ "x-auth-token": "token" }),
   });
   const answering = (status: number, body: string): typeof fetch => (async () => new Response(body, { status })) as typeof fetch;
 
-  it("adds this device with the code a login used", async () => {
-    const posted: Array<[string, Record<string, unknown>]> = [];
-    await addTrustedDevice(api(posted), "123456");
-    assert.equal(posted[0]?.[0], "/v1/app/trust_device/add");
-    assert.equal(posted[0]?.[1].verify_code, "123456");
+  it("earns trust by asking the person, and answers what Eufy's list then says", async () => {
+    const { adapter, client } = setup();
+    assert.equal(await adapter.trustDevice(async () => ({ verifyCode: "123456" })), true);
+    assert.deepEqual(client.trustAnswers, ["123456"]);
+  });
+
+  it("believes Eufy's list over a call that claimed success", async () => {
+    const { adapter, client } = setup();
+    client.isTrustedDevice = async () => false;
+    assert.equal(await adapter.trustDevice(async () => ({ verifyCode: "123456" })), false);
+  });
+
+  it("answers false, and says how to retry, when Eufy refuses the trust", async () => {
+    const { adapter, client, warnings } = setup();
+    client.trustError = new MegaApiError("Failed to request.", 26050, 200);
+    assert.equal(await adapter.trustDevice(async () => ({ verifyCode: "123456" })), false);
+    assert.match(warnings.join(), /Run login again/);
+  });
+
+  it("says to check the credentials, not to retry, when the older login refuses the password", async () => {
+    const { adapter, client, warnings } = setup();
+    client.trustError = new MegaApiError("/v1/passport/login failed (200/26006)", 26006, 200);
+    await assert.rejects(adapter.trustDevice(async () => ({ verifyCode: "123456" })), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "auth_required" && /Check the Eufy credentials/.test(error.message));
+    assert.doesNotMatch(warnings.join(), /Run login again/);
+  });
+
+  it("doesn't call a bug in this code a refusal from Eufy", async () => {
+    const { adapter, client } = setup();
+    client.trustError = new TypeError("not a function");
+    await assert.rejects(adapter.trustDevice(async () => ({ verifyCode: "123456" })), TypeError);
   });
 
   it("finds this device on Eufy's list by Eufy's own marker", async () => {
@@ -481,7 +482,9 @@ describe("MegaAdapter device trust", () => {
     const quiet = { debug: () => {}, info: () => {}, warn: () => {}, error: () => {} };
     const client = createMegaClient({ email: "a@example.com", password: "x", country: "US", sessionDir, logger: quiet });
     const real = (client as unknown as { api: SecurityApi }).api;
-    for (const name of ["securityAppPost", "securityAppHost", "baseHeaders", "authTokenHeaders"] as const) {
+    assert.equal(typeof real.baseHeaders().openudid, "string", "the trust has to land on this device");
+    assert.equal(typeof real.baseHeaders().phone_model, "string");
+    for (const name of ["securityAppHost", "baseHeaders", "authTokenHeaders"] as const) {
       assert.equal(typeof real[name], "function", name);
     }
     assert.equal(real.securityAppHost(), "security-app.eufylife.com");

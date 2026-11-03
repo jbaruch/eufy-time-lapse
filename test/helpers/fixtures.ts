@@ -118,6 +118,7 @@ export interface MockBehavior {
   loginExpiresAt?: Date;
   renewal?: () => LoginRenewal;
   trusted?: boolean | null;
+  trustOutcome?: boolean;
 }
 
 export class MockAdapter implements CameraAdapter {
@@ -163,22 +164,19 @@ export class MockAdapter implements CameraAdapter {
     return this.behavior.loginExpiresAt ?? null;
   }
 
-  async renewLogin(answer?: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<LoginRenewal> {
+  async renewLogin(): Promise<LoginRenewal> {
     this.renewals += 1;
-    if (answer !== undefined) {
-      const input = await answer({ status: "tfa_required" });
-      return { status: "renewed", trusted: "verifyCode" in input };
-    }
-    return this.behavior.renewal?.() ?? { status: "renewed", trusted: null };
+    return this.behavior.renewal?.() ?? { status: "renewed" };
   }
 
   async isDeviceTrusted(): Promise<boolean | null> {
     return this.behavior.trusted === undefined ? true : this.behavior.trusted;
   }
 
-  async trustDevice(code: string): Promise<boolean> {
-    this.trustCodes.push(code);
-    return true;
+  async trustDevice(answer: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<boolean> {
+    const input = await answer({ status: "tfa_required" });
+    if ("verifyCode" in input) this.trustCodes.push(input.verifyCode);
+    return this.behavior.trustOutcome ?? true;
   }
 
   /** Discoveries wait on this, for tests of a call that never answers. */

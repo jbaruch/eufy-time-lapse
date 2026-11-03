@@ -16,7 +16,7 @@ export interface LoginOptions {
 
 export interface LoginResult {
   status: "authenticated";
-  /** Null when Eufy can't say, or when it asked for no code to earn trust with. */
+  /** Null when Eufy can't say. */
   device_trusted: boolean | null;
   camera: { model: string; firmware: string | null; serial_masked: string; battery_percent: number | null; telemetry: Record<string, string | number | boolean> };
 }
@@ -34,14 +34,12 @@ async function answerChallenge(options: LoginOptions, challenge: AuthChallenge):
   return { captcha: { id: challenge.captchaId, code: code.trim() } };
 }
 
-/** Eufy asks an untrusted device for a code at every login. Trust takes a code, and a login restored from disk didn't use one. */
-async function settleTrust(options: LoginOptions, input: AuthInput | undefined): Promise<boolean | null> {
-  if (input !== undefined && "verifyCode" in input) return options.adapter.trustDevice(input.verifyCode);
+/** Eufy asks an untrusted device for a code at every login. Trust takes its own code, not the one a login just used. */
+async function settleTrust(options: LoginOptions): Promise<boolean | null> {
   const trusted = await options.adapter.isDeviceTrusted();
   if (trusted !== false) return trusted;
-  options.log("Eufy doesn't trust this device yet, so renewing its login would take a code every month. Logging in again to fix that.");
-  const renewal = await options.adapter.renewLogin((challenge) => answerChallenge(options, challenge));
-  return renewal.status === "renewed" ? renewal.trusted : false;
+  options.log("Eufy doesn't trust this device yet, so renewing its login would take a code every month. Fixing that takes one more emailed code, and maybe a captcha.");
+  return options.adapter.trustDevice((challenge) => answerChallenge(options, challenge));
 }
 
 /** Walks the interactive login until the session is stored, then proves the account can see the camera. */
@@ -50,7 +48,7 @@ export async function runLogin(options: LoginOptions): Promise<LoginResult> {
   for (let step = 0; step < MAX_LOGIN_STEPS; step += 1) {
     const state = await options.adapter.authenticate(input);
     if (state.status === "authenticated") {
-      const deviceTrusted = await settleTrust(options, input);
+      const deviceTrusted = await settleTrust(options);
       const camera = await options.adapter.discoverCamera(options.cameraSerial);
       return {
         status: "authenticated",
