@@ -107,7 +107,8 @@ Run anything else alongside it with `docker compose run --rm timelapse <command>
 | `login` | Log in again when the service reports `auth_required` or `login_renewal`, or to make this device trusted. A running service picks it up |
 
 The service also answers on `127.0.0.1:8787`. `/status` has the full report. `/healthz` means only that the
-process is alive, so check `/status` to know frames are arriving.
+process is alive, so check `/status` to know frames are arriving. If the capture loop makes no progress for 15 minutes,
+the service alerts and restarts itself.
 
 ### Configuration
 

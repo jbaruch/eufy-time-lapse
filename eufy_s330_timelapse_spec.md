@@ -178,6 +178,8 @@ Release the connection immediately after success. The newer SDK's default five-m
 
 Track **capture success** and **cleanup success** separately. If the frame is already saved, a cleanup error must not trigger a second capture for that slot. Record the cleanup fault, restart a stuck worker if necessary, and alert the owner.
 
+A watchdog ends the process if the capture loop makes no progress for 15 minutes, or twice the slot deadline if that's longer. A hung call would otherwise leave the process alive and `/healthz` answering, with no frames and no alerts, since alerts come from the same loop. The restart policy brings it back, and reconciliation records what was interrupted.
+
 Handle SIGTERM by shutting down the active capture and releasing resources. SIGKILL, host crashes, and network loss cannot guarantee delivery of a stop command: bound the local connection lifetime and verify the camera's behavior when the client disappears during the pilot.
 
 ## 5.3 Framing and image quality
