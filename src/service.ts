@@ -81,6 +81,15 @@ interface JudgedFrame {
   verdict: FramingVerdict;
 }
 
+/**
+ * When the comparison can't say, a camera that just went to its saved position is the best word on where it points. Without
+ * this, a site that changed overnight matches no earlier frame, so no frame is ever on target again to compare the next with.
+ */
+function vouchedByReset(judged: JudgedFrame): JudgedFrame {
+  if (judged.verdict.status !== "unsure") return judged;
+  return { reference: undefined, verdict: { status: "on_target", dx: null, dy: null, offset: { dx: 0, dy: 0 }, detail: `the camera went to its saved position just before this frame, and comparing couldn't say (${judged.verdict.detail})` } };
+}
+
 async function compareStoredFrames(referencePath: string, framePath: string): Promise<FrameComparison> {
   return compareFrames(await readGrayFrame(referencePath), await readGrayFrame(framePath));
 }
@@ -752,6 +761,7 @@ export class CaptureService {
     const positionId = this.config.framing.reset_before_frame && savedPosition !== undefined ? Number(savedPosition) : undefined;
     const deadlineAtMs = startedAt.getTime() + remainingMs;
     const judged = new Map<string, JudgedFrame>();
+    let resetHeld = false;
     let result: Awaited<ReturnType<typeof captureSlot>>;
     try {
       await mkdir(join(this.options.dataDir, "work"), { recursive: true });
@@ -779,10 +789,13 @@ export class CaptureService {
             ...(positionId === undefined
               ? {}
               : {
-                  beforeTry: () => this.resetCamera(adapter, camera, positionId, deadlineAtMs),
+                  beforeTry: async () => {
+                    resetHeld = await this.resetCamera(adapter, camera, positionId, deadlineAtMs);
+                  },
                   beforeTryMs: FRAME_STEP_MS,
                   isOffTarget: async (record: AttemptRecord) => {
-                    const verdict = await this.judgeFrame(join(this.options.dataDir, "work", record.attempt_id, "frame.jpg"), new Date(record.timing.frame_saved_at ?? this.now()));
+                    const compared = await this.judgeFrame(join(this.options.dataDir, "work", record.attempt_id, "frame.jpg"), new Date(record.timing.frame_saved_at ?? this.now()));
+                    const verdict = resetHeld ? vouchedByReset(compared) : compared;
                     judged.set(record.attempt_id, verdict);
                     if (verdict.verdict.status !== "off_target") return false;
                     this.options.log(`this try's frame is off target: ${verdict.verdict.detail}`);
@@ -1011,7 +1024,8 @@ export class CaptureService {
    * Stops the camera chasing what it detects, and sends it back to its position. This can't cost a frame: a failed reset
    * usually leaves the camera where it belongs, and the check on the frame catches it when it doesn't.
    */
-  private async resetCamera(adapter: CameraAdapter, camera: CameraInfo, positionId: number, deadlineAtMs: number): Promise<void> {
+  /** Says whether the camera went to its saved position. */
+  private async resetCamera(adapter: CameraAdapter, camera: CameraInfo, positionId: number, deadlineAtMs: number): Promise<boolean> {
     // Written first, so that if the process dies from here on, the next start knows tracking may still be off.
     this.state.setFlag("tracking_paused_at", this.now().toISOString());
     const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup } = this.config.capture;
@@ -1019,18 +1033,19 @@ export class CaptureService {
       // This step, a capture, and turning tracking back on. Without room for all three, the frame is what matters.
       if (this.now().getTime() + 2 * FRAME_STEP_MS + (acquire + cleanup) * 1000 > deadlineAtMs) {
         this.options.log("not resetting the camera: there's only time left for the frame");
-        return;
+        return false;
       }
       try {
         const outcome = await adapter.prepareFrame(camera.key, positionId);
         if (outcome === "gone") await this.alerts.raise("framing_position_gone", "the camera's saved position no longer exists, so it can't go back to it. Aim it where it should be, then run framing set");
-        return;
+        return outcome === "ready";
       } catch (error) {
         if (!(error instanceof CaptureFailure)) throw error;
         this.state.addEvent("framing_reset_failed", error.message);
         this.options.log(`couldn't reset the camera before a frame, on try ${attempt} of ${FRAME_RESET_TRIES}: ${error.message}`);
       }
     }
+    return false;
   }
 
   private async resumeTracking(adapter: CameraAdapter, camera: CameraInfo): Promise<void> {

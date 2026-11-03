@@ -154,7 +154,9 @@ A few things about the frames:
 - A failed reset doesn't cost the frame, because the camera is usually where it belongs anyway. A frame still off target
   when the tries run out is kept and flagged, and renders leave it out. `render --include-off-target` keeps it.
 - Slots off target twice in a row raise an alert. `alert_after_off_target_slots` sets how many.
-- Fog, darkness or a frame it can't judge count as unsure, and unsure never triggers another try.
+- Fog, darkness or a frame it can't judge count as unsure, and unsure never triggers another try. When the camera went to
+  the saved position just before it, an unsure frame counts as on target instead, and later frames compare with it. That's
+  what keeps the check working after the site itself changes overnight and no earlier frame matches any more.
 
 If you meant to change the view, run `framing set` again. `framing off` stops all of it. `"framing": { "reset_before_frame": false }`
 in `data/config.json` keeps the flags, the alert and the verdicts in `status`, but never touches the camera.

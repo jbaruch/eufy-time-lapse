@@ -496,10 +496,62 @@ describe("CaptureService", () => {
 
     it("doesn't take a frame again because it's unsure", async () => {
       const h = await guarded([murky]);
+      h.adapter.setFrameReset(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+      });
       await runAt(h, [0]);
-      assert.deepEqual(h.adapter.steps, ["reset 3", "capture", "resume"]);
+      assert.deepEqual(h.adapter.steps, ["reset 3", "reset 3", "capture", "resume"]);
       assert.deepEqual(checks(h).map((check) => check.status), ["unsure"]);
       assert.deepEqual(about(h), []);
+      h.state.close();
+    });
+
+    it("takes the reset's word when the comparison can't say, so the next frame has one to compare with", async () => {
+      const h = await guarded([murky, steady]);
+      await runAt(h, [0]);
+      const first = h.state.latestCapture()?.capture_id ?? "none";
+      await runAt(h, [5]);
+      assert.deepEqual(h.adapter.steps, ["reset 3", "capture", "resume", "reset 3", "capture", "resume"]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["on_target", "on_target"]);
+      const [reference] = h.calls.at(-1) as [string, string];
+      assert.ok(reference.includes(first), "the second frame is compared with the first");
+      h.state.close();
+    });
+
+    it("counts a frame the reset vouches for as on the saved position", async () => {
+      const h = await guarded([murky]);
+      await runAt(h, [0]);
+      const check = h.state.latestFramingCheck();
+      assert.deepEqual([check?.offset_dx, check?.offset_dy], [0, 0]);
+      assert.match(check?.detail ?? "", /went to its saved position/);
+      h.state.close();
+    });
+
+    it("still trusts the comparison over the reset when it can say", async () => {
+      const h = await guarded([panned, panned, panned]);
+      await runAt(h, [0]);
+      assert.deepEqual(checks(h), [{ status: "off_target", dx: 400, dy: -16 }]);
+      h.state.close();
+    });
+
+    it("doesn't take the word of a reset that found the position gone", async () => {
+      const h = await guarded([murky]);
+      h.adapter.setFrameReset(() => "gone");
+      await runAt(h, [0]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["unsure"]);
+      h.state.close();
+    });
+
+    it("doesn't carry one try's reset over to a later try whose reset failed", async () => {
+      const h = await guarded([panned, murky]);
+      let resets = 0;
+      h.adapter.setFrameReset(() => {
+        resets += 1;
+        if (resets > 1) throw new CaptureFailure("camera_unreachable", "position", "no connection");
+        return "ready";
+      });
+      await runAt(h, [0]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["unsure"]);
       h.state.close();
     });
 
@@ -577,7 +629,7 @@ describe("CaptureService", () => {
     });
 
     it("keeps no distance for a frame it couldn't measure", async () => {
-      const h = await guarded([murky]);
+      const h = await watching([murky]);
       await runAt(h, [0]);
       assert.equal(h.state.latestFramingCheck()?.offset_dx, null);
       assert.equal(h.state.latestFramingCheck()?.offset_dy, null);
@@ -797,8 +849,15 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    /** The comparison's own verdict, with no reset to vouch for the frame. */
+    const watchOnly = (): ServiceConfig => {
+      const base = serviceConfig();
+      return { ...base, framing: { ...base.framing, reset_before_frame: false } };
+    };
+
     it("calls a frame it can't read unsure, and keeps the frame", async () => {
       const unreadable = await harness({
+        config: watchOnly(),
         startMs: BEFORE_FIRST_SLOT,
         compareFrames: async () => {
           throw new CaptureFailure("decode_failed", "decode", "FFmpeg can't read it");
@@ -832,7 +891,7 @@ describe("CaptureService", () => {
     });
 
     it("calls a stored frame that's gone unsure, using the real comparison", async () => {
-      const h = await harness({ startMs: BEFORE_FIRST_SLOT });
+      const h = await harness({ config: watchOnly(), startMs: BEFORE_FIRST_SLOT });
       await h.service.setFramingPosition(h.signal);
       const reference = h.state.framingReferences("2000-01-01T00:00:00.000Z", "")[0];
       await rm(join(h.dataDir, reference?.relative_dir ?? "missing", "frame.jpg"));
