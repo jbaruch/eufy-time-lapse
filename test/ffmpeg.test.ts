@@ -22,7 +22,8 @@ describe("isToolFailure", () => {
   const failures: Array<[string, () => Promise<unknown>]> = [
     ["a tool that can't start", async () => run("no-such-tool-anywhere", [])],
     ["a tool that exits badly", async () => run(process.execPath, ["-e", "process.exit(3)"])],
-    ["a tool killed at its timeout", async () => run(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { timeout: 50, killSignal: "SIGKILL" })],
+    // Killed the way a timeout kills, with no timer to race: execFile reports both alike, naming the command.
+    ["a tool killed by a signal", async () => run(process.execPath, ["-e", "process.kill(process.pid, 'SIGKILL')"])],
     ["a tool that says too much", async () => run(process.execPath, ["-e", "process.stdout.write('x'.repeat(5000))"], { maxBuffer: 10 })],
   ];
   for (const [name, attempt] of failures) {
