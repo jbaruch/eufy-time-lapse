@@ -717,6 +717,70 @@ describe("MegaAdapter saved positions", () => {
     await adapter.shutdown();
   });
 
+  it("takes a retry's frame with tracking off when its reset had no time, though the last frame turned it back on", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    const log: string[] = [];
+    client.onRoute = (command) => {
+      client.sessions.set(SERIAL, {});
+      tracking(log)(command);
+    };
+    await frameAfterReset(adapter, client, log);
+    // The retry, straight to the frame.
+    await adapter.openLiveSession(SERIAL, new AbortController().signal);
+    assert.equal(log.at(-1), "tracking 0", "off over the frame's connection before it streams");
+    await adapter.teardown(SERIAL, 1000);
+    assert.deepEqual(log.slice(-3), ["tracking 0", "tracking 1", "close"]);
+    await adapter.shutdown();
+  });
+
+  it("takes a retry's frame with tracking off when its reset couldn't send that", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    const log: string[] = [];
+    client.onRoute = (command) => {
+      client.sessions.set(SERIAL, {});
+      tracking(log)(command);
+    };
+    await frameAfterReset(adapter, client, log);
+    let failReset = true;
+    client.onRoute = (command) => {
+      client.sessions.set(SERIAL, {});
+      tracking(log)(command);
+      if (command.kind === "set-json" && (command.data as { value: number }).value === 0 && failReset) {
+        failReset = false;
+        throw new StationUnreachableError("SN", 45000);
+      }
+    };
+    await assert.rejects(adapter.prepareFrame(SERIAL, 3), CaptureFailure);
+    const before = log.length;
+    await adapter.openLiveSession(SERIAL, new AbortController().signal);
+    assert.deepEqual(log.slice(before), ["tracking 0"], "sent again over the frame's connection");
+    await adapter.shutdown();
+  });
+
+  it("still takes the frame when its connection won't turn tracking off, and turns it back on after", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client, warnings } = withPositions(c.positions);
+    const log: string[] = [];
+    client.onRoute = (command) => {
+      client.sessions.set(SERIAL, {});
+      tracking(log)(command);
+    };
+    await frameAfterReset(adapter, client, log);
+    client.onRoute = (command) => {
+      client.sessions.set(SERIAL, {});
+      tracking(log)(command);
+      if (command.kind === "set-json" && (command.data as { value: number }).value === 0) throw new StationUnreachableError("SN", 45000);
+    };
+    const session = await adapter.openLiveSession(SERIAL, new AbortController().signal);
+    assert.ok(session !== undefined);
+    assert.match(warnings.join("\n"), /couldn't turn tracking off for this frame/);
+    await adapter.teardown(SERIAL, 1000);
+    assert.deepEqual(log.slice(-3), ["tracking 0", "tracking 1", "close"], "back on, since the off may have landed");
+    await adapter.shutdown();
+  });
+
   it("doesn't take a new adapter's word that tracking is on, and remembers once it has turned it on", async () => {
     const { adapter, client } = withPositions(camera([0, 3]).positions);
     await adapter.resumeTracking(SERIAL);

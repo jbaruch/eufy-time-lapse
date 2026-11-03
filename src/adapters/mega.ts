@@ -306,8 +306,11 @@ export class MegaAdapter implements CameraAdapter {
   private attemptActive = false;
   private readonly settle: PositionSettle;
   private relayUsed = false;
-  /** Whether this adapter turned tracking off and hasn't turned it back on. A new adapter can't know, so it starts unknown. */
-  private tracking: "unknown" | "off" | "on" = "unknown";
+  /**
+   * Tracking as far as this adapter knows. "turning-off" is a command sent and not confirmed, which may or may not have landed. A
+   * new adapter can't know what an earlier one did, so it starts unknown, and leaves tracking alone until a reset sets it.
+   */
+  private tracking: "unknown" | "on" | "turning-off" | "off" = "unknown";
   private loginNeeded = false;
   private unexpectedConnections = 0;
   private readonly identifiers = new Set<string>();
@@ -562,6 +565,12 @@ export class MegaAdapter implements CameraAdapter {
       throw await this.failureFrom(error, "connect", signal);
     }
     const connectMs = Date.now() - startedAt;
+    // No frame with tracking on that this adapter turned on. A retry whose reset failed or had no time follows a frame whose
+    // teardown turned tracking back on, and without this it could catch the camera mid-chase.
+    if (this.tracking === "on" || this.tracking === "turning-off") {
+      this.tracking = "turning-off";
+      if (await this.setTrackingInPlace(cameraKey, false)) this.tracking = "off";
+    }
 
     let stream: MegaLiveStream;
     try {
@@ -628,7 +637,11 @@ export class MegaAdapter implements CameraAdapter {
     this.stream?.stop();
     this.stream = undefined;
     // While the frame's connection is still open. A new one straight after it closes is the one the camera tends to drop.
-    if (afterFrame && this.tracking === "off") await this.resumeTrackingInPlace(cameraKey);
+    if (afterFrame && (this.tracking === "off" || this.tracking === "turning-off") && (await this.setTrackingInPlace(cameraKey, true))) {
+      // As with a move, closing the connection straight away could lose it.
+      await delay(this.settle.settingMs);
+      this.tracking = "on";
+    }
     await this.client.disconnect().catch((error: unknown) => {
       if (!isDisconnectFailure(error)) throw error;
       problems.push(`disconnect failed: ${this.scrub(error.message)}`);
@@ -700,10 +713,10 @@ export class MegaAdapter implements CameraAdapter {
     return this.withPositions(
       cameraKey,
       async (positions, list) => {
-        // First, so a frame taken without its position still can't be taken mid-chase. Recorded before it's sent, since a
-        // command that errors may still have landed.
-        this.tracking = "off";
+        // First, so a frame taken without its position still can't be taken mid-chase.
+        this.tracking = "turning-off";
         await this.setMotionTracking(cameraKey, false);
+        this.tracking = "off";
         // A position can be deleted in the app, and there's nothing to go to then.
         if ((await list()).find((position) => position.id === positionId)?.raw.enable !== 1) return "gone";
         await positions.preview(positionId);
@@ -731,23 +744,25 @@ export class MegaAdapter implements CameraAdapter {
     this.tracking = "on";
   }
 
-  /** Turns tracking back on over the connection a frame just used. A failure leaves it to resumeTracking. A bug propagates. */
-  private async resumeTrackingInPlace(cameraKey: string): Promise<void> {
+  /**
+   * Sets tracking over the connection a frame is using, and says whether the camera took it in time. A failure only warns: a
+   * frame goes ahead regardless, and tracking left off is resumeTracking's to fix. A bug propagates.
+   */
+  private async setTrackingInPlace(cameraKey: string, on: boolean): Promise<boolean> {
+    const what = on ? "take tracking back" : "turn tracking off for this frame";
+    const then = on ? ", so it's tried again on a new one" : "";
     let timer: NodeJS.Timeout | undefined;
     const expired = new Promise<"expired">((resolve) => {
       timer = setTimeout(() => resolve("expired"), this.settle.inPlaceMs);
     });
     try {
-      if ((await Promise.race([this.setMotionTracking(cameraKey, true).then(() => "sent" as const), expired])) === "expired") {
-        this.warn(`the frame's connection didn't take tracking back within ${this.settle.inPlaceMs / 1000} seconds, so it's tried again on a new one`);
-        return;
-      }
-      // As with a move, closing the connection straight away could lose it.
-      await delay(this.settle.settingMs);
-      this.tracking = "on";
+      if ((await Promise.race([this.setMotionTracking(cameraKey, on).then(() => "sent" as const), expired])) === "sent") return true;
+      this.warn(`the frame's connection didn't ${what} within ${this.settle.inPlaceMs / 1000} seconds${then}`);
+      return false;
     } catch (error) {
       if (!isCameraError(error)) throw error;
-      this.warn(`the frame's connection couldn't take tracking back, so it's tried again on a new one: ${this.scrub(error.message)}`);
+      this.warn(`the frame's connection couldn't ${what}${then}: ${this.scrub(error.message)}`);
+      return false;
     } finally {
       clearTimeout(timer);
     }

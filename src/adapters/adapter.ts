@@ -110,7 +110,10 @@ export interface CameraAdapter {
   /** Earns this device a place on the trusted list, asking a person for whatever Eufy wants. Answers whether Eufy now lists it. */
   trustDevice(answer: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<boolean>;
   discoverCamera(preferredKey?: string): Promise<CameraInfo>;
-  /** Starts a new live session. Rejects with CaptureFailure; aborts promptly when `signal` fires. */
+  /**
+   * Starts a new live session. When this adapter turned tracking on, or can't be sure a reset turned it off, it turns tracking off
+   * over that connection before the stream starts. Rejects with CaptureFailure; aborts promptly when `signal` fires.
+   */
   openLiveSession(cameraKey: string, signal: AbortSignal): Promise<LiveSession>;
   /**
    * Stops the stream and the camera connection. After a frame that prepareFrame set up, it first turns tracking back on over that
