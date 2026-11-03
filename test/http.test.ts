@@ -46,6 +46,18 @@ describe("the status server", () => {
     assert.equal((await fetch(`${base}/status`)).status, 200);
   });
 
+  for (const rejection of [null, "database is locked"]) {
+    it(`answers 500 when the report rejects with ${JSON.stringify(rejection)} rather than an Error, and keeps serving`, async () => {
+      let failing = true;
+      const base = await serve(() => (failing ? Promise.reject(rejection) : Promise.resolve({ ok: true })));
+      const failed = await fetch(`${base}/status`);
+      assert.equal(failed.status, 500);
+      assert.equal(await failed.text(), `${String(rejection)}\n`);
+      failing = false;
+      assert.equal((await fetch(`${base}/status`)).status, 200);
+    });
+  }
+
   it("answers 500 when the report can't be serialized", async () => {
     const circular: Record<string, unknown> = {};
     circular.self = circular;

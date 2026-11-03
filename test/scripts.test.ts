@@ -184,7 +184,11 @@ describe("scripts/deploy.sh", () => {
     await executable(join(stubs, "docker"), `echo "docker $*" >> '${log}'\nif [ "$2" = "exec" ]; then ${options.reports === false ? 'echo "{}"' : `echo "\\"revision\\": \\"$(git -C '${repo}' rev-parse --short HEAD)\\""`}; fi`);
     // The retry wait, so a test of it takes no real time.
     await executable(join(stubs, "sleep"), "exit 0");
-    await executable(join(stubs, "sha256sum"), options.corrupt === true ? 'echo "0000  $1"' : 'exec shasum -a 256 "$@"');
+    // The real hash, except that the file a test names can't be read, reported the way both tools do: the rest still hashed.
+    const hashing = (variable: string): string =>
+      `status=0\nfiles=()\nfor arg in "$@"; do case "$arg" in -a|256) ;; *) if [ "$arg" = "\${${variable}:-}" ]; then echo "$arg: unreadable" >&2; status=1; else files+=("$arg"); fi ;; esac; done\nif [ "\${#files[@]}" -gt 0 ]; then PATH='${process.env.PATH ?? ""}' shasum -a 256 "\${files[@]}"; fi\nexit "$status"`;
+    await executable(join(stubs, "sha256sum"), options.corrupt === true ? 'echo "0000  $1"' : hashing("HOST_HASH_FAILS_FOR"));
+    await executable(join(stubs, "shasum"), hashing("LOCAL_HASH_FAILS_FOR"));
     // The real sort, until a test says which call should fail.
     await executable(join(stubs, "sort"), `calls=0\nif [ -f '${base}/sort-calls' ]; then calls="$(cat '${base}/sort-calls')"; fi\ncalls=$((calls + 1))\necho "$calls" > '${base}/sort-calls'\nif [ "\${SORT_FAILS_ON_CALL:-0}" -eq "$calls" ]; then echo "sort broke" >&2; exit 2; fi\nPATH='${process.env.PATH ?? ""}' exec sort "$@"`);
     // The real tar, then whatever a test wants to go wrong right after it.
@@ -203,6 +207,24 @@ describe("scripts/deploy.sh", () => {
     const calls = await readFile(log, "utf8");
     assert.match(calls, /compose build/);
     assert.match(calls, /compose up -d/);
+  });
+
+  it("stops before touching the host when a file other than the last can't be hashed", async () => {
+    const { repo, host, log, env } = await world();
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env: { ...env, LOCAL_HASH_FAILS_FOR: "compose.yaml" } });
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /compose\.yaml: unreadable/);
+    assert.match(result.stderr, /nothing was deployed/);
+    assert.deepEqual(await readdir(host), []);
+    assert.equal(await readFile(log, "utf8"), "");
+  });
+
+  it("doesn't restart when a file on the host other than the last can't be hashed", async () => {
+    const { repo, log, env } = await world();
+    const result = await bash([script, "somehost", "app"], { cwd: repo, env: { ...env, HOST_HASH_FAILS_FOR: "compose.yaml" } });
+    assert.notEqual(result.code, 0);
+    assert.match(result.stderr, /Couldn't hash the files on somehost/);
+    assert.doesNotMatch(await readFile(log, "utf8"), /compose up/);
   });
 
   it("removes a file the repo no longer has, including at the root", async () => {
