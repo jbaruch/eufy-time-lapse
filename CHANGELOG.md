@@ -13,5 +13,6 @@ First version of the service, proven against the real camera on its built-in SIM
 - Renews its 30-day Eufy login a week before it ends. If Eufy asks for a code, the old login keeps working and an alert gives a person the date.
 - The `login` command adds the service to the account's trusted devices, through the older of Eufy's two login systems, since only its codes can do that. After that, renewing the login takes no code.
 - Renders MP4s from stored frames without touching the camera.
+- `probe` uses the service's capture settings, and with `--attempts 10 --interval-minutes 0.05` is a 4-minute check for mount day. The README's "Going live" has the order.
 - Sends alerts to Telegram through the OneCLI gateway, so the service never holds the bot token. An alert that can't be delivered is tried again at the next slot.
 - Not built yet: the offsite S3 archive and the monthly preview render.

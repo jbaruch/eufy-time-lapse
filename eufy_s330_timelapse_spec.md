@@ -2,7 +2,7 @@
 
 **Version:** 1.1\
 **Date:** October 31, 2026\
-**Status:** Native LTE feasibility shown on the actual camera: 98% of first tries in a back-to-back run, 46 of 47 slots at 4K at the real pace, and a passed formal probe (section 3.1). Battery behavior on solar is not yet measured. The capture service runs on the target host. The offsite archiver and monthly preview are not built.
+**Status:** Native LTE feasibility shown on the actual camera: 98% of first tries in a back-to-back run, 46 of 47 slots at 4K at the real pace, and a passed formal probe (section 3.1). Battery behavior on solar is not yet measured. The capture service runs on the target host, and the camera is mounted at the site at production pace. The offsite archiver and monthly preview are not built.
 
 **Changes in 1.1**, from running the real camera and from the owner's decisions:
 
@@ -111,6 +111,14 @@ Answering the camera's relay packets, and switching to another relay on a stall 
 **At the real pace:** 47 slots at 5 minutes over one night, on cable. 46 came out at 4K and one at 1280×720. 43 of 46 first tries reached 4K, and a retry fixed 2 of the other 3. Sessions took 13.8 seconds at the median and 28.7 at the 90th percentile, for about 0.42 MB of video per frame.
 
 **The run slowed down with no change to the connect.** Until about 03:30 local, connects took 7.3 seconds at the median and 10.4 at most. After that they took 13.0 and 22.8, and median sessions went from 12.7 to 19.3 seconds. Most of that is the wait for the lookup servers to learn the camera's address, which moved from a steady 4 seconds to steps of about 4, 10 and 16 to 19. Some sessions also go silent for about 6 seconds mid-stream. Our lookups were acknowledged within 20 ms throughout, so the steps are on the camera's or the carrier's side. A lost wake being retried would fit, but that's inferred. A retry seconds later found the camera in 3.8 seconds. The attempt deadline is 30 seconds, and 4 sessions reached it with a frame already in hand, so calibration has to allow for this when it sets the session cap.
+
+**The quick check, on the bench:** 10 captures back to back took 3 minutes 45 seconds. All 10 came out at 4K, 9 on the first try. Connects took 3.4 seconds at the median and 7.4 at most, and sessions took 12.3 and 27.2. Back to back is kinder than real slots, whose connects took 7 to 13 seconds, so compare a mount-day check with this run and not with the overnight numbers.
+
+**The same check at the site, on November 1, once mounted:** 2 minutes 28 seconds. All 10 came out at 4K on the first try. Connects took 3.7 seconds at the median and 11.4 at most, and sessions took 6.9 and 16.1. The first slot at production pace took 25.4 seconds, and came out at 4K on the first try. It spent 18.7 of them connecting, as the next slot spent 23.3 of its 30.7, so at the site the wait for a connection is what a session's length depends on.
+
+**A slot during live view, also on November 1:** the owner watched in the app while a slot fired. The picture flickered once and carried on, and the frame still came out at 4K on the first try, in about 13 seconds or less. The camera also recorded an event, which it didn't do for a slot nobody was watching. That is one observation, so what caused the event isn't known.
+
+**Leaving a saved position and coming back, also on November 1:** the camera moved one step each way, and returning to a saved preset landed 18 and then 10 pixels off horizontally at 4K, with no vertical error. Two untouched frames differed by at most 2 pixels, so that's real, about 0.5% of the frame's width at worst. A preset could only be created in the first empty slot: the list shows 10 slots, and a save to slot 9 did nothing while a save to slot 3 worked. No position events arrived, so comparing frames is the only way found so far to tell where the camera is pointing.
 
 **Broken on purpose, on the real camera:**
 
@@ -469,7 +477,7 @@ Before enabling year-long operation, fill in project dates, site time zone, Eufy
 
 - The S3 offsite archiver. Frames are spooled on the host, whose storage is durable, but there is no offsite copy; the destination is not chosen.
 - The monthly preview render.
-- Battery and solar calibration, which needs the camera on its panel.
+- Calibration of battery, solar and reception, which needs the camera mounted at the site on its panel. Signal there sets connect times and how hard the radio works, so a number measured on the bench, session cap included, doesn't carry over. The steps to get there are in the README's "Going live".
 
 # 14. Post-MVP Ideas
 

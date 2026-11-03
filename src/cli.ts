@@ -15,7 +15,7 @@ import { createStatusServer, listenForStatus } from "./http.ts";
 import { CameraLockHeldError, CameraLockLostError, withCameraLock } from "./lock.ts";
 import { runLogin } from "./login.ts";
 import { createRedactingLogger, Redactor } from "./logging.ts";
-import { runProbe } from "./probe/probe.ts";
+import { probeCaptureOptions, runProbe } from "./probe/probe.ts";
 import { render, RenderError } from "./render.ts";
 import { loadServiceConfig } from "./service-config.ts";
 import type { ServiceConfig, TelegramConfig } from "./service-config.ts";
@@ -50,13 +50,6 @@ const EXIT_FAILURE = 1;
 const EXIT_USAGE = 2;
 const EXIT_INTERRUPTED = 130;
 const REVISION = process.env.TIMELAPSE_REVISION ?? "unknown";
-const ACQUISITION_TIMEOUT_MS = 30_000;
-const CLEANUP_TIMEOUT_MS = 10_000;
-/** Two, so exposure has settled after the step up, and one bad frame can't cost the shot. */
-const TARGET_KEYFRAMES = 2;
-const MAX_TRIES = 3;
-const RETRY_DELAY_MS = 5_000;
-const SLOT_DEADLINE_MS = 180_000;
 const CAMERA_ID = "site-overview";
 
 function log(message: string): void {
@@ -193,12 +186,7 @@ async function commandProbe(paths: Paths, args: string[]): Promise<number> {
         ...(config.cameraSerial ? { cameraSerial: config.cameraSerial } : {}),
         attempts,
         intervalMs: intervalMinutes * 60_000,
-        targetKeyframes: TARGET_KEYFRAMES,
-        maxTries: MAX_TRIES,
-        retryDelayMs: RETRY_DELAY_MS,
-        slotDeadlineMs: SLOT_DEADLINE_MS,
-        acquisitionTimeoutMs: ACQUISITION_TIMEOUT_MS,
-        cleanupTimeoutMs: CLEANUP_TIMEOUT_MS,
+        ...probeCaptureOptions(serviceConfigFor(config, paths).capture),
         minWidth: config.minWidth,
         minHeight: config.minHeight,
         link: config.link,

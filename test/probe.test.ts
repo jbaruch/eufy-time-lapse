@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { after, before, describe, it } from "node:test";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
-import { runProbe } from "../src/probe/probe.ts";
+import { probeCaptureOptions, runProbe } from "../src/probe/probe.ts";
 import type { ProbeOptions } from "../src/probe/probe.ts";
 import type { ProbeReport } from "../src/probe/report.ts";
 import { CAMERA, liveSession, MockAdapter, rawVideo, tempDir } from "./helpers/fixtures.ts";
@@ -145,5 +145,22 @@ describe("runProbe", () => {
     assert.equal(report.attempts.length, 1);
     assert.equal(opts.adapter.opens, 1);
     assert.notEqual(report.verdict.result, "pass");
+  });
+});
+
+describe("probeCaptureOptions", () => {
+  it("takes every capture setting from the service's config, in the units a capture wants", () => {
+    assert.deepEqual(
+      probeCaptureOptions({
+        acquisition_timeout_seconds: 45,
+        cleanup_timeout_seconds: 11,
+        target_keyframes: 3,
+        max_attempts: 4,
+        retry_delay_seconds: 6,
+        slot_deadline_seconds: 170,
+        max_session_seconds_per_day: 6000,
+      }),
+      { acquisitionTimeoutMs: 45_000, cleanupTimeoutMs: 11_000, targetKeyframes: 3, maxTries: 4, retryDelayMs: 6_000, slotDeadlineMs: 170_000 },
+    );
   });
 });
