@@ -77,17 +77,26 @@ export class AlertTracker {
       return;
     }
     // Recorded before the send, so a crash can only repeat the message, never lose it.
-    this.state.oweRecovery(key, this.now().toISOString());
-    await this.deliverRecovery(key, existing.detail);
+    const owedSince = this.now().toISOString();
+    this.state.oweRecovery(key, owedSince);
+    await this.deliverRecovery(key, existing.detail, owedSince);
   }
 
-  /** Someone who heard about a problem and never hears it ended goes on believing in it. */
+  /**
+   * Someone who heard about a problem and never hears it ended goes on believing in it. One who was never told about it at
+   * all needs telling too: an alert raised every slot would get there by itself, but one raised once, by a check that
+   * doesn't repeat, wouldn't.
+   */
   async retryOwed(): Promise<void> {
-    for (const owed of this.state.listOwedRecoveries()) await this.deliverRecovery(owed.key, owed.detail);
+    for (const owed of this.state.listOwedRecoveries()) await this.deliverRecovery(owed.key, owed.detail, owed.recovery_owed_since ?? "");
+    for (const unsent of this.state.listAlerts().filter((alert) => alert.last_sent_at === NEVER_SENT)) {
+      if (await this.notify(`Time-lapse problem since ${unsent.active_since}: ${unsent.detail}`)) this.state.markAlertSent(unsent.key, this.now().toISOString());
+    }
   }
 
-  private async deliverRecovery(key: string, detail: string): Promise<void> {
-    if (await this.notify(`Time-lapse recovered: ${detail}`)) this.state.deleteAlert(key);
+  private async deliverRecovery(key: string, detail: string, owedSince: string): Promise<void> {
+    // Only the recovery that was sent. The problem can come back while the message is on its way, and that one stays.
+    if (await this.notify(`Time-lapse recovered: ${detail}`)) this.state.deleteOwedRecovery(key, owedSince);
   }
 
   async set(key: string, active: boolean, detail: string): Promise<void> {

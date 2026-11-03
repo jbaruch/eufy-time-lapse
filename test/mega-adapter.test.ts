@@ -39,8 +39,8 @@ function fakeDevice(overrides: Partial<MegaDevice> = {}, stream: MegaLiveStream 
   };
 }
 
-const HELD_SESSION = JSON.stringify({ authToken: "held", tokenExpiresAt: 1_800_000_000 });
-const FRESH_SESSION = JSON.stringify({ authToken: "fresh", tokenExpiresAt: 1_802_592_000 });
+const HELD_SESSION = JSON.stringify({ authToken: "held", tokenExpiresAt: 1_700_000_000 });
+const FRESH_SESSION = JSON.stringify({ authToken: "fresh", tokenExpiresAt: 1_702_592_000 });
 
 class FakeClient implements MegaClient {
   loginResults: MegaLoginResult[] = [{ status: "ok" }];
@@ -398,8 +398,8 @@ describe("MegaAdapter login renewal", () => {
 
   it("reads when the login ends from the SDK's own stored session", async () => {
     const t = await renewalSetup();
-    new FileSessionStore(join(t.sessionDir, "eufy-sdk-session.json")).save({ authToken: "x", tokenExpiresAt: 1_800_000_000 } as never);
-    assert.equal(t.adapter.loginExpiresAt()?.toISOString(), "2027-01-15T08:00:00.000Z");
+    new FileSessionStore(join(t.sessionDir, "eufy-sdk-session.json")).save({ authToken: "x", tokenExpiresAt: 1_700_000_000 } as never);
+    assert.equal(t.adapter.loginExpiresAt()?.toISOString(), "2023-11-14T22:13:20.000Z");
     await rm(join(t.sessionDir, "eufy-sdk-session.json"));
     assert.equal(t.adapter.loginExpiresAt(), null);
     await t.done();
