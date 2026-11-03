@@ -532,6 +532,40 @@ describe("MegaAdapter saved positions", () => {
     await adapter.shutdown();
   });
 
+  for (const message of ["timeout waiting for p2p control query 6034 reply from SN", "timeout waiting for p2p query 12 reply from SN", "P2P session SN is not connected", "P2P session closed before connecting for station SN", "P2P connect timeout for SN (relay: list)"]) {
+    it(`calls "${message}" a capture failure, because the camera just didn't answer`, async () => {
+      const c = camera([0, 3]);
+      c.positions.list = async () => {
+        throw new Error(message);
+      };
+      const { adapter, client } = withPositions(c.positions);
+      const before = client.disconnects;
+      await assert.rejects(adapter.prepareFrame(SERIAL, 3), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "camera_unreachable" && error.phase === "position");
+      assert.ok(client.disconnects > before);
+      await adapter.shutdown();
+    });
+
+    it(`calls "${message}" a capture failure when turning tracking back on too`, async () => {
+      const c = camera([0, 3]);
+      const { adapter, client } = withPositions(c.positions);
+      client.onRoute = () => {
+        throw new Error(message);
+      };
+      await assert.rejects(adapter.resumeTracking(SERIAL), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "camera_unreachable");
+      await adapter.shutdown();
+    });
+  }
+
+  it("lets a plain error that isn't about the camera through as itself", async () => {
+    const c = camera([0, 3]);
+    c.positions.list = async () => {
+      throw new Error("something this code doesn't know about");
+    };
+    const { adapter } = withPositions(c.positions);
+    await assert.rejects(adapter.prepareFrame(SERIAL, 3), (error: Error) => !(error instanceof CaptureFailure) && /doesn't know/.test(error.message));
+    await adapter.shutdown();
+  });
+
   it("lets a bug through as itself, and still closes up", async () => {
     const c = camera([0, 3]);
     c.positions.preview = async () => {

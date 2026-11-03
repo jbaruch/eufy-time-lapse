@@ -41,7 +41,7 @@ const SWEEP_INTERVAL_MS = 5_000;
 const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set(["ENETUNREACH", "ENETDOWN", "EHOSTUNREACH", "EHOSTDOWN", "ENOTFOUND", "EAI_AGAIN", "ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE"]);
 const SOCKET_GONE_CODES: ReadonlySet<string> = new Set(["ERR_SOCKET_DGRAM_NOT_RUNNING", "ERR_SOCKET_CLOSED", "ERR_STREAM_DESTROYED", "EBADF"]);
 /** What the pinned SDK says when it can't set up a session. test/mega-adapter.test.ts holds these wordings. */
-const SDK_CONNECT_FAILURE = /^P2P connect timeout for |^station .* is not in the device list$|^no P2P endpoint \(p2p_did\) for station /;
+const SDK_CONNECT_FAILURE = /^P2P connect timeout for |^P2P session .* is not connected$|^P2P session closed before connecting for station |^timeout waiting for p2p (control )?query |^station .* is not in the device list$|^no P2P endpoint \(p2p_did\) for station /;
 const TELEMETRY_NAME = /signal|rssi|band|cellular|network|lte|charging|solar|power|quality|batteryTemperature|batteryHealth/i;
 const TELEMETRY_EXCLUDED = /imei|iccid|imsi|mac|ssid|serial|ip_?addr/i;
 
