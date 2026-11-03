@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 — 2026-11-03
 
 First version of the service, proven against the real camera on its built-in SIM.
 
