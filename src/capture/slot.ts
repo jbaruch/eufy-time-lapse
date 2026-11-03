@@ -55,9 +55,13 @@ function rank(record: AttemptRecord): number {
   return record.status === "captured" ? pixels + Number.MAX_SAFE_INTEGER / 2 : pixels;
 }
 
-/** On a tie the later try wins: a clean retry beats the failure it followed. */
-export function chooseBest(tries: AttemptRecord[]): AttemptRecord {
-  return tries.reduce((best, record) => (rank(record) >= rank(best) ? record : best));
+/**
+ * On a tie the later try wins: a clean retry beats the failure it followed. A frame known to be off target loses to any
+ * other frame, however much sharper, since renders leave it out.
+ */
+export function chooseBest(tries: AttemptRecord[], offTarget: ReadonlySet<AttemptRecord> = new Set()): AttemptRecord {
+  const usable = (record: AttemptRecord): boolean => record.frame !== null && !offTarget.has(record);
+  return tries.reduce((best, record) => (usable(record) !== usable(best) ? (usable(record) ? record : best) : rank(record) >= rank(best) ? record : best));
 }
 
 /**
@@ -70,6 +74,7 @@ export async function captureSlot(options: SlotOptions): Promise<SlotResult> {
   const signal = options.signal ?? new AbortController().signal;
   const startedAt = now().getTime();
   const tries: AttemptRecord[] = [];
+  const offTargetTries = new Set<AttemptRecord>();
 
   for (let index = 0; index < options.maxTries; index += 1) {
     await options.beforeTry?.();
@@ -78,6 +83,7 @@ export async function captureSlot(options: SlotOptions): Promise<SlotResult> {
     tries.push(record);
 
     const offTarget = record.frame !== null && options.isOffTarget !== undefined && (await options.isOffTarget(record));
+    if (offTarget) offTargetTries.add(record);
     if ((!shouldRetry(record) && !offTarget) || index + 1 === options.maxTries || signal.aborted) break;
     if (record.cleanup.status !== "ok") {
       options.log(`not retrying: the last try's connection may not have closed (${record.cleanup.status}), and another try would wake the camera on top of it`);
@@ -94,7 +100,7 @@ export async function captureSlot(options: SlotOptions): Promise<SlotResult> {
     if (signal.aborted) break;
   }
 
-  const chosen = chooseBest(tries);
+  const chosen = chooseBest(tries, offTargetTries);
   const [first] = tries;
   return {
     chosen,

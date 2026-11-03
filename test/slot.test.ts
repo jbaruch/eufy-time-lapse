@@ -194,6 +194,14 @@ describe("captureSlot", () => {
     assert.equal(asked, 1);
   });
 
+  it("keeps a smaller frame on target over a sharper one off target", async () => {
+    const answers = [true, false, false];
+    const { result } = slot([good, small, small], { isOffTarget: async () => answers.shift() as boolean });
+    const { chosen } = await result;
+    assert.equal(chosen.status, "captured_degraded");
+    assert.match(chosen.attempt_id, /-retry-/, "not the first, off-target try");
+  });
+
   it("keeps the frame when every try came out off target, since that's all it has", async () => {
     const { result } = slot([good, good], { isOffTarget: async () => true });
     const { chosen, otherTries } = await result;
