@@ -1026,8 +1026,6 @@ export class CaptureService {
    */
   /** Says whether the camera went to its saved position. */
   private async resetCamera(adapter: CameraAdapter, camera: CameraInfo, positionId: number, deadlineAtMs: number): Promise<boolean> {
-    // Written first, so that if the process dies from here on, the next start knows tracking may still be off.
-    this.state.setFlag("tracking_paused_at", this.now().toISOString());
     const { acquisition_timeout_seconds: acquire, cleanup_timeout_seconds: cleanup } = this.config.capture;
     for (let attempt = 1; attempt <= FRAME_RESET_TRIES; attempt += 1) {
       // This step, a capture, and turning tracking back on. Without room for all three, the frame is what matters.
@@ -1035,6 +1033,9 @@ export class CaptureService {
         this.options.log("not resetting the camera: there's only time left for the frame");
         return false;
       }
+      // Written before tracking goes off, so a process that dies from here on still owes turning it back on. An earlier
+      // time is kept: tracking has been off since then, and the alert counts from it.
+      if (this.state.getFlag("tracking_paused_at") === undefined) this.state.setFlag("tracking_paused_at", this.now().toISOString());
       try {
         const outcome = await adapter.prepareFrame(camera.key, positionId);
         if (outcome === "gone") await this.alerts.raise("framing_position_gone", "the camera's saved position no longer exists, so it can't go back to it. Aim it where it should be, then run framing set");

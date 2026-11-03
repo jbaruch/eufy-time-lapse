@@ -760,6 +760,35 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("alerts when tracking stays off across slots, counting from when it first went off", async () => {
+      const h = await guarded([]);
+      h.adapter.setTrackingResume(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+      });
+      for (const minute of [0, 5, 10, 15]) {
+        await runAt(h, [minute]);
+        // The idle wake between slots, where tracking is tried again and the alert comes from.
+        h.clock.ms += 2.5 * MINUTE;
+        await h.service.tick(h.signal);
+      }
+      assert.ok(Date.parse(h.state.getFlag("tracking_paused_at") ?? "") < AT_0800 + MINUTE, "still the first slot's time");
+      assert.equal(trackingAlerts(h).length, 1);
+      h.state.close();
+    });
+
+    it("doesn't count tracking as off for a slot too late to touch it", async () => {
+      const h = await guarded([]);
+      h.adapter.setTrackingResume(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+      });
+      // 200 s into the slot: time for the frame, but not for going to the position and back.
+      await runAt(h, [4, 5 + 200 / 60]);
+      assert.equal(h.adapter.steps.filter((step) => step === "capture").length, 1, "the frame is still taken");
+      assert.deepEqual(h.adapter.frameResets, [], "no time to reset");
+      assert.equal(h.state.getFlag("tracking_paused_at"), undefined);
+      h.state.close();
+    });
+
     it("alerts once tracking has been off for 15 minutes, and says so when it's back", async () => {
       const h = await harness({ startMs: AT_0800 - 40 * MINUTE });
       h.adapter.setTrackingResume(() => {
