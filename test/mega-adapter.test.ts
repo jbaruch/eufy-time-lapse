@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EufyMega, FileSessionStore, LoginStatus, MegaApiError, SessionExpiredError, StationUnreachableError } from "@mega-yfue/eufy-sdk";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
-import type { AuthChallenge, AuthInput } from "../src/adapters/adapter.ts";
+import type { AuthChallenge, AuthInput, CleanupResult } from "../src/adapters/adapter.ts";
 import { createMegaClient, isProgrammingError, isTrustedDevice, MegaAdapter } from "../src/adapters/mega.ts";
 import type { MegaClient, MegaDevice, MegaLiveStream, MegaLoginResult, MegaPositions, SecurityApi } from "../src/adapters/mega.ts";
 
@@ -445,7 +445,7 @@ describe("MegaAdapter saved positions", () => {
   function withPositions(positions: MegaPositions | undefined): { adapter: MegaAdapter; client: FakeClient; warnings: string[] } {
     const client = new FakeClient();
     const warnings: string[] = [];
-    const adapter = new MegaAdapter(client, (message) => warnings.push(message), () => {}, undefined, undefined, { saveMs: 0, moveMs: 0, settingMs: 0 });
+    const adapter = new MegaAdapter(client, (message) => warnings.push(message), () => {}, undefined, undefined, { saveMs: 0, moveMs: 0, settingMs: 0, inPlaceMs: 50 });
     client.device = fakeDevice(positions === undefined ? {} : { ptz: () => ({ preset: () => positions }) });
     return { adapter, client, warnings };
   }
@@ -602,6 +602,148 @@ describe("MegaAdapter saved positions", () => {
     assert.equal(session.coldConnection, false);
     await adapter.teardown(SERIAL, 1000);
     assert.ok(client.disconnects > before);
+    await adapter.shutdown();
+  });
+
+  /** A reset, then the frame on its connection, closed the way a capture closes it. Commands are logged in order with the closes. */
+  async function frameAfterReset(adapter: MegaAdapter, client: FakeClient, log: string[]): Promise<CleanupResult> {
+    await adapter.prepareFrame(SERIAL, 3);
+    await adapter.openLiveSession(SERIAL, new AbortController().signal);
+    const disconnect = client.disconnect.bind(client);
+    client.disconnect = async () => {
+      log.push("close");
+      await disconnect();
+    };
+    return adapter.teardown(SERIAL, 1000);
+  }
+  const tracking = (log: string[]) => (command: Parameters<MegaClient["routeCommand"]>[1]): void => {
+    if (command.kind === "set-json") log.push(`tracking ${(command.data as { value: number }).value}`);
+  };
+
+  it("turns tracking back on over the frame's connection, before closing it, and doesn't connect again for it", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    const log: string[] = [];
+    client.onRoute = (command) => {
+      client.sessions.set(SERIAL, {});
+      tracking(log)(command);
+    };
+    const cleanup = await frameAfterReset(adapter, client, log);
+    assert.equal(cleanup.status, "ok");
+    assert.deepEqual(log, ["tracking 0", "tracking 1", "close"]);
+    const closes = client.disconnects;
+    await adapter.resumeTracking(SERIAL);
+    assert.deepEqual(log, ["tracking 0", "tracking 1", "close"], "nothing more sent");
+    assert.equal(client.disconnects, closes, "no new connection to close");
+    await adapter.shutdown();
+  });
+
+  it("leaves tracking alone when closing a frame it didn't turn tracking off for", async () => {
+    const { adapter, client } = withPositions(camera([0, 3]).positions);
+    await adapter.openLiveSession(SERIAL, new AbortController().signal);
+    await adapter.teardown(SERIAL, 1000);
+    assert.deepEqual(client.routed, []);
+    await adapter.shutdown();
+  });
+
+  it("doesn't turn tracking back on when a reset fails, so the frame still isn't taken mid-chase", async () => {
+    const c = camera([0, 3]);
+    c.positions.preview = async () => {
+      throw new StationUnreachableError("SN", 45000);
+    };
+    const { adapter, client } = withPositions(c.positions);
+    const log: string[] = [];
+    client.onRoute = tracking(log);
+    await assert.rejects(adapter.prepareFrame(SERIAL, 3), CaptureFailure);
+    assert.deepEqual(log, ["tracking 0"]);
+    await adapter.shutdown();
+  });
+
+  it("connects again for tracking when the frame's connection wouldn't take it", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client, warnings } = withPositions(c.positions);
+    const log: string[] = [];
+    let refuse = true;
+    client.onRoute = (command) => {
+      client.sessions.set(SERIAL, {});
+      tracking(log)(command);
+      if (command.kind === "set-json" && (command.data as { value: number }).value === 1 && refuse) {
+        refuse = false;
+        throw Object.assign(new Error("Not running"), { code: "ERR_SOCKET_DGRAM_NOT_RUNNING" });
+      }
+    };
+    const cleanup = await frameAfterReset(adapter, client, log);
+    assert.equal(cleanup.status, "ok", "the frame's close is still fine");
+    assert.match(warnings.join("\n"), /couldn't take tracking back/);
+    const closes = client.disconnects;
+    await adapter.resumeTracking(SERIAL);
+    assert.deepEqual(log.filter((entry) => entry === "tracking 1").length, 2, "tried again on a new connection");
+    assert.ok(client.disconnects > closes);
+    await adapter.shutdown();
+  });
+
+  it("closes the frame's connection on time when it doesn't answer, and leaves tracking to a new one", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client, warnings } = withPositions(c.positions);
+    const log: string[] = [];
+    let hang = true;
+    client.routeCommand = async (serial, command) => {
+      client.routed.push({ serial, command });
+      client.sessions.set(SERIAL, {});
+      tracking(log)(command);
+      if (command.kind === "set-json" && (command.data as { value: number }).value === 1 && hang) {
+        hang = false;
+        await new Promise(() => {});
+      }
+    };
+    const cleanup = await frameAfterReset(adapter, client, log);
+    assert.equal(cleanup.status, "ok");
+    assert.match(warnings.join("\n"), /didn't take tracking back within/);
+    await adapter.resumeTracking(SERIAL);
+    assert.equal(log.filter((entry) => entry === "tracking 1").length, 2);
+    await adapter.shutdown();
+  });
+
+  it("lets a bug in turning tracking back on over the frame's connection through", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    client.onRoute = (command) => {
+      client.sessions.set(SERIAL, {});
+      if (command.kind === "set-json" && (command.data as { value: number }).value === 1) throw new TypeError("not a function");
+    };
+    await adapter.prepareFrame(SERIAL, 3);
+    await adapter.openLiveSession(SERIAL, new AbortController().signal);
+    await assert.rejects(adapter.teardown(SERIAL, 1000), TypeError);
+    await adapter.shutdown();
+  });
+
+  it("doesn't take a new adapter's word that tracking is on, and remembers once it has turned it on", async () => {
+    const { adapter, client } = withPositions(camera([0, 3]).positions);
+    await adapter.resumeTracking(SERIAL);
+    assert.equal(client.routed.length, 1);
+    await adapter.resumeTracking(SERIAL);
+    assert.equal(client.routed.length, 1, "no second wake for a setting already on");
+    await adapter.shutdown();
+  });
+
+  it("counts tracking as off from a reset whose command errored, since it may have landed", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    const log: string[] = [];
+    client.onRoute = (command) => {
+      client.sessions.set(SERIAL, {});
+      tracking(log)(command);
+    };
+    // A first frame leaves tracking on, as far as this adapter knows.
+    await frameAfterReset(adapter, client, log);
+    client.onRoute = (command) => {
+      tracking(log)(command);
+      if (command.kind === "set-json" && (command.data as { value: number }).value === 0) throw new StationUnreachableError("SN", 45000);
+    };
+    await assert.rejects(adapter.prepareFrame(SERIAL, 3), CaptureFailure);
+    const before = log.length;
+    await adapter.resumeTracking(SERIAL);
+    assert.deepEqual(log.slice(before), ["tracking 1", "close"], "it connects to turn tracking back on, rather than trusting the earlier frame");
     await adapter.shutdown();
   });
 

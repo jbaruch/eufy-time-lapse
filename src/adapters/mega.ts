@@ -54,8 +54,11 @@ const RENEWAL_DIR_PREFIX = "renewal-";
 const TRUST_LIST_TIMEOUT_MS = 20_000;
 const POSITION_TIMEOUT_MS = 90_000;
 const POSITION_CLOSE_TIMEOUT_MS = 10_000;
-/** A save showed on the camera's own list after 5 seconds, not after 2. The move is what was tested with a 6-second wait. */
-const POSITION_SETTLE: PositionSettle = { saveMs: 5_000, moveMs: 6_000, settingMs: 2_000 };
+/**
+ * A save showed on the camera's own list after 5 seconds, not after 2. The move is what was tested with a 6-second wait. The
+ * frame's connection is open and keyed, so turning tracking back on over it answers at once or not at all.
+ */
+const POSITION_SETTLE: PositionSettle = { saveMs: 5_000, moveMs: 6_000, settingMs: 2_000, inPlaceMs: 3_000 };
 /** Getting ready for a frame, or finishing after one, has a slot to fit in. With POSITION_CLOSE_TIMEOUT_MS this is FRAME_STEP_SECONDS. */
 const FRAME_STEP_TIMEOUT_MS = 45_000;
 /** The camera's motion tracking setting, which the app calls AI tracking. It only took the JSON form, not the scalar one. */
@@ -98,6 +101,8 @@ export interface PositionSettle {
   saveMs: number;
   moveMs: number;
   settingMs: number;
+  /** How long a frame's connection gets to take tracking back before it closes anyway. */
+  inPlaceMs: number;
 }
 
 /**
@@ -301,6 +306,8 @@ export class MegaAdapter implements CameraAdapter {
   private attemptActive = false;
   private readonly settle: PositionSettle;
   private relayUsed = false;
+  /** Whether this adapter turned tracking off and hasn't turned it back on. A new adapter can't know, so it starts unknown. */
+  private tracking: "unknown" | "off" | "on" = "unknown";
   private loginNeeded = false;
   private unexpectedConnections = 0;
   private readonly identifiers = new Set<string>();
@@ -614,17 +621,22 @@ export class MegaAdapter implements CameraAdapter {
     return session;
   }
 
-  async teardown(_cameraKey: string, timeoutMs: number): Promise<CleanupResult> {
+  async teardown(cameraKey: string, timeoutMs: number): Promise<CleanupResult> {
+    const startedAt = Date.now();
     const problems: string[] = [];
+    const afterFrame = this.stream !== undefined;
     this.stream?.stop();
     this.stream = undefined;
+    // While the frame's connection is still open. A new one straight after it closes is the one the camera tends to drop.
+    if (afterFrame && this.tracking === "off") await this.resumeTrackingInPlace(cameraKey);
     await this.client.disconnect().catch((error: unknown) => {
       if (!isDisconnectFailure(error)) throw error;
       problems.push(`disconnect failed: ${this.scrub(error.message)}`);
     });
     this.loginNeeded = true;
 
-    const deadline = Date.now() + timeoutMs;
+    // The caller's bound counts from the start, so the wait for the close does too.
+    const deadline = startedAt + timeoutMs;
     while (this.client.getP2pSessions().size > 0 && Date.now() < deadline) {
       await delay(CLOSE_POLL_MS);
     }
@@ -688,7 +700,9 @@ export class MegaAdapter implements CameraAdapter {
     return this.withPositions(
       cameraKey,
       async (positions, list) => {
-        // First, so a frame taken without its position still can't be taken mid-chase.
+        // First, so a frame taken without its position still can't be taken mid-chase. Recorded before it's sent, since a
+        // command that errors may still have landed.
+        this.tracking = "off";
         await this.setMotionTracking(cameraKey, false);
         // A position can be deleted in the app, and there's nothing to go to then.
         if ((await list()).find((position) => position.id === positionId)?.raw.enable !== 1) return "gone";
@@ -703,6 +717,8 @@ export class MegaAdapter implements CameraAdapter {
   }
 
   async resumeTracking(cameraKey: string): Promise<void> {
+    // The frame's connection already did it, so there's no need to wake the camera again.
+    if (this.tracking === "on") return;
     await this.withPositions(
       cameraKey,
       async () => {
@@ -712,6 +728,29 @@ export class MegaAdapter implements CameraAdapter {
       },
       { timeoutMs: FRAME_STEP_TIMEOUT_MS },
     );
+    this.tracking = "on";
+  }
+
+  /** Turns tracking back on over the connection a frame just used. A failure leaves it to resumeTracking. A bug propagates. */
+  private async resumeTrackingInPlace(cameraKey: string): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<"expired">((resolve) => {
+      timer = setTimeout(() => resolve("expired"), this.settle.inPlaceMs);
+    });
+    try {
+      if ((await Promise.race([this.setMotionTracking(cameraKey, true).then(() => "sent" as const), expired])) === "expired") {
+        this.warn(`the frame's connection didn't take tracking back within ${this.settle.inPlaceMs / 1000} seconds, so it's tried again on a new one`);
+        return;
+      }
+      // As with a move, closing the connection straight away could lose it.
+      await delay(this.settle.settingMs);
+      this.tracking = "on";
+    } catch (error) {
+      if (!isCameraError(error)) throw error;
+      this.warn(`the frame's connection couldn't take tracking back, so it's tried again on a new one: ${this.scrub(error.message)}`);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async forgetPosition(cameraKey: string, positionId: number): Promise<void> {

@@ -112,18 +112,22 @@ export interface CameraAdapter {
   discoverCamera(preferredKey?: string): Promise<CameraInfo>;
   /** Starts a new live session. Rejects with CaptureFailure; aborts promptly when `signal` fires. */
   openLiveSession(cameraKey: string, signal: AbortSignal): Promise<LiveSession>;
-  /** Stops the stream and the camera connection. Reports problems in its result. */
+  /**
+   * Stops the stream and the camera connection. After a frame that prepareFrame set up, it first turns tracking back on over that
+   * same connection. Reports problems in its result.
+   */
   /** Resolves with the outcome, including one that failed in a way the adapter understands. A rejection means a bug. */
   teardown(cameraKey: string, timeoutMs: number): Promise<CleanupResult>;
   /** Saves where the camera points now, in the first empty slot, and answers which slot. Rejects with CaptureFailure if the camera didn't keep it. */
   savePosition(cameraKey: string): Promise<number>;
   /**
    * Gets the camera ready for a frame: stops it following what it detects, then turns it to a saved position, or answers "gone",
-   * without moving, if that position no longer exists. Tracking stays off until resumeTracking, and the connection stays open for
-   * the frame that follows, so the next openLiveSession or resumeTracking has to come. Rejects with CaptureFailure.
+   * without moving, if that position no longer exists. Tracking stays off until the frame's teardown or resumeTracking turns it
+   * back on, and the connection stays open for the frame that follows, so the next openLiveSession or resumeTracking has to come.
+   * Rejects with CaptureFailure.
    */
   prepareFrame(cameraKey: string, positionId: number): Promise<"ready" | "gone">;
-  /** Lets the camera follow what it detects again. Rejects with CaptureFailure. */
+  /** Lets the camera follow what it detects again, without a connection when the last frame's teardown already did. Rejects with CaptureFailure. */
   resumeTracking(cameraKey: string): Promise<void>;
   /** Deletes a saved position, if it's still there. Rejects with CaptureFailure. */
   forgetPosition(cameraKey: string, positionId: number): Promise<void>;

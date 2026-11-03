@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Turns AI tracking back on over the frame's own connection, before closing it, instead of connecting again afterwards. That's one camera wake per slot instead of two, and it avoids the reconnect the camera sometimes dropped, which left tracking off until the next try between slots.
+
 ## 0.1.0 — 2026-11-03
 
 First version of the service, proven against the real camera on its built-in SIM.
