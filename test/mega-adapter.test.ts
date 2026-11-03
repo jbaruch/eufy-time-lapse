@@ -52,6 +52,14 @@ class FakeClient implements MegaClient {
   device: MegaDevice = fakeDevice();
   sessions = new Map<string, unknown>();
   disconnects = 0;
+  routed: Array<{ serial: string; command: Parameters<MegaClient["routeCommand"]>[1] }> = [];
+  onRoute: ((command: Parameters<MegaClient["routeCommand"]>[1]) => void) | undefined;
+
+  async routeCommand(serial: string, command: Parameters<MegaClient["routeCommand"]>[1]): Promise<void> {
+    this.routed.push({ serial, command });
+    this.onRoute?.(command);
+  }
+
   stuckOpen = false;
   connect: (signal?: AbortSignal) => Promise<void> = async () => {
     this.sessions.set(SERIAL, {});
@@ -437,7 +445,7 @@ describe("MegaAdapter saved positions", () => {
   function withPositions(positions: MegaPositions | undefined): { adapter: MegaAdapter; client: FakeClient; warnings: string[] } {
     const client = new FakeClient();
     const warnings: string[] = [];
-    const adapter = new MegaAdapter(client, (message) => warnings.push(message), () => {}, undefined, undefined, { saveMs: 0, moveMs: 0 });
+    const adapter = new MegaAdapter(client, (message) => warnings.push(message), () => {}, undefined, undefined, { saveMs: 0, moveMs: 0, settingMs: 0 });
     client.device = fakeDevice(positions === undefined ? {} : { ptz: () => ({ preset: () => positions }) });
     return { adapter, client, warnings };
   }
@@ -469,7 +477,7 @@ describe("MegaAdapter saved positions", () => {
   it("returns to a position that exists", async () => {
     const c = camera([0, 3]);
     const { adapter } = withPositions(c.positions);
-    assert.equal(await adapter.returnToPosition(SERIAL, 3), "returned");
+    assert.equal(await adapter.prepareFrame(SERIAL, 3), "ready");
     assert.deepEqual(c.calls, ["list", "preview 3"]);
     await adapter.shutdown();
   });
@@ -477,7 +485,7 @@ describe("MegaAdapter saved positions", () => {
   it("won't go to an empty slot, because that position is gone", async () => {
     const c = camera([0]);
     const { adapter } = withPositions(c.positions);
-    assert.equal(await adapter.returnToPosition(SERIAL, 3), "gone");
+    assert.equal(await adapter.prepareFrame(SERIAL, 3), "gone");
     assert.deepEqual(c.calls, ["list"]);
     await adapter.shutdown();
   });
@@ -496,7 +504,7 @@ describe("MegaAdapter saved positions", () => {
     const { adapter, client } = withPositions(c.positions);
     const before = client.disconnects;
     client.sessions.set(SERIAL, {});
-    await adapter.returnToPosition(SERIAL, 3);
+    await adapter.resumeTracking(SERIAL);
     assert.ok(client.disconnects > before);
     assert.equal(adapter.unexpectedConnectionCount(), 0);
     await adapter.shutdown();
@@ -505,9 +513,9 @@ describe("MegaAdapter saved positions", () => {
   it("logs in again before using the camera if it's been closed", async () => {
     const c = camera([0, 3]);
     const { adapter, client } = withPositions(c.positions);
-    await adapter.returnToPosition(SERIAL, 3);
+    await adapter.resumeTracking(SERIAL);
     const logins = client.logins;
-    await adapter.returnToPosition(SERIAL, 3);
+    await adapter.prepareFrame(SERIAL, 3);
     assert.ok(client.logins > logins);
     await adapter.shutdown();
   });
@@ -519,8 +527,55 @@ describe("MegaAdapter saved positions", () => {
     };
     const { adapter, client } = withPositions(c.positions);
     const before = client.disconnects;
-    await assert.rejects(adapter.returnToPosition(SERIAL, 3), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "camera_unreachable" && error.phase === "position");
+    await assert.rejects(adapter.prepareFrame(SERIAL, 3), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "camera_unreachable" && error.phase === "position");
     assert.ok(client.disconnects > before);
+    await adapter.shutdown();
+  });
+
+  for (const message of ["timeout waiting for p2p control query 6034 reply from SN", "timeout waiting for p2p query 12 reply from SN", "P2P session SN is not connected", "P2P session closed before connecting for station SN", "P2P connect timeout for SN (relay: list)"]) {
+    it(`calls "${message}" a capture failure, because the camera just didn't answer`, async () => {
+      const c = camera([0, 3]);
+      c.positions.list = async () => {
+        throw new Error(message);
+      };
+      const { adapter, client } = withPositions(c.positions);
+      const before = client.disconnects;
+      await assert.rejects(adapter.prepareFrame(SERIAL, 3), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "camera_unreachable" && error.phase === "position");
+      assert.ok(client.disconnects > before);
+      await adapter.shutdown();
+    });
+
+    it(`calls "${message}" a capture failure when turning tracking back on too`, async () => {
+      const c = camera([0, 3]);
+      const { adapter, client } = withPositions(c.positions);
+      client.onRoute = () => {
+        throw new Error(message);
+      };
+      await assert.rejects(adapter.resumeTracking(SERIAL), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "camera_unreachable");
+      await adapter.shutdown();
+    });
+  }
+
+  for (const code of ["ERR_SOCKET_DGRAM_NOT_RUNNING", "ERR_SOCKET_CLOSED"]) {
+    it(`calls a socket closed under a command (${code}) a capture failure, because the connection went away`, async () => {
+      const c = camera([0, 3]);
+      const { adapter, client } = withPositions(c.positions);
+      // What the SDK did on 2026-11-03 at 09:00: it sent on a session whose socket had already closed.
+      client.onRoute = () => {
+        throw Object.assign(new Error("Not running"), { code });
+      };
+      await assert.rejects(adapter.resumeTracking(SERIAL), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "camera_unreachable" && error.phase === "position");
+      await adapter.shutdown();
+    });
+  }
+
+  it("lets a plain error that isn't about the camera through as itself", async () => {
+    const c = camera([0, 3]);
+    c.positions.list = async () => {
+      throw new Error("something this code doesn't know about");
+    };
+    const { adapter } = withPositions(c.positions);
+    await assert.rejects(adapter.prepareFrame(SERIAL, 3), (error: Error) => !(error instanceof CaptureFailure) && /doesn't know/.test(error.message));
     await adapter.shutdown();
   });
 
@@ -531,14 +586,89 @@ describe("MegaAdapter saved positions", () => {
     };
     const { adapter, client } = withPositions(c.positions);
     const before = client.disconnects;
-    await assert.rejects(adapter.returnToPosition(SERIAL, 3), TypeError);
+    await assert.rejects(adapter.prepareFrame(SERIAL, 3), TypeError);
     assert.ok(client.disconnects > before);
+    await adapter.shutdown();
+  });
+
+  it("leaves the connection open after a reset, for the frame that follows", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    client.onRoute = () => client.sessions.set(SERIAL, {});
+    const before = client.disconnects;
+    await adapter.prepareFrame(SERIAL, 3);
+    assert.equal(client.disconnects, before);
+    const session = await adapter.openLiveSession(SERIAL, new AbortController().signal);
+    assert.equal(session.coldConnection, false);
+    await adapter.teardown(SERIAL, 1000);
+    assert.ok(client.disconnects > before);
+    await adapter.shutdown();
+  });
+
+  it("reports the path the reset's connection took, since the frame stays on it", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    client.onRoute = () => {
+      client.sessions.set(SERIAL, {});
+      adapter.noteRelayUsed();
+    };
+    await adapter.prepareFrame(SERIAL, 3);
+    assert.equal((await adapter.openLiveSession(SERIAL, new AbortController().signal)).connectionPath, "relay");
+    await adapter.shutdown();
+  });
+
+  it("doesn't carry a path over from an earlier reset", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    client.onRoute = () => client.sessions.set(SERIAL, {});
+    adapter.noteRelayUsed();
+    await adapter.prepareFrame(SERIAL, 3);
+    assert.equal((await adapter.openLiveSession(SERIAL, new AbortController().signal)).connectionPath, "direct");
+    await adapter.shutdown();
+  });
+
+  it("turns tracking off before moving, in the one form the camera took", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    client.onRoute = (command) => c.calls.push(`tracking ${command.data.value}`);
+    await adapter.prepareFrame(SERIAL, 3);
+    assert.deepEqual(c.calls, ["tracking 0", "list", "preview 3"]);
+    assert.deepEqual(client.routed, [{ serial: SERIAL, command: { kind: "set-json", param: 6016, data: { value: 0 }, channel: 0 } }]);
+    await adapter.shutdown();
+  });
+
+  it("turns tracking off even when the position is gone, since the frame still gets taken", async () => {
+    const c = camera([0]);
+    const { adapter, client } = withPositions(c.positions);
+    assert.equal(await adapter.prepareFrame(SERIAL, 3), "gone");
+    assert.deepEqual(client.routed.map(({ command }) => command.data.value), [0]);
+    await adapter.shutdown();
+  });
+
+  it("turns tracking back on, closes up, and moves nothing", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    const before = client.disconnects;
+    await adapter.resumeTracking(SERIAL);
+    assert.deepEqual(client.routed, [{ serial: SERIAL, command: { kind: "set-json", param: 6016, data: { value: 1 }, channel: 0 } }]);
+    assert.deepEqual(c.calls, []);
+    assert.ok(client.disconnects > before);
+    await adapter.shutdown();
+  });
+
+  it("calls an unreachable camera a capture failure when turning tracking back on", async () => {
+    const c = camera([0, 3]);
+    const { adapter, client } = withPositions(c.positions);
+    client.onRoute = () => {
+      throw new StationUnreachableError("SN", 45000);
+    };
+    await assert.rejects(adapter.resumeTracking(SERIAL), (error: CaptureFailure) => error instanceof CaptureFailure && error.reason === "camera_unreachable" && error.phase === "position");
     await adapter.shutdown();
   });
 
   it("says so when the SDK offers no saved positions", async () => {
     const { adapter } = withPositions(undefined);
-    await assert.rejects(adapter.returnToPosition(SERIAL, 3), /offers no saved positions/);
+    await assert.rejects(adapter.prepareFrame(SERIAL, 3), /offers no saved positions/);
     await adapter.shutdown();
   });
 });

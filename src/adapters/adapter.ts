@@ -117,8 +117,14 @@ export interface CameraAdapter {
   teardown(cameraKey: string, timeoutMs: number): Promise<CleanupResult>;
   /** Saves where the camera points now, in the first empty slot, and answers which slot. Rejects with CaptureFailure if the camera didn't keep it. */
   savePosition(cameraKey: string): Promise<number>;
-  /** Turns the camera to a saved position, or answers "gone", without moving, if that position no longer exists. Rejects with CaptureFailure. */
-  returnToPosition(cameraKey: string, positionId: number): Promise<"returned" | "gone">;
+  /**
+   * Gets the camera ready for a frame: stops it following what it detects, then turns it to a saved position, or answers "gone",
+   * without moving, if that position no longer exists. Tracking stays off until resumeTracking, and the connection stays open for
+   * the frame that follows, so the next openLiveSession or resumeTracking has to come. Rejects with CaptureFailure.
+   */
+  prepareFrame(cameraKey: string, positionId: number): Promise<"ready" | "gone">;
+  /** Lets the camera follow what it detects again. Rejects with CaptureFailure. */
+  resumeTracking(cameraKey: string): Promise<void>;
   /** Deletes a saved position, if it's still there. Rejects with CaptureFailure. */
   forgetPosition(cameraKey: string, positionId: number): Promise<void>;
   /** Connections to the camera that opened outside an attempt. Each one wakes it. */

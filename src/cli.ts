@@ -34,7 +34,7 @@ Commands:
   capture          Take one manual frame now
   status           Show service status (--json for the full report)
   calibration      Battery against capture load, hour by hour (--hours <n>, default 24)
-  framing          Keep the camera on target: "framing set" saves where it points now, "framing off" stops
+  framing          Keep frames on target: "framing set" saves where the camera points now, and every slot goes back to it. "framing off" stops
   pause            Stop new captures until resumed
   resume           Clear an operator pause (--battery-checked also overrides a low-battery pause)
   render           Build a video: --from YYYY-MM-DD --to YYYY-MM-DD [--output <file>] [--fps <n>]
@@ -319,7 +319,7 @@ async function commandFraming(paths: Paths, args: string[]): Promise<number> {
   const result = action === "set" ? await service.setFramingPosition(terminationSignal()) : await service.forgetFramingPosition();
   state.close();
   if (result instanceof CaptureFailure) throw result;
-  log(action === "set" ? `saved this view in slot ${String(result)}. From the next slot on, frames are compared with it.` : "stopped watching the framing, and removed the saved position");
+  log(action === "set" ? `saved this view in slot ${String(result)}. From the next slot on, the camera goes back to it before each frame.` : "stopped watching the framing, and removed the saved position");
   return 0;
 }
 

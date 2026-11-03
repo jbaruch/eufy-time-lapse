@@ -362,7 +362,14 @@ describe("CaptureService", () => {
       const h = await harness({ compareFrames: compare, config, startMs: BEFORE_FIRST_SLOT });
       const saved = await h.service.setFramingPosition(h.signal);
       assert.equal(typeof saved, "number", "the position saved");
+      // The frame that defined the position isn't what these tests are about.
+      h.adapter.steps.length = 0;
       return { ...h, calls };
+    }
+
+    /** Compares and flags, but leaves the camera alone, for tests of the verdicts themselves. */
+    function watching(script: FrameComparison[], base = serviceConfig()): Promise<Harness & { calls: Array<[string, string]> }> {
+      return guarded(script, { ...base, framing: { ...base.framing, reset_before_frame: false } });
     }
 
     const checks = (h: Harness): Array<{ status: string; dx: number | null; dy: number | null }> => {
@@ -379,7 +386,8 @@ describe("CaptureService", () => {
       await runAt(h, [0, 5]);
       assert.deepEqual(calls, []);
       assert.deepEqual(checks(h), []);
-      assert.deepEqual(h.adapter.positionReturns, []);
+      assert.deepEqual(h.adapter.frameResets, []);
+      assert.equal(h.adapter.trackingResumes, 0);
       h.state.close();
     });
 
@@ -390,6 +398,14 @@ describe("CaptureService", () => {
       assert.deepEqual(h.adapter.savedPositions, [3]);
       assert.equal(h.state.getFlag("framing_position_id"), "3");
       assert.equal(h.state.latestFramingCheck()?.status, "on_target");
+      h.state.close();
+    });
+
+    it("doesn't move the camera to take the frame that defines the position", async () => {
+      const { compare } = scripted();
+      const h = await harness({ compareFrames: compare });
+      await h.service.setFramingPosition(h.signal);
+      assert.deepEqual(h.adapter.frameResets, []);
       h.state.close();
     });
 
@@ -408,12 +424,12 @@ describe("CaptureService", () => {
       assert.equal(h.state.getFlag("framing_position_id"), undefined);
       await runAt(h, [0, 5]);
       assert.deepEqual(h.calls, []);
-      assert.deepEqual(h.adapter.positionReturns, []);
+      assert.deepEqual(h.adapter.frameResets, []);
       h.state.close();
     });
 
     it("compares each frame with the last good one, and never with an off-target one", async () => {
-      const h = await guarded([steady, panned, steady]);
+      const h = await watching([steady, panned, steady]);
       await runAt(h, [0, 5, 10]);
       const name = (path: string): string => path.split("/").slice(-2, -1)[0] ?? "";
       const [first, second, third] = h.calls as [[string, string], [string, string], [string, string]];
@@ -434,55 +450,161 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
-    it("records steady frames and leaves the camera alone", async () => {
+    it("sends the camera to its position before each frame, and lets it track again after", async () => {
       const h = await guarded([steady, steady]);
       await runAt(h, [0, 5]);
+      assert.deepEqual(h.adapter.steps, ["reset 3", "capture", "resume", "reset 3", "capture", "resume"]);
       assert.deepEqual(checks(h).map((check) => check.status), ["on_target", "on_target"]);
-      assert.deepEqual(h.adapter.positionReturns, []);
+      assert.deepEqual(about(h), []);
+      assert.equal(h.state.getFlag("tracking_paused_at"), undefined);
+      h.state.close();
+    });
+
+    it("goes back and takes the frame again when it's off target", async () => {
+      const h = await guarded([panned, steady]);
+      await runAt(h, [0]);
+      assert.deepEqual(h.adapter.steps, ["reset 3", "capture", "reset 3", "capture", "resume"]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["on_target"], "the frame kept is the one that came out right");
+      assert.equal(h.state.latestCapture()?.slot_id !== null, true);
+      assert.equal(h.state.getSlot(`${h.state.latestCapture()?.slot_id}`)?.state, "captured");
+      h.state.close();
+    });
+
+    it("keeps the last frame, flagged, when every try came out off target", async () => {
+      const h = await guarded([panned, panned, panned]);
+      await runAt(h, [0]);
+      assert.deepEqual(h.adapter.steps, ["reset 3", "capture", "reset 3", "capture", "reset 3", "capture", "resume"]);
+      assert.deepEqual(checks(h), [{ status: "off_target", dx: 400, dy: -16 }]);
+      assert.equal(h.state.getSlot(`${h.state.latestCapture()?.slot_id}`)?.state, "captured");
+      h.state.close();
+    });
+
+    it("judges each kept frame once, and doesn't compare it again after publishing", async () => {
+      const h = await guarded([steady]);
+      await runAt(h, [0]);
+      assert.equal(h.calls.length, 1);
+      h.state.close();
+    });
+
+    it("treats a far pan with nothing to measure as off target", async () => {
+      const h = await guarded([farAway, farAway, farAway]);
+      await runAt(h, [0]);
+      assert.deepEqual(checks(h), [{ status: "off_target", dx: null, dy: null }]);
+      assert.equal(h.adapter.frameResets.length, 3);
+      h.state.close();
+    });
+
+    it("doesn't take a frame again because it's unsure", async () => {
+      const h = await guarded([murky]);
+      h.adapter.setFrameReset(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+      });
+      await runAt(h, [0]);
+      assert.deepEqual(h.adapter.steps, ["reset 3", "reset 3", "capture", "resume"]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["unsure"]);
       assert.deepEqual(about(h), []);
       h.state.close();
     });
 
-    it("flags the first off-target frame, how far it moved, and doesn't move yet", async () => {
-      const h = await guarded([panned]);
+    it("takes the reset's word when the comparison can't say, so the next frame has one to compare with", async () => {
+      const h = await guarded([murky, steady]);
+      await runAt(h, [0]);
+      const first = h.state.latestCapture()?.capture_id ?? "none";
+      await runAt(h, [5]);
+      assert.deepEqual(h.adapter.steps, ["reset 3", "capture", "resume", "reset 3", "capture", "resume"]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["on_target", "on_target"]);
+      const [reference] = h.calls.at(-1) as [string, string];
+      assert.ok(reference.includes(first), "the second frame is compared with the first");
+      h.state.close();
+    });
+
+    it("counts a frame the reset vouches for as on the saved position", async () => {
+      const h = await guarded([murky]);
+      await runAt(h, [0]);
+      const check = h.state.latestFramingCheck();
+      assert.deepEqual([check?.offset_dx, check?.offset_dy], [0, 0]);
+      assert.match(check?.detail ?? "", /went to its saved position/);
+      h.state.close();
+    });
+
+    it("still trusts the comparison over the reset when it can say", async () => {
+      const h = await guarded([panned, panned, panned]);
       await runAt(h, [0]);
       assert.deepEqual(checks(h), [{ status: "off_target", dx: 400, dy: -16 }]);
-      assert.deepEqual(h.adapter.positionReturns, []);
       h.state.close();
     });
 
-    it("returns on the second off-target slot in a row, and says nothing, because that's it working", async () => {
-      const h = await guarded([panned, panned, steady]);
-      await runAt(h, [0, 5, 10]);
-      assert.deepEqual(h.adapter.positionReturns, [3]);
+    it("doesn't take the word of a reset that found the position gone", async () => {
+      const h = await guarded([murky]);
+      h.adapter.setFrameReset(() => "gone");
+      await runAt(h, [0]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["unsure"]);
+      h.state.close();
+    });
+
+    it("doesn't carry one try's reset over to a later try whose reset failed", async () => {
+      const h = await guarded([panned, murky]);
+      let resets = 0;
+      h.adapter.setFrameReset(() => {
+        resets += 1;
+        if (resets > 1) throw new CaptureFailure("camera_unreachable", "position", "no connection");
+        return "ready";
+      });
+      await runAt(h, [0]);
+      assert.deepEqual(checks(h).map((check) => check.status), ["unsure"]);
+      h.state.close();
+    });
+
+    it("flags an off-target frame when only watching, and says how far it moved", async () => {
+      const h = await watching([panned]);
+      await runAt(h, [0]);
+      assert.deepEqual(checks(h), [{ status: "off_target", dx: 400, dy: -16 }]);
+      h.state.close();
+    });
+
+    it("alerts once slots in a row come out off target, and clears when one is on target again", async () => {
+      const h = await guarded([panned, panned, panned, panned, panned, panned, steady]);
+      await runAt(h, [0]);
       assert.deepEqual(about(h), []);
+      await runAt(h, [5]);
+      assert.equal(about(h).length, 1);
+      assert.match(about(h)[0] ?? "", /framing set/);
+      await runAt(h, [10]);
+      assert.match(about(h).at(-1) ?? "", /recovered/);
       h.state.close();
-      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"), { readOnly: true });
-      assert.equal((raw.prepare("SELECT COUNT(*) AS count FROM events WHERE kind = 'framing_returned'").get() as { count: number }).count, 1);
-      raw.close();
     });
 
-    it("counts a far pan with nothing to measure the same way", async () => {
-      const h = await guarded([farAway, farAway]);
+    it("alerts after the configured number of slots", async () => {
+      const config = serviceConfig();
+      config.framing = { ...config.framing, alert_after_off_target_slots: 3 };
+      const h = await watching([panned, panned, panned], config);
       await runAt(h, [0, 5]);
-      assert.deepEqual(checks(h)[0], { status: "off_target", dx: null, dy: null });
-      assert.deepEqual(h.adapter.positionReturns, [3]);
+      assert.deepEqual(about(h), []);
+      await runAt(h, [10]);
+      assert.equal(about(h).length, 1);
       h.state.close();
     });
 
     it("gives a person who looks away and back the benefit of it", async () => {
-      const h = await guarded([panned, steady, panned]);
+      const h = await watching([panned, steady, panned]);
       await runAt(h, [0, 5, 10]);
-      assert.deepEqual(h.adapter.positionReturns, []);
+      assert.deepEqual(about(h), []);
+      h.state.close();
+    });
+
+    it("doesn't let unsure frames between them reset the count", async () => {
+      const h = await watching([panned, murky, panned]);
+      await runAt(h, [0, 5, 10]);
+      assert.equal(about(h).length, 1);
       h.state.close();
     });
 
     it("adds up small moves until they're off target, and acts on the total", async () => {
-      const nudged: FrameComparison = { ...steady, dx: 24, dy: 0, matchingInPlace: 6 };
-      const h = await guarded([nudged, nudged, nudged]);
+      const nudged: FrameComparison = { ...steady, dx: 48, dy: 0, matchingInPlace: 6 };
+      const h = await watching([nudged, nudged, nudged]);
       await runAt(h, [0, 5, 10]);
       assert.deepEqual(checks(h).map((check) => check.status), ["on_target", "off_target", "off_target"]);
-      assert.deepEqual(h.adapter.positionReturns, [3]);
+      assert.equal(about(h).length, 1);
       h.state.close();
     });
 
@@ -507,46 +629,10 @@ describe("CaptureService", () => {
     });
 
     it("keeps no distance for a frame it couldn't measure", async () => {
-      const h = await guarded([murky]);
+      const h = await watching([murky]);
       await runAt(h, [0]);
       assert.equal(h.state.latestFramingCheck()?.offset_dx, null);
       assert.equal(h.state.latestFramingCheck()?.offset_dy, null);
-      h.state.close();
-    });
-
-    it("never moves on unsure, however long that goes on", async () => {
-      const h = await guarded([murky, murky, murky, murky]);
-      await runAt(h, [0, 5, 10, 15]);
-      assert.deepEqual(checks(h).map((check) => check.status), ["unsure", "unsure", "unsure", "unsure"]);
-      assert.deepEqual(h.adapter.positionReturns, []);
-      assert.deepEqual(about(h), []);
-      h.state.close();
-    });
-
-    it("doesn't move on unsure even after off-target frames, once the wait between returns is over", async () => {
-      const h = await guarded([panned, panned, ...Array.from({ length: 8 }, () => murky)]);
-      await runAt(h, [0, 5]);
-      assert.deepEqual(h.adapter.positionReturns, [3]);
-      await runAt(h, [10, 15, 20, 25, 30, 35, 40, 45]);
-      assert.deepEqual(h.adapter.positionReturns, [3], "45 minutes of unsure, past the 30-minute wait");
-      h.state.close();
-    });
-
-    it("doesn't let unsure frames between them reset the count", async () => {
-      const h = await guarded([panned, murky, panned]);
-      await runAt(h, [0, 5, 10]);
-      assert.deepEqual(h.adapter.positionReturns, [3]);
-      h.state.close();
-    });
-
-    it("waits the configured number of slots", async () => {
-      const config = serviceConfig();
-      config.framing = { ...config.framing, return_after_off_target_slots: 3 };
-      const h = await guarded([panned, panned, panned], config);
-      await runAt(h, [0, 5]);
-      assert.deepEqual(h.adapter.positionReturns, []);
-      await runAt(h, [10]);
-      assert.deepEqual(h.adapter.positionReturns, [3]);
       h.state.close();
     });
 
@@ -559,96 +645,248 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
-    it("only watches when returning is turned off: it flags, but won't move or alert", async () => {
-      const config = serviceConfig();
-      config.framing = { ...config.framing, return_enabled: false };
-      const h = await guarded([panned, panned, panned, panned], config);
+    it("only watches when the reset is turned off: it flags and alerts, but won't move the camera or take a frame again", async () => {
+      const h = await watching([panned, panned, panned, panned]);
       await runAt(h, [0, 5, 10, 15]);
       assert.equal(checks(h).filter((check) => check.status === "off_target").length, 4);
-      assert.deepEqual(h.adapter.positionReturns, []);
-      assert.deepEqual(about(h), []);
-      h.state.close();
-    });
-
-    it("alerts if going back didn't fix it, and clears when it's on target again", async () => {
-      const h = await guarded([panned, panned, panned, steady]);
-      await runAt(h, [0, 5]);
-      assert.deepEqual(about(h), []);
-      await runAt(h, [10]);
+      assert.deepEqual(h.adapter.steps, ["capture", "capture", "capture", "capture"]);
       assert.equal(about(h).length, 1);
-      assert.match(about(h)[0] ?? "", /framing set/);
-      await runAt(h, [15]);
-      assert.match(about(h).at(-1) ?? "", /recovered/);
       h.state.close();
     });
 
-    it("leaves 30 minutes between returns", async () => {
-      const h = await guarded(Array.from({ length: 8 }, () => panned));
-      await runAt(h, [0, 5, 10, 15, 20, 25, 30]);
-      assert.deepEqual(h.adapter.positionReturns, [3], "at 5 minutes, and not yet at 30");
-      await runAt(h, [35]);
-      assert.deepEqual(h.adapter.positionReturns, [3, 3]);
-      h.state.close();
-    });
-
-    it("stops at 6 returns in a day, whatever the frames say", async () => {
-      const h = await guarded(Array.from({ length: 100 }, () => panned));
-      const minutes = Array.from({ length: 100 }, (_, slot) => slot * 5).filter((minute) => minute < 8 * 60);
-      await runAt(h, minutes);
-      assert.equal(h.adapter.positionReturns.length, 6);
-      h.state.close();
-    });
-
-    it("says what to do when the saved position has been deleted, and doesn't count that as a return", async () => {
-      const h = await guarded([panned, panned]);
-      h.adapter.setPositionReturn(() => "gone");
-      await runAt(h, [0, 5]);
+    it("says what to do when the saved position has been deleted, and still takes the frame and resumes", async () => {
+      const h = await guarded([steady]);
+      h.adapter.setFrameReset(() => "gone");
+      await runAt(h, [0]);
       assert.match(h.notices.find((notice) => /no longer exists/.test(notice)) ?? "", /framing set/);
+      assert.deepEqual(h.adapter.steps, ["reset 3", "capture", "resume"]);
+      assert.equal(h.state.getSlot(`${h.state.latestCapture()?.slot_id}`)?.state, "captured");
       h.state.close();
-      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"), { readOnly: true });
-      assert.equal((raw.prepare("SELECT COUNT(*) AS count FROM events WHERE kind = 'framing_returned'").get() as { count: number }).count, 0);
-      raw.close();
     });
 
     it("clears that alert once a new position is saved", async () => {
-      const h = await guarded([panned, panned]);
-      h.adapter.setPositionReturn(() => "gone");
-      await runAt(h, [0, 5]);
+      const h = await guarded([steady]);
+      h.adapter.setFrameReset(() => "gone");
+      await runAt(h, [0]);
       await h.service.setFramingPosition(h.signal);
       assert.equal(h.state.getAlert("framing_position_gone"), undefined);
       h.state.close();
     });
 
-    it("keeps the frame when the camera can't be turned, and tries again after the wait", async () => {
-      const h = await guarded(Array.from({ length: 10 }, () => panned));
-      h.adapter.setPositionReturn(() => {
-        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+    const trackingAlerts = (h: Harness): string[] => h.notices.filter((notice) => /AI tracking/.test(notice));
+
+    const events = (h: Harness, kind: string): number => {
+      const raw = new DatabaseSync(join(h.dataDir, "state.sqlite"), { readOnly: true });
+      const { count } = raw.prepare("SELECT COUNT(*) AS count FROM events WHERE kind = ?").get(kind) as { count: number };
+      raw.close();
+      return count;
+    };
+
+    it("tries the reset again when it fails", async () => {
+      const h = await guarded([steady]);
+      let failures = 1;
+      h.adapter.setFrameReset(() => {
+        if (failures-- > 0) throw new CaptureFailure("camera_unreachable", "position", "no connection");
+        return "ready";
       });
-      await runAt(h, [0, 5]);
-      assert.equal(h.state.getSlot(`${h.state.latestCapture()?.slot_id}`)?.state, "captured");
-      assert.equal(h.adapter.positionReturns.length, 1);
-      await runAt(h, [10, 15]);
-      assert.equal(h.adapter.positionReturns.length, 1);
-      await runAt(h, [35]);
-      assert.equal(h.adapter.positionReturns.length, 2);
+      await runAt(h, [0]);
+      assert.deepEqual(h.adapter.steps, ["reset 3", "reset 3", "capture", "resume"]);
+      assert.equal(events(h, "framing_reset_failed"), 1);
       h.state.close();
     });
 
-    it("lets a bug in turning the camera through", async () => {
-      const h = await guarded([panned, panned]);
-      h.adapter.setPositionReturn(() => {
-        throw new TypeError("not a function");
+    it("still takes the frame when the reset keeps failing, because the camera is usually where it belongs", async () => {
+      const h = await guarded([steady]);
+      h.adapter.setFrameReset(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
       });
       await runAt(h, [0]);
-      h.clock.ms = AT_0800 + 5 * MINUTE;
-      await assert.rejects(async () => {
-        while ((await h.service.tick(h.signal)) === 0);
-      }, TypeError);
+      assert.deepEqual(h.adapter.steps, ["reset 3", "reset 3", "capture", "resume"]);
+      assert.equal(events(h, "framing_reset_failed"), 2);
+      assert.equal(h.state.getSlot(`${h.state.latestCapture()?.slot_id}`)?.state, "captured");
       h.state.close();
     });
+
+    it("lets a bug in the reset through", async () => {
+      const h = await guarded([steady]);
+      h.adapter.setFrameReset(() => {
+        throw new TypeError("not a function");
+      });
+      await assert.rejects(runAt(h, [0]), TypeError);
+      h.state.close();
+    });
+
+    it("keeps time for turning tracking back on when it decides on another try", async () => {
+      let h: Harness | undefined;
+      const { compare } = scripted();
+      const slow = async (): Promise<LiveSession> => {
+        if (h !== undefined) h.clock.ms += 40_000;
+        return await hangUp();
+      };
+      h = await harness({ open: slow, compareFrames: compare, startMs: BEFORE_FIRST_SLOT });
+      h.state.setFlag("first_started_at", new Date(BEFORE_FIRST_SLOT).toISOString());
+      h.state.setFlag("framing_position_id", "3");
+      // Another try needs 100 s after the first's 40. That fits in the 170 s left, but not with 55 s kept back for tracking.
+      h.clock.ms = AT_0800 + (DEFAULT_SERVICE_CONFIG.capture.slot_deadline_seconds - 170) * 1000;
+      await h.service.tick(h.signal);
+      assert.equal(h.adapter.opens, 1);
+      h.state.close();
+    });
+
+    it("goes straight to the frame when a late start leaves no time for a reset", async () => {
+      const h = await guarded([steady]);
+      h.state.setFlag("first_started_at", new Date(BEFORE_FIRST_SLOT).toISOString());
+      await runAt(h, [4]);
+      assert.deepEqual(h.adapter.frameResets, []);
+      assert.deepEqual([h.state.getSlot(SLOT_0800)?.state, h.state.getSlot(SLOT_0800)?.reason], ["captured", null]);
+      h.state.close();
+    });
+
+    it("keeps the frame when tracking can't be turned back on, and doesn't alert over a failure that clears itself", async () => {
+      const h = await guarded([steady]);
+      h.adapter.setTrackingResume(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+      });
+      await runAt(h, [0]);
+      assert.equal(h.state.getSlot(`${h.state.latestCapture()?.slot_id}`)?.state, "captured");
+      assert.notEqual(h.state.getFlag("tracking_paused_at"), undefined);
+      assert.equal(h.adapter.trackingResumes, 2, "at the end of the slot, then at the next idle wake");
+      assert.deepEqual(trackingAlerts(h), []);
+      h.adapter.setTrackingResume(() => {});
+      h.clock.ms += 6 * MINUTE;
+      await h.service.tick(h.signal);
+      assert.equal(h.state.getFlag("tracking_paused_at"), undefined);
+      assert.deepEqual(trackingAlerts(h), [], "and nothing to say it recovered either");
+      h.state.close();
+    });
+
+    it("alerts when tracking stays off across slots, counting from when it first went off", async () => {
+      const h = await guarded([]);
+      h.adapter.setTrackingResume(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+      });
+      for (const minute of [0, 5, 10, 15]) {
+        await runAt(h, [minute]);
+        // The idle wake between slots, where tracking is tried again and the alert comes from.
+        h.clock.ms += 2.5 * MINUTE;
+        await h.service.tick(h.signal);
+      }
+      assert.ok(Date.parse(h.state.getFlag("tracking_paused_at") ?? "") < AT_0800 + MINUTE, "still the first slot's time");
+      assert.equal(trackingAlerts(h).length, 1);
+      h.state.close();
+    });
+
+    it("doesn't count tracking as off for a slot too late to touch it", async () => {
+      const h = await guarded([]);
+      h.adapter.setTrackingResume(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+      });
+      // 200 s into the slot: time for the frame, but not for going to the position and back.
+      await runAt(h, [4, 5 + 200 / 60]);
+      assert.equal(h.adapter.steps.filter((step) => step === "capture").length, 1, "the frame is still taken");
+      assert.deepEqual(h.adapter.frameResets, [], "no time to reset");
+      assert.equal(h.state.getFlag("tracking_paused_at"), undefined);
+      h.state.close();
+    });
+
+    it("alerts once tracking has been off for 15 minutes, and says so when it's back", async () => {
+      const h = await harness({ startMs: AT_0800 - 40 * MINUTE });
+      h.adapter.setTrackingResume(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+      });
+      h.state.setFlag("tracking_paused_at", new Date(h.clock.ms - 14 * MINUTE).toISOString());
+      await h.service.tick(h.signal);
+      assert.deepEqual(trackingAlerts(h), [], "14 minutes isn't long enough");
+      h.clock.ms += 6 * MINUTE;
+      await h.service.tick(h.signal);
+      assert.equal(trackingAlerts(h).length, 1);
+      assert.match(trackingAlerts(h)[0] ?? "", /keeps trying/);
+      h.adapter.setTrackingResume(() => {});
+      h.clock.ms += 6 * MINUTE;
+      await h.service.tick(h.signal);
+      assert.match(trackingAlerts(h).at(-1) ?? "", /recovered/);
+      h.state.close();
+    });
+
+    it("leaves 5 minutes between idle tries at turning tracking back on, then clears up when one works", async () => {
+      const h = await guarded([steady]);
+      h.adapter.setTrackingResume(() => {
+        throw new CaptureFailure("camera_unreachable", "position", "no connection");
+      });
+      await runAt(h, [0]);
+      const tries = h.adapter.trackingResumes;
+      h.clock.ms += 4 * MINUTE;
+      await h.service.tick(h.signal);
+      assert.equal(h.adapter.trackingResumes, tries, "still inside the wait");
+      h.adapter.setTrackingResume(() => {});
+      h.clock.ms += 2 * MINUTE;
+      await h.service.tick(h.signal);
+      await h.service.tick(h.signal);
+      assert.equal(h.state.getFlag("tracking_paused_at"), undefined);
+      h.state.close();
+    });
+
+    it("turns tracking back on after a process died before it could, without taking a frame", async () => {
+      const h = await harness({ startMs: AT_0800 - 2 * MINUTE });
+      h.state.setFlag("tracking_paused_at", new Date(AT_0800 - 3 * MINUTE).toISOString());
+      await h.service.tick(h.signal);
+      assert.equal(h.adapter.trackingResumes, 1);
+      assert.equal(h.state.getFlag("tracking_paused_at"), undefined);
+      assert.deepEqual(h.adapter.steps, ["resume"]);
+      h.state.close();
+    });
+
+    it("leaves tracking to the slot that's about to start, rather than hold the camera", async () => {
+      const h = await harness({ startMs: AT_0800 - 30_000 });
+      h.state.setFlag("tracking_paused_at", new Date(AT_0800 - 3 * MINUTE).toISOString());
+      await h.service.tick(h.signal);
+      assert.equal(h.adapter.trackingResumes, 0);
+      h.state.close();
+    });
+
+    it("waits and alerts, without falling over, when the camera lock is held at an idle wake", async () => {
+      const h = await harness({ startMs: AT_0800 - 2 * MINUTE });
+      h.state.setFlag("tracking_paused_at", new Date(AT_0800 - 20 * MINUTE).toISOString());
+      await withCameraLock(join(h.dataDir, "camera-lock.sqlite"), async () => {
+        await h.service.tick(h.signal);
+      });
+      assert.equal(h.adapter.trackingResumes, 0);
+      assert.notEqual(h.state.getFlag("tracking_paused_at"), undefined);
+      assert.equal(trackingAlerts(h).length, 1);
+      h.state.close();
+    });
+
+    it("lets a bug in turning tracking back on through", async () => {
+      const h = await guarded([steady]);
+      h.adapter.setTrackingResume(() => {
+        throw new TypeError("not a function");
+      });
+      await assert.rejects(runAt(h, [0]), TypeError);
+      h.state.close();
+    });
+
+    it("doesn't turn tracking back on over a connection that may still be closing, and leaves it to the idle wake", async () => {
+      const { compare } = scripted(steady);
+      const h = await harness({ compareFrames: compare, startMs: AT_0800, teardown: async () => ({ status: "timeout", detail: "still closing" }) });
+      h.state.setFlag("framing_position_id", "3");
+      await h.service.tick(h.signal);
+      assert.deepEqual(h.adapter.steps, ["reset 3", "capture"]);
+      assert.notEqual(h.state.getFlag("tracking_paused_at"), undefined);
+      await h.service.tick(h.signal);
+      assert.deepEqual(h.adapter.steps, ["reset 3", "capture", "resume"]);
+      assert.equal(h.state.getFlag("tracking_paused_at"), undefined);
+      h.state.close();
+    });
+
+    /** The comparison's own verdict, with no reset to vouch for the frame. */
+    const watchOnly = (): ServiceConfig => {
+      const base = serviceConfig();
+      return { ...base, framing: { ...base.framing, reset_before_frame: false } };
+    };
 
     it("calls a frame it can't read unsure, and keeps the frame", async () => {
       const unreadable = await harness({
+        config: watchOnly(),
         startMs: BEFORE_FIRST_SLOT,
         compareFrames: async () => {
           throw new CaptureFailure("decode_failed", "decode", "FFmpeg can't read it");
@@ -682,7 +920,7 @@ describe("CaptureService", () => {
     });
 
     it("calls a stored frame that's gone unsure, using the real comparison", async () => {
-      const h = await harness({ startMs: BEFORE_FIRST_SLOT });
+      const h = await harness({ config: watchOnly(), startMs: BEFORE_FIRST_SLOT });
       await h.service.setFramingPosition(h.signal);
       const reference = h.state.framingReferences("2000-01-01T00:00:00.000Z", "")[0];
       await rm(join(h.dataDir, reference?.relative_dir ?? "missing", "frame.jpg"));
@@ -691,18 +929,8 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
-    it("counts every try toward the day's limit, even one that can't get through", async () => {
-      const h = await guarded(Array.from({ length: 100 }, () => panned));
-      h.adapter.setPositionReturn(() => {
-        throw new CaptureFailure("camera_unreachable", "position", "no connection");
-      });
-      await runAt(h, Array.from({ length: 100 }, (_, slot) => slot * 5).filter((minute) => minute < 8 * 60));
-      assert.equal(h.adapter.positionReturns.length, 6);
-      h.state.close();
-    });
-
     it("shows up in the status report", async () => {
-      const h = await guarded([panned]);
+      const h = await watching([panned]);
       assert.deepEqual(buildStatus(h.state, serviceConfig(), new Date(AT_0800), 50_000).framing.position_saved, true);
       await runAt(h, [0]);
       const { framing } = buildStatus(h.state, serviceConfig(), new Date(AT_0800 + MINUTE), 50_000);
@@ -1607,7 +1835,7 @@ describe("CaptureService", () => {
     it("counts from the scheduled time, so a late slot that can't finish doesn't touch the camera", async () => {
       const h = await harness();
       h.state.setFlag("first_started_at", new Date(AT_0800 - MINUTE).toISOString());
-      h.clock.ms = AT_0800 + 150_000;
+      h.clock.ms = AT_0800 + (DEFAULT_SERVICE_CONFIG.capture.slot_deadline_seconds - 30) * 1000;
       await h.service.tick(h.signal);
       assert.equal(h.adapter.opens, 0);
       assert.deepEqual([h.state.getSlot(SLOT_0800)?.state, h.state.getSlot(SLOT_0800)?.reason], ["missed", "deadline_passed"]);
@@ -1623,7 +1851,7 @@ describe("CaptureService", () => {
       };
       h = await harness({ open: slow });
       h.state.setFlag("first_started_at", new Date(AT_0800 - MINUTE).toISOString());
-      h.clock.ms = AT_0800 + 100_000;
+      h.clock.ms = AT_0800 + (DEFAULT_SERVICE_CONFIG.capture.slot_deadline_seconds - 80) * 1000;
       await h.service.tick(h.signal);
       assert.equal(h.adapter.opens, 1, "another try needs 45 s, and 40 s are left");
       h.state.close();

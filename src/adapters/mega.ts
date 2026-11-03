@@ -43,7 +43,7 @@ const SOCKET_GONE_CODES: ReadonlySet<string> = new Set(["ERR_SOCKET_DGRAM_NOT_RU
 /** Eufy's answer to a wrong password, from either login. */
 const WRONG_PASSWORD = 26006;
 /** What the pinned SDK says when it can't set up a session. test/mega-adapter.test.ts holds these wordings. */
-const SDK_CONNECT_FAILURE = /^P2P connect timeout for |^station .* is not in the device list$|^no P2P endpoint \(p2p_did\) for station /;
+const SDK_CONNECT_FAILURE = /^P2P connect timeout for |^P2P session .* is not connected$|^P2P session closed before connecting for station |^timeout waiting for p2p (control )?query |^station .* is not in the device list$|^no P2P endpoint \(p2p_did\) for station /;
 const TELEMETRY_NAME = /signal|rssi|band|cellular|network|lte|charging|solar|power|quality|batteryTemperature|batteryHealth/i;
 const TELEMETRY_EXCLUDED = /imei|iccid|imsi|mac|ssid|serial|ip_?addr/i;
 
@@ -55,7 +55,11 @@ const TRUST_LIST_TIMEOUT_MS = 20_000;
 const POSITION_TIMEOUT_MS = 90_000;
 const POSITION_CLOSE_TIMEOUT_MS = 10_000;
 /** A save showed on the camera's own list after 5 seconds, not after 2. The move is what was tested with a 6-second wait. */
-const POSITION_SETTLE: PositionSettle = { saveMs: 5_000, moveMs: 6_000 };
+const POSITION_SETTLE: PositionSettle = { saveMs: 5_000, moveMs: 6_000, settingMs: 2_000 };
+/** Getting ready for a frame, or finishing after one, has a slot to fit in. With POSITION_CLOSE_TIMEOUT_MS this is FRAME_STEP_SECONDS. */
+const FRAME_STEP_TIMEOUT_MS = 45_000;
+/** The camera's motion tracking setting, which the app calls AI tracking. It only took the JSON form, not the scalar one. */
+const MOTION_TRACKING_SETTING = 6016;
 
 /** The SDK's HTTP client, for the trusted-device calls it doesn't wrap. test/mega-adapter.test.ts checks these against the real class. */
 export interface SecurityApi {
@@ -93,6 +97,7 @@ export interface MegaLiveStream {
 export interface PositionSettle {
   saveMs: number;
   moveMs: number;
+  settingMs: number;
 }
 
 /**
@@ -126,6 +131,8 @@ export interface MegaClient {
   connectStation(serial: string, signal?: AbortSignal): Promise<void>;
   getP2pSessions(): Map<string, unknown>;
   deviceState(serial: string): { lastSeenMs?: number };
+  /** Private in the SDK's types. It's the only way to a setting it has no setter for, and the version is pinned. */
+  routeCommand(serial: string, command: { kind: "set-json"; param: number; data: { value: number }; channel: number }): Promise<void>;
   earnTrust(answer: (challenge: AuthChallenge) => Promise<AuthInput>): Promise<void>;
   isTrustedDevice(): Promise<boolean>;
   disconnect(): Promise<void>;
@@ -269,6 +276,8 @@ function isCameraError(error: unknown): error is Error {
     error instanceof CameraDisabledError ||
     error instanceof MegaApiError ||
     isNetworkError(error) ||
+    // The SDK sending on a session the camera already closed. The connection went away, as with a timeout.
+    (error instanceof Error && SOCKET_GONE_CODES.has((error as NodeJS.ErrnoException).code ?? "")) ||
     // The SDK rejects these as plain Errors, so their wording is all there is to go on. A bug propagates instead.
     (error instanceof Error && error.name === "Error" && SDK_CONNECT_FAILURE.test(error.message))
   );
@@ -526,7 +535,6 @@ export class MegaAdapter implements CameraAdapter {
 
   async openLiveSession(cameraKey: string, signal: AbortSignal): Promise<LiveSession> {
     this.attemptActive = true;
-    this.relayUsed = false;
     await this.restoreLogin();
 
     this.identify(cameraKey);
@@ -537,6 +545,8 @@ export class MegaAdapter implements CameraAdapter {
       throw new CaptureFailure("camera_unreachable", "stream_start", "The SDK exposes no live video path for this camera.");
     }
     const coldConnection = !this.client.getP2pSessions().has(device.stationSn);
+    // A connection left open for this frame keeps the path it got there by.
+    if (coldConnection) this.relayUsed = false;
 
     const startedAt = Date.now();
     try {
@@ -628,26 +638,31 @@ export class MegaAdapter implements CameraAdapter {
     return problems.length > 0 ? { status: "error", detail: problems.join("; ") } : { status: "ok", detail: null };
   }
 
-  /** Holds the connection open like an attempt does, so the sweep doesn't close it, and shuts it the same way afterwards. */
-  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>) => Promise<T>): Promise<T> {
+  /** Holds the connection open like an attempt does, so the sweep doesn't close it, and shuts it the same way afterwards, unless it's wanted next. */
+  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>) => Promise<T>, { timeoutMs = POSITION_TIMEOUT_MS, keepOpen = false }: { timeoutMs?: number; keepOpen?: boolean } = {}): Promise<T> {
     this.attemptActive = true;
     let deadline: NodeJS.Timeout | undefined;
+    let succeeded = false;
     try {
       await this.restoreLogin();
       const positions = (await this.deviceFor(cameraKey)).ptz?.()?.preset?.();
       const list = positions?.list?.bind(positions);
       if (positions === undefined || list === undefined) throw new CaptureFailure("camera_unreachable", "position", "The SDK offers no saved positions for this camera.");
       const expired = new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => reject(new CaptureFailure("camera_unreachable", "position", `The camera didn't finish with its saved positions within ${POSITION_TIMEOUT_MS / 1000} seconds.`)), POSITION_TIMEOUT_MS);
+        deadline = setTimeout(() => reject(new CaptureFailure("camera_unreachable", "position", `The camera didn't finish with its saved positions within ${timeoutMs / 1000} seconds.`)), timeoutMs);
       });
-      return await Promise.race([work(positions, list), expired]);
+      const result = await Promise.race([work(positions, list), expired]);
+      succeeded = true;
+      return result;
     } catch (error) {
       if (error instanceof CaptureFailure) throw error;
       throw await this.failureFrom(error, "position", new AbortController().signal);
     } finally {
       clearTimeout(deadline);
-      const closed = await this.teardown(cameraKey, POSITION_CLOSE_TIMEOUT_MS);
-      if (closed.status !== "ok") this.warn(`the camera connection may not have closed after using its saved positions: ${closed.detail ?? "no detail"}`);
+      if (!keepOpen || !succeeded) {
+        const closed = await this.teardown(cameraKey, POSITION_CLOSE_TIMEOUT_MS);
+        if (closed.status !== "ok") this.warn(`the camera connection may not have closed after using its saved positions: ${closed.detail ?? "no detail"}`);
+      }
     }
   }
 
@@ -664,15 +679,39 @@ export class MegaAdapter implements CameraAdapter {
     });
   }
 
-  async returnToPosition(cameraKey: string, positionId: number): Promise<"returned" | "gone"> {
-    return this.withPositions(cameraKey, async (positions, list) => {
-      // A position can be deleted in the app, and there's nothing to go to then.
-      if ((await list()).find((position) => position.id === positionId)?.raw.enable !== 1) return "gone";
-      await positions.preview(positionId);
-      // Closing the connection straight away could stop the camera on its way.
-      await delay(this.settle.moveMs);
-      return "returned";
-    });
+  private setMotionTracking(cameraKey: string, on: boolean): Promise<void> {
+    return this.client.routeCommand(cameraKey, { kind: "set-json", param: MOTION_TRACKING_SETTING, data: { value: on ? 1 : 0 }, channel: 0 });
+  }
+
+  async prepareFrame(cameraKey: string, positionId: number): Promise<"ready" | "gone"> {
+    this.relayUsed = false;
+    return this.withPositions(
+      cameraKey,
+      async (positions, list) => {
+        // First, so a frame taken without its position still can't be taken mid-chase.
+        await this.setMotionTracking(cameraKey, false);
+        // A position can be deleted in the app, and there's nothing to go to then.
+        if ((await list()).find((position) => position.id === positionId)?.raw.enable !== 1) return "gone";
+        await positions.preview(positionId);
+        // Closing the connection straight away could stop the camera on its way.
+        await delay(this.settle.moveMs);
+        return "ready";
+      },
+      // Left open for the frame. A new connection straight after closing this one came back at 720p, and ended within seconds.
+      { timeoutMs: FRAME_STEP_TIMEOUT_MS, keepOpen: true },
+    );
+  }
+
+  async resumeTracking(cameraKey: string): Promise<void> {
+    await this.withPositions(
+      cameraKey,
+      async () => {
+        await this.setMotionTracking(cameraKey, true);
+        // As with a move, closing the connection straight away could lose it.
+        await delay(this.settle.settingMs);
+      },
+      { timeoutMs: FRAME_STEP_TIMEOUT_MS },
+    );
   }
 
   async forgetPosition(cameraKey: string, positionId: number): Promise<void> {

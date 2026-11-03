@@ -12,6 +12,11 @@ export interface SlotOptions extends Omit<AcquireOptions, "outputDir"> {
   maxTries: number;
   retryDelayMs: number;
   slotDeadlineMs: number;
+  /** Runs before every try, retries included. Its time counts toward the deadline, so `beforeTryMs` says how long it can take. */
+  beforeTry?: () => Promise<void>;
+  beforeTryMs?: number;
+  /** Whether a frame points the wrong way, which makes it worth another try, however sharp it is. */
+  isOffTarget?: (record: AttemptRecord) => Promise<boolean>;
   log: (message: string) => void;
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
@@ -50,9 +55,13 @@ function rank(record: AttemptRecord): number {
   return record.status === "captured" ? pixels + Number.MAX_SAFE_INTEGER / 2 : pixels;
 }
 
-/** On a tie the later try wins: a clean retry beats the failure it followed. */
-export function chooseBest(tries: AttemptRecord[]): AttemptRecord {
-  return tries.reduce((best, record) => (rank(record) >= rank(best) ? record : best));
+/**
+ * On a tie the later try wins: a clean retry beats the failure it followed. A frame known to be off target loses to any
+ * other frame, however much sharper, since renders leave it out.
+ */
+export function chooseBest(tries: AttemptRecord[], offTarget: ReadonlySet<AttemptRecord> = new Set()): AttemptRecord {
+  const usable = (record: AttemptRecord): boolean => record.frame !== null && !offTarget.has(record);
+  return tries.reduce((best, record) => (usable(record) !== usable(best) ? (usable(record) ? record : best) : rank(record) >= rank(best) ? record : best));
 }
 
 /**
@@ -65,29 +74,33 @@ export async function captureSlot(options: SlotOptions): Promise<SlotResult> {
   const signal = options.signal ?? new AbortController().signal;
   const startedAt = now().getTime();
   const tries: AttemptRecord[] = [];
+  const offTargetTries = new Set<AttemptRecord>();
 
   for (let index = 0; index < options.maxTries; index += 1) {
+    await options.beforeTry?.();
     const outputDir = tryDirectory(options.slotDir, index);
     const record = await acquireFrame({ ...options, outputDir, signal, now });
     tries.push(record);
 
-    if (!shouldRetry(record) || index + 1 === options.maxTries || signal.aborted) break;
+    const offTarget = record.frame !== null && options.isOffTarget !== undefined && (await options.isOffTarget(record));
+    if (offTarget) offTargetTries.add(record);
+    if ((!shouldRetry(record) && !offTarget) || index + 1 === options.maxTries || signal.aborted) break;
     if (record.cleanup.status !== "ok") {
       options.log(`not retrying: the last try's connection may not have closed (${record.cleanup.status}), and another try would wake the camera on top of it`);
       break;
     }
 
-    const needed = options.retryDelayMs + options.acquisitionTimeoutMs + options.cleanupTimeoutMs;
+    const needed = options.retryDelayMs + (options.beforeTryMs ?? 0) + options.acquisitionTimeoutMs + options.cleanupTimeoutMs;
     if (now().getTime() - startedAt + needed > options.slotDeadlineMs) {
       options.log(`not retrying: another try wouldn't finish inside the ${options.slotDeadlineMs / 1000} s slot deadline`);
       break;
     }
-    options.log(`try ${index + 1} ended as ${record.failure?.reason ?? record.status}: retrying in ${options.retryDelayMs / 1000} s`);
+    options.log(`try ${index + 1} ended as ${offTarget ? "off target" : (record.failure?.reason ?? record.status)}: retrying in ${options.retryDelayMs / 1000} s`);
     await sleep(options.retryDelayMs, signal);
     if (signal.aborted) break;
   }
 
-  const chosen = chooseBest(tries);
+  const chosen = chooseBest(tries, offTargetTries);
   const [first] = tries;
   return {
     chosen,
