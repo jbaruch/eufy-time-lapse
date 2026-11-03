@@ -82,11 +82,14 @@ function openTunnel(route: TelegramRoute): Promise<Socket> {
 }
 
 /** Sends one message through the OneCLI gateway. Telegram's answer isn't quoted back, only its status. */
-export async function sendTelegram(route: TelegramRoute, text: string): Promise<void> {
+export async function sendTelegram(route: TelegramRoute, text: string, timeoutMs: number = TIMEOUT_MS): Promise<void> {
   const tunnel = await openTunnel(route);
   const body = JSON.stringify({ chat_id: route.chatId, text: text.slice(0, MAX_MESSAGE_LENGTH) });
+  let deadline: NodeJS.Timeout | undefined;
   await new Promise<void>((resolve, reject) => {
     const secured = tlsConnect({ socket: tunnel, servername: API_HOST, ca: route.ca });
+    // The whole exchange, handshake included. A gateway can open the tunnel and then stall, which nothing below would notice.
+    deadline = setTimeout(() => secured.destroy(new TelegramDeliveryError("Telegram didn't answer in time")), timeoutMs);
     const request = httpsRequest(
       {
         host: API_HOST,
@@ -109,5 +112,5 @@ export async function sendTelegram(route: TelegramRoute, text: string): Promise<
     request.once("timeout", () => request.destroy(new TelegramDeliveryError("Telegram didn't answer in time")));
     request.once("error", (error: NodeJS.ErrnoException) => reject(failure("talking to Telegram", error)));
     request.end(body);
-  });
+  }).finally(() => clearTimeout(deadline));
 }

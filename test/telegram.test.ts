@@ -28,6 +28,7 @@ describe("sendTelegram, through a stand-in gateway", () => {
   let tunnels: Array<{ target: string | undefined; authorization: string | undefined }>;
   let telegramStatus: number;
   let gatewayStatus: number;
+  let gatewayStalls: boolean;
 
   /** A certificate for Telegram's host name, so the real name checks run against a local server. */
   async function certificate(name: string): Promise<{ key: string; cert: string }> {
@@ -66,6 +67,12 @@ describe("sendTelegram, through a stand-in gateway", () => {
         client.end(`HTTP/1.1 ${gatewayStatus} Refused\r\n\r\n`);
         return;
       }
+      if (gatewayStalls) {
+        // Opens the tunnel, then never passes anything through, so the TLS handshake never finishes.
+        client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        client.on("error", () => client.destroy());
+        return;
+      }
       const upstream = netConnect(telegramPort, "127.0.0.1", () => {
         client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
         upstream.write(head);
@@ -92,6 +99,7 @@ describe("sendTelegram, through a stand-in gateway", () => {
     tunnels = [];
     telegramStatus = 200;
     gatewayStatus = 200;
+    gatewayStalls = false;
   });
 
   const route = (overrides: Partial<TelegramRoute> = {}): TelegramRoute => ({
@@ -142,6 +150,13 @@ describe("sendTelegram, through a stand-in gateway", () => {
 
   it("reports an unreachable gateway without quoting its URL, which holds the credential", async () => {
     await assert.rejects(sendTelegram(route({ proxyUrl: `http://${CREDENTIAL.user}:${CREDENTIAL.password}@127.0.0.1:1` }), "hello"), refusedWithout(CREDENTIAL.password, /reaching the gateway: ECONNREFUSED/));
+  });
+
+  it("gives up on a gateway that opens the tunnel and then never completes the handshake", async () => {
+    gatewayStalls = true;
+    // The handshake never finishes, so the deadline is what ends this, however long it's set to.
+    await assert.rejects(sendTelegram(route(), "hello", 200), refusedWithout(CREDENTIAL.password, /didn't answer in time/));
+    assert.deepEqual(received, []);
   });
 
   it("refuses to talk to anything but what the given certificates vouch for", async () => {
