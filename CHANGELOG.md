@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Turns AI tracking back on over the frame's own connection, before closing it, instead of connecting again afterwards. That's one camera wake per slot instead of two, and it avoids the reconnect the camera sometimes dropped, which left tracking off until the next try between slots.
+- Checks the framing of a frame it finishes after a crash, as it does any other. Before, such a frame skipped the check, so one shot off target went into renders unflagged.
 
 ## 0.1.0 — 2026-11-03
 

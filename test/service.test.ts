@@ -479,6 +479,32 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
+    it("checks a frame it finishes after a crash, and leaves it out of renders when it's off target", async () => {
+      const { compare, calls } = scripted(panned);
+      let dying = false;
+      const h = await harness({
+        compareFrames: compare,
+        startMs: BEFORE_FIRST_SLOT,
+        teardown: async () => {
+          if (dying) throw new RangeError("the process died here");
+          return { status: "ok", detail: null };
+        },
+      });
+      await h.service.setFramingPosition(h.signal);
+      dying = true;
+      h.clock.ms = AT_0800;
+      await assert.rejects(h.service.tick(h.signal), RangeError);
+      h.state.close();
+      const { service, state } = h.restart();
+      await service.reconcile();
+      const [capture] = state.allCaptures().filter((row) => row.kind === "scheduled");
+      assert.ok(capture !== undefined, "the frame was finished");
+      assert.equal(calls.length, 1, "and compared with the saved view");
+      assert.deepEqual(checks(h), [{ status: "off_target", dx: 400, dy: -16 }]);
+      assert.ok(state.offTargetCaptureIds(capture.local_date, capture.local_date).has(capture.capture_id));
+      state.close();
+    });
+
     it("judges each kept frame once, and doesn't compare it again after publishing", async () => {
       const h = await guarded([steady]);
       await runAt(h, [0]);

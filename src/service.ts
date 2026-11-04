@@ -340,6 +340,8 @@ export class CaptureService {
       this.state.setSlot(slot.slot_id, chosen.status === "captured" ? "captured" : "captured_degraded", { captureId, everyMinutes: slot.every_minutes });
       this.state.addEvent("capture_recovered", captureId);
     });
+    // As any frame is, or one shot off target would go into renders unflagged.
+    await this.checkFraming(captureId);
     this.options.log(`${slot.local_date} ${slot.local_time}: recovered the frame that was interrupted (${relativeDir})`);
     for (const attempt of recovered) await rm(join(this.options.dataDir, "work", attempt.record.attempt_id), { recursive: true, force: true });
     return true;
