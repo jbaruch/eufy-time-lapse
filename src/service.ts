@@ -318,7 +318,7 @@ export class CaptureService {
    */
   private async checkUncheckedFrames(): Promise<void> {
     const savedAt = this.state.getFlag("framing_position_saved_at");
-    if (savedAt === undefined || this.state.getFlag("framing_position_id") === undefined) return;
+    if (savedAt === undefined) return;
     const unchecked = this.state.uncheckedFramesSince(savedAt);
     for (const captureId of unchecked) {
       this.beat();

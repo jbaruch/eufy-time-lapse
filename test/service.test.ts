@@ -571,6 +571,17 @@ describe("CaptureService", () => {
       state.close();
     });
 
+    it("doesn't check a manual frame when it starts, since no manual frame is checked", async () => {
+      const h = await guarded([]);
+      h.clock.ms = AT_0800 - MINUTE / 2;
+      assert.ok(!((await h.service.captureManual(h.signal)) instanceof CaptureFailure));
+      h.state.close();
+      const { service, state } = h.restart();
+      await service.reconcile();
+      assert.deepEqual(h.calls, []);
+      state.close();
+    });
+
     it("judges each kept frame once, and doesn't compare it again after publishing", async () => {
       const h = await guarded([steady]);
       await runAt(h, [0]);
