@@ -482,6 +482,12 @@ export class State {
       .run(row.capture_id, row.checked_at, row.status, row.reference_capture_id, row.dx, row.dy, row.offset_dx, row.offset_dy, row.detail);
   }
 
+  /** Scheduled frames since the position was saved that have no verdict: a crash came between storing one and checking it. */
+  uncheckedFramesSince(positionSavedAt: string): string[] {
+    const rows = this.all<{ capture_id: string }>("SELECT c.capture_id FROM captures c WHERE c.kind = 'scheduled' AND c.frame_received_at > ? AND NOT EXISTS (SELECT 1 FROM framing_checks f WHERE f.capture_id = c.capture_id) ORDER BY c.frame_received_at", positionSavedAt);
+    return rows.map((row) => row.capture_id);
+  }
+
   latestFramingCheck(): FramingCheckRow | undefined {
     return this.one<FramingCheckRow>("SELECT * FROM framing_checks ORDER BY checked_at DESC, rowid DESC LIMIT 1");
   }

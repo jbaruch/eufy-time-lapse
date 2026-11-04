@@ -177,6 +177,7 @@ export class CaptureService {
     await this.adoptPublishedFrames();
     await this.repairSlotLinks();
     await this.recoverInterruptedSlots();
+    await this.checkUncheckedFrames();
     for (const slot of this.state.markInterruptedSlots()) {
       this.state.addEvent("slot_interrupted", slot.slot_id);
       this.options.log(`slot ${slot.local_date} ${slot.local_time} was interrupted by a restart; marked missed`);
@@ -311,6 +312,21 @@ export class CaptureService {
     await this.alerts.set("capture_unrecoverable", lost.length > 0, `${lost.length} tries that were interrupted couldn't be recovered, starting with ${lost[0] ?? ""}. They count as missed, and the log says why`);
   }
 
+  /**
+   * A frame is stored, then checked, so a crash between the two leaves one with no verdict, and an off-target one would go
+   * into renders. Checking needs only the stored frame, so it's done here for any frame still waiting.
+   */
+  private async checkUncheckedFrames(): Promise<void> {
+    const savedAt = this.state.getFlag("framing_position_saved_at");
+    if (savedAt === undefined) return;
+    const unchecked = this.state.uncheckedFramesSince(savedAt);
+    for (const captureId of unchecked) {
+      this.beat();
+      await this.checkFraming(captureId);
+    }
+    if (unchecked.length > 0) this.options.log(`checked the framing of ${unchecked.length} frame(s) a crash left unchecked`);
+  }
+
   /** Finishes one interrupted slot from what its tries left on disk, and answers whether that got it a frame. */
   private async recoverSlot(slot: SlotRow, lost: string[]): Promise<boolean> {
     // A record has to say which tier it ran at, and this slot never got as far as choosing.
@@ -340,6 +356,8 @@ export class CaptureService {
       this.state.setSlot(slot.slot_id, chosen.status === "captured" ? "captured" : "captured_degraded", { captureId, everyMinutes: slot.every_minutes });
       this.state.addEvent("capture_recovered", captureId);
     });
+    // As any frame is, or one shot off target would go into renders unflagged.
+    await this.checkFraming(captureId);
     this.options.log(`${slot.local_date} ${slot.local_time}: recovered the frame that was interrupted (${relativeDir})`);
     for (const attempt of recovered) await rm(join(this.options.dataDir, "work", attempt.record.attempt_id), { recursive: true, force: true });
     return true;
