@@ -479,8 +479,8 @@ describe("CaptureService", () => {
       h.state.close();
     });
 
-    it("checks a frame it finishes after a crash, and leaves it out of renders when it's off target", async () => {
-      const { compare, calls } = scripted(panned);
+    /** A position saved, then a slot that died in teardown: its frame is on disk and its slot still running. */
+    async function diedAfterTheFrame(compare: (reference: string, frame: string) => Promise<FrameComparison>): Promise<Harness> {
       let dying = false;
       const h = await harness({
         compareFrames: compare,
@@ -495,6 +495,12 @@ describe("CaptureService", () => {
       h.clock.ms = AT_0800;
       await assert.rejects(h.service.tick(h.signal), RangeError);
       h.state.close();
+      return h;
+    }
+
+    it("checks a frame it finishes after a crash, and leaves it out of renders when it's off target", async () => {
+      const { compare, calls } = scripted(panned);
+      const h = await diedAfterTheFrame(compare);
       const { service, state } = h.restart();
       await service.reconcile();
       const [capture] = state.allCaptures().filter((row) => row.kind === "scheduled");
@@ -502,6 +508,66 @@ describe("CaptureService", () => {
       assert.equal(calls.length, 1, "and compared with the saved view");
       assert.deepEqual(checks(h), [{ status: "off_target", dx: 400, dy: -16 }]);
       assert.ok(state.offTargetCaptureIds(capture.local_date, capture.local_date).has(capture.capture_id));
+      state.close();
+    });
+
+    it("checks a frame that a second crash left unchecked, at the start after", async () => {
+      let dies = true;
+      const h = await diedAfterTheFrame(async () => {
+        if (dies) throw new RangeError("the process died while checking");
+        return panned;
+      });
+      const first = h.restart();
+      await assert.rejects(first.service.reconcile(), RangeError);
+      assert.equal(first.state.getSlot(SLOT_0800)?.state, "captured", "the frame was stored before the check died");
+      first.state.close();
+      dies = false;
+      const { service, state } = h.restart();
+      await service.reconcile();
+      assert.deepEqual(checks(h), [{ status: "off_target", dx: 400, dy: -16 }]);
+      state.close();
+    });
+
+    it("checks a frame it keeps after losing the camera lock, without waiting for a restart", async (t) => {
+      t.mock.timers.enable({ apis: ["setInterval"] });
+      // The slot judges the frame, then finishing it after the lock is lost judges the same frame again.
+      const { compare } = scripted(panned, panned);
+      let losing = false;
+      let dataDir = "";
+      const h = await harness({
+        compareFrames: compare,
+        startMs: BEFORE_FIRST_SLOT,
+        teardown: async () => {
+          if (losing) {
+            await rm(join(dataDir, "camera-lock.sqlite"));
+            t.mock.timers.tick(5_000);
+          }
+          return { status: "ok", detail: null };
+        },
+      });
+      dataDir = h.dataDir;
+      await h.service.setFramingPosition(h.signal);
+      h.adapter.steps.length = 0;
+      losing = true;
+      h.clock.ms = AT_0800;
+      await h.service.tick(h.signal);
+      assert.equal(h.state.getSlot(SLOT_0800)?.state, "captured");
+      assert.deepEqual(h.adapter.steps, ["reset 3", "capture"], "no second try once the lock is gone, off target or not");
+      assert.deepEqual(checks(h), [{ status: "off_target", dx: 400, dy: -16 }]);
+      h.state.close();
+    });
+
+    it("doesn't check frames from before the position was saved when it starts", async () => {
+      const { compare, calls } = scripted();
+      const h = await harness({ compareFrames: compare });
+      await runAt(h, [0, 5]);
+      h.clock.ms = AT_0800 + 6 * MINUTE;
+      await h.service.setFramingPosition(h.signal);
+      h.state.close();
+      const { service, state } = h.restart();
+      await service.reconcile();
+      assert.deepEqual(calls, []);
+      assert.deepEqual(checks(h), []);
       state.close();
     });
 
