@@ -532,6 +532,242 @@ describe("MegaAdapter saved positions", () => {
     await adapter.shutdown();
   });
 
+  describe("when the reset runs out of time", () => {
+    /** Bounded, so a step that never comes fails the test instead of spinning the process forever. */
+    const untilTrue = async (done: () => boolean): Promise<void> => {
+      for (let turn = 0; !done(); turn += 1) {
+        if (turn === 1_000) throw new Error("the reset never got to the step this test waits for");
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+
+    it("says which step never finished, and what the ones before it took", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 3]);
+      let listed = false;
+      c.positions.list = () => {
+        listed = true;
+        return new Promise(() => {});
+      };
+      const { adapter, client } = withPositions(c.positions);
+      client.connect = async () => {
+        t.mock.timers.tick(4_000);
+        client.sessions.set(SERIAL, {});
+      };
+      const reset = assert.rejects(adapter.prepareFrame(SERIAL, 3), { message: "The camera didn't finish with its saved positions within 45 seconds: connecting (4.0 s), turning tracking off (0.0 s), reading its saved positions (41.0 s, unfinished). Trying again is safe, and the unfinished step says whether the connection or the camera was slow." });
+      await untilTrue(() => listed);
+      t.mock.timers.tick(41_000);
+      await reset;
+      await adapter.shutdown();
+    });
+
+    it("tells a connection that never came up from a camera that didn't answer", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 3]);
+      const { adapter, client } = withPositions(c.positions);
+      let connecting = false;
+      client.connect = () => {
+        connecting = true;
+        return new Promise(() => {});
+      };
+      const reset = assert.rejects(adapter.prepareFrame(SERIAL, 3), { message: "The camera didn't finish with its saved positions within 45 seconds: connecting (45.0 s, unfinished). Trying again is safe, and the unfinished step says whether the connection or the camera was slow." });
+      await untilTrue(() => connecting);
+      t.mock.timers.tick(45_000);
+      await reset;
+      assert.deepEqual(c.calls, [], "nothing was asked of a camera it never reached");
+      await adapter.shutdown();
+    });
+
+    it("leaves the steps out of the message for work that names none", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const { adapter, client } = withPositions(camera([0, 3]).positions);
+      let routed = false;
+      client.routeCommand = () => {
+        routed = true;
+        return new Promise(() => {});
+      };
+      const resume = assert.rejects(adapter.resumeTracking(SERIAL), { message: "The camera didn't finish with its saved positions within 45 seconds. Trying again is safe." });
+      await untilTrue(() => routed);
+      t.mock.timers.tick(45_000);
+      await resume;
+      await adapter.shutdown();
+    });
+
+    it("stops the connection at the deadline, and asks nothing of a camera it reaches late", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 3]);
+      const fatal: Error[] = [];
+      const { adapter, client } = withPositions(c.positions, (error) => fatal.push(error));
+      let comeUp: (() => void) | undefined;
+      let stopped = false;
+      client.connect = (signal) =>
+        new Promise((resolve) => {
+          signal?.addEventListener("abort", () => {
+            stopped = true;
+          });
+          comeUp = () => {
+            client.sessions.set(SERIAL, {});
+            resolve();
+          };
+        });
+      const reset = assert.rejects(adapter.prepareFrame(SERIAL, 3), /connecting \(45\.0 s, unfinished\)/);
+      await untilTrue(() => comeUp !== undefined);
+      t.mock.timers.tick(45_000);
+      await reset;
+      assert.equal(stopped, true, "the connection was told to stop");
+      // As an SDK that ignored the abort would.
+      comeUp?.();
+      for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(client.routed, [], "tracking left alone");
+      assert.deepEqual(c.calls, [], "no list, and no move");
+      assert.deepEqual(fatal, []);
+      await adapter.shutdown();
+    });
+
+    it("doesn't let a tracking-off answer that lands after its deadline undo what a retry did since", async (t) => {
+      const c = camera([0, 3]);
+      const { adapter, client } = withPositions(c.positions);
+      const log: string[] = [];
+      let lateOff: (() => void) | undefined;
+      const route = client.routeCommand.bind(client);
+      client.routeCommand = (serial, command) => {
+        if (lateOff === undefined) return new Promise((resolve) => (lateOff = () => resolve()));
+        client.sessions.set(SERIAL, {});
+        if (command.kind === "set-json") log.push(`tracking ${(command.data as { value: number }).value}`);
+        return route(serial, command);
+      };
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const first = assert.rejects(adapter.prepareFrame(SERIAL, 3), /turning tracking off \(45\.0 s, unfinished\)/);
+      await untilTrue(() => lateOff !== undefined);
+      t.mock.timers.tick(45_000);
+      await first;
+      t.mock.timers.reset();
+      // The retry: a reset, its frame, and the teardown that turns tracking back on.
+      await adapter.prepareFrame(SERIAL, 3);
+      await adapter.openLiveSession(SERIAL, new AbortController().signal);
+      await adapter.teardown(SERIAL, 5_000);
+      lateOff?.();
+      for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      log.length = 0;
+      // A frame with no reset before it, as a retry whose reset had no time takes.
+      await adapter.openLiveSession(SERIAL, new AbortController().signal);
+      assert.deepEqual(log, ["tracking 0"], "it still knows tracking was turned back on, so it turns it off for this frame");
+      await adapter.teardown(SERIAL, 5_000);
+      await adapter.shutdown();
+    });
+
+    /** A list that answers only when told to, with whatever the camera holds by then. */
+    function lateList(c: ReturnType<typeof camera>): { answer: () => void; asked: () => boolean } {
+      let resolveList: ((value: Slot[]) => void) | undefined;
+      c.positions.list = () =>
+        new Promise((resolve) => {
+          resolveList = resolve;
+        });
+      return { answer: () => resolveList?.(slots(c.used)), asked: () => resolveList !== undefined };
+    }
+
+    it("says trying again is safe for a deletion cut short, and doesn't delete on a list that answers late", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 3]);
+      const late = lateList(c);
+      const { adapter } = withPositions(c.positions);
+      const forget = assert.rejects(adapter.forgetPosition(SERIAL, 3), { message: "The camera didn't finish with its saved positions within 90 seconds: reading its saved positions (90.0 s, unfinished). Trying again is safe." });
+      await untilTrue(late.asked);
+      t.mock.timers.tick(90_000);
+      await forget;
+      late.answer();
+      for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(c.calls, [], "the position the caller was told is still there stays there");
+      await adapter.shutdown();
+    });
+
+    it("doesn't save on a list that answers late with a free slot", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 1, 2]);
+      const late = lateList(c);
+      const { adapter } = withPositions(c.positions);
+      const save = assert.rejects(adapter.savePosition(SERIAL), /reading its saved positions \(90\.0 s, unfinished\)/);
+      await untilTrue(late.asked);
+      t.mock.timers.tick(90_000);
+      await save;
+      late.answer();
+      for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(c.calls, [], "no position saved after the caller was told the save failed");
+      await adapter.shutdown();
+    });
+
+    it("names the slot a save was stuck on, and says to wait before looking, since it can still land", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 1, 2]);
+      let sent = false;
+      c.positions.save = () => {
+        sent = true;
+        return new Promise(() => {});
+      };
+      const { adapter } = withPositions(c.positions);
+      const save = assert.rejects(adapter.savePosition(SERIAL), { message: "The camera didn't finish with its saved positions within 90 seconds: reading its saved positions (0.0 s), saving in slot 3 (90.0 s, unfinished). If the steps above got as far as saving, the position may still land in that slot after this message: wait a minute, then delete it in the Eufy app if it's there and unwanted, and only then try again. If they didn't, trying again is safe." });
+      await untilTrue(() => sent);
+      t.mock.timers.tick(90_000);
+      await save;
+      await adapter.shutdown();
+    });
+
+    it("says a save cut short may have landed, and doesn't crash over the answer arriving late", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+      const fatal: Error[] = [];
+      const { adapter } = withPositions(c.positions, (error) => fatal.push(error));
+      let answer: (() => void) | undefined;
+      c.positions.list = () =>
+        new Promise((resolve) => {
+          answer = () => {
+            // By the time the camera answers, the last free slot has gone.
+            c.used.push(9);
+            resolve(slots(c.used));
+          };
+        });
+      const save = assert.rejects(adapter.savePosition(SERIAL), { message: "The camera didn't finish with its saved positions within 90 seconds: reading its saved positions (90.0 s, unfinished). If the steps above got as far as saving, the position may still land in that slot after this message: wait a minute, then delete it in the Eufy app if it's there and unwanted, and only then try again. If they didn't, trying again is safe." });
+      await untilTrue(() => answer !== undefined);
+      t.mock.timers.tick(90_000);
+      await save;
+      answer?.();
+      for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(fatal, [], "every slot in use is an answer, not a bug");
+      await adapter.shutdown();
+    });
+
+    const aborted = new Error("The operation was aborted");
+    aborted.name = "AbortError";
+    const late: Array<[string, Error, boolean]> = [
+      ["a bug", new TypeError("positions is not iterable"), true],
+      ["the camera's connection going", new StationUnreachableError("SN", 45000), false],
+      ["an outcome the work reports on purpose", new CaptureFailure("camera_unreachable", "position", "Every saved-position slot on the camera is in use."), false],
+      ["a login that ran out", new SessionExpiredError("token rejected"), false],
+      ["the SDK stopping as told", aborted, false],
+    ];
+    for (const [name, error, surfaces] of late) {
+      it(`${surfaces ? "still surfaces" : "doesn't count"} ${name} that lands after the deadline`, async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+        const c = camera([0, 3]);
+        let fail: ((reason: Error) => void) | undefined;
+        c.positions.list = () =>
+          new Promise((_resolve, reject) => {
+            fail = reject;
+          });
+        const fatal: Error[] = [];
+        const { adapter } = withPositions(c.positions, (reported) => fatal.push(reported));
+        const reset = assert.rejects(adapter.prepareFrame(SERIAL, 3), /reading its saved positions \(45\.0 s, unfinished\)/);
+        await untilTrue(() => fail !== undefined);
+        t.mock.timers.tick(45_000);
+        await reset;
+        fail?.(error);
+        for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+        assert.deepEqual(fatal, surfaces ? [error] : []);
+        await adapter.shutdown();
+      });
+    }
+  });
+
   for (const message of ["timeout waiting for p2p control query 6034 reply from SN", "timeout waiting for p2p query 12 reply from SN", "P2P session SN is not connected", "P2P session closed before connecting for station SN", "P2P connect timeout for SN (relay: list)"]) {
     it(`calls "${message}" a capture failure, because the camera just didn't answer`, async () => {
       const c = camera([0, 3]);
