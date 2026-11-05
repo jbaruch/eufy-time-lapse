@@ -624,6 +624,38 @@ describe("MegaAdapter saved positions", () => {
       await adapter.shutdown();
     });
 
+    it("doesn't let a tracking-off answer that lands after its deadline undo what a retry did since", async (t) => {
+      const c = camera([0, 3]);
+      const { adapter, client } = withPositions(c.positions);
+      const log: string[] = [];
+      let lateOff: (() => void) | undefined;
+      const route = client.routeCommand.bind(client);
+      client.routeCommand = (serial, command) => {
+        if (lateOff === undefined) return new Promise((resolve) => (lateOff = () => resolve()));
+        client.sessions.set(SERIAL, {});
+        if (command.kind === "set-json") log.push(`tracking ${(command.data as { value: number }).value}`);
+        return route(serial, command);
+      };
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const first = assert.rejects(adapter.prepareFrame(SERIAL, 3), /turning tracking off \(45\.0 s, unfinished\)/);
+      await untilTrue(() => lateOff !== undefined);
+      t.mock.timers.tick(45_000);
+      await first;
+      t.mock.timers.reset();
+      // The retry: a reset, its frame, and the teardown that turns tracking back on.
+      await adapter.prepareFrame(SERIAL, 3);
+      await adapter.openLiveSession(SERIAL, new AbortController().signal);
+      await adapter.teardown(SERIAL, 5_000);
+      lateOff?.();
+      for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      log.length = 0;
+      // A frame with no reset before it, as a retry whose reset had no time takes.
+      await adapter.openLiveSession(SERIAL, new AbortController().signal);
+      assert.deepEqual(log, ["tracking 0"], "it still knows tracking was turned back on, so it turns it off for this frame");
+      await adapter.teardown(SERIAL, 5_000);
+      await adapter.shutdown();
+    });
+
     /** A list that answers only when told to, with whatever the camera holds by then. */
     function lateList(c: ReturnType<typeof camera>): { answer: () => void; asked: () => boolean } {
       let resolveList: ((value: Slot[]) => void) | undefined;

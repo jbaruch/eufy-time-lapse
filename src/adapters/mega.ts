@@ -775,6 +775,8 @@ export class MegaAdapter implements CameraAdapter {
         step("turning tracking off");
         this.tracking = "turning-off";
         await this.setMotionTracking(cameraKey, false);
+        // An answer that comes after the deadline mustn't say tracking is off over whatever a retry has done since.
+        signal.throwIfAborted();
         this.tracking = "off";
         // A position can be deleted in the app, and there's nothing to go to then.
         step("reading its saved positions");
