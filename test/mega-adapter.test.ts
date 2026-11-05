@@ -664,6 +664,22 @@ describe("MegaAdapter saved positions", () => {
       await adapter.shutdown();
     });
 
+    it("names the slot a save was stuck on, and says to wait before looking, since it can still land", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 1, 2]);
+      let sent = false;
+      c.positions.save = () => {
+        sent = true;
+        return new Promise(() => {});
+      };
+      const { adapter } = withPositions(c.positions);
+      const save = assert.rejects(adapter.savePosition(SERIAL), { message: "The camera didn't finish with its saved positions within 90 seconds: reading its saved positions (0.0 s), saving in slot 3 (90.0 s, unfinished). It may have saved the position anyway, even after this message: wait a minute, then delete any saved position in the Eufy app that you don't recognize, and only then try again." });
+      await untilTrue(() => sent);
+      t.mock.timers.tick(90_000);
+      await save;
+      await adapter.shutdown();
+    });
+
     it("says a save cut short may have landed, and doesn't crash over the answer arriving late", async (t) => {
       t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
       const c = camera([0, 1, 2, 3, 4, 5, 6, 7, 8]);
@@ -678,7 +694,7 @@ describe("MegaAdapter saved positions", () => {
             resolve(slots(c.used));
           };
         });
-      const save = assert.rejects(adapter.savePosition(SERIAL), { message: "The camera didn't finish with its saved positions within 90 seconds: reading its saved positions (90.0 s, unfinished). It may have saved the position anyway: before trying again, delete any saved position in the Eufy app that you don't recognize." });
+      const save = assert.rejects(adapter.savePosition(SERIAL), { message: "The camera didn't finish with its saved positions within 90 seconds: reading its saved positions (90.0 s, unfinished). It may have saved the position anyway, even after this message: wait a minute, then delete any saved position in the Eufy app that you don't recognize, and only then try again." });
       await untilTrue(() => answer !== undefined);
       t.mock.timers.tick(90_000);
       await save;

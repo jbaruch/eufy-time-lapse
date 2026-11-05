@@ -753,8 +753,9 @@ export class MegaAdapter implements CameraAdapter {
         if (!kept) throw new CaptureFailure("camera_unreachable", "position", `The camera didn't keep the position saved in slot ${slot.id}. Try again, or save one in the Eufy app.`);
         return slot.id;
       },
-      // Another try takes the next free slot, so one this try did save would be left behind.
-      { advice: "It may have saved the position anyway: before trying again, delete any saved position in the Eufy app that you don't recognize." },
+      // Another try takes the next free slot, so one this try did save would be left behind. A save already sent can still
+      // land after this message, which is why the advice waits before looking.
+      { advice: "It may have saved the position anyway, even after this message: wait a minute, then delete any saved position in the Eufy app that you don't recognize, and only then try again." },
     );
   }
 
