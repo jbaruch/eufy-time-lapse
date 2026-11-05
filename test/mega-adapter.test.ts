@@ -673,7 +673,7 @@ describe("MegaAdapter saved positions", () => {
         return new Promise(() => {});
       };
       const { adapter } = withPositions(c.positions);
-      const save = assert.rejects(adapter.savePosition(SERIAL), { message: "The camera didn't finish with its saved positions within 90 seconds: reading its saved positions (0.0 s), saving in slot 3 (90.0 s, unfinished). It may have saved the position anyway, even after this message: wait a minute, then delete any saved position in the Eufy app that you don't recognize, and only then try again." });
+      const save = assert.rejects(adapter.savePosition(SERIAL), { message: "The camera didn't finish with its saved positions within 90 seconds: reading its saved positions (0.0 s), saving in slot 3 (90.0 s, unfinished). If the steps above got as far as saving, the position may still land in that slot after this message: wait a minute, then delete it in the Eufy app if it's there and unwanted, and only then try again. If they didn't, trying again is safe." });
       await untilTrue(() => sent);
       t.mock.timers.tick(90_000);
       await save;
@@ -694,7 +694,7 @@ describe("MegaAdapter saved positions", () => {
             resolve(slots(c.used));
           };
         });
-      const save = assert.rejects(adapter.savePosition(SERIAL), { message: "The camera didn't finish with its saved positions within 90 seconds: reading its saved positions (90.0 s, unfinished). It may have saved the position anyway, even after this message: wait a minute, then delete any saved position in the Eufy app that you don't recognize, and only then try again." });
+      const save = assert.rejects(adapter.savePosition(SERIAL), { message: "The camera didn't finish with its saved positions within 90 seconds: reading its saved positions (90.0 s, unfinished). If the steps above got as far as saving, the position may still land in that slot after this message: wait a minute, then delete it in the Eufy app if it's there and unwanted, and only then try again. If they didn't, trying again is safe." });
       await untilTrue(() => answer !== undefined);
       t.mock.timers.tick(90_000);
       await save;

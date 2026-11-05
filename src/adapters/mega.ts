@@ -755,7 +755,7 @@ export class MegaAdapter implements CameraAdapter {
       },
       // Another try takes the next free slot, so one this try did save would be left behind. A save already sent can still
       // land after this message, which is why the advice waits before looking.
-      { advice: "It may have saved the position anyway, even after this message: wait a minute, then delete any saved position in the Eufy app that you don't recognize, and only then try again." },
+      { advice: "If the steps above got as far as saving, the position may still land in that slot after this message: wait a minute, then delete it in the Eufy app if it's there and unwanted, and only then try again. If they didn't, trying again is safe." },
     );
   }
 
