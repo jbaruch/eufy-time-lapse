@@ -4,6 +4,7 @@
 
 - Turns AI tracking back on over the frame's own connection, before closing it, instead of connecting again afterwards. That's one camera wake per slot instead of two, and it avoids the reconnect the camera sometimes dropped, which left tracking off until the next try between slots.
 - Checks the framing of a frame it finishes after a crash, as it does any other, and at each start checks any frame a crash left between being stored and being checked. Before, such a frame skipped the check, so one shot off target went into renders unflagged.
+- A reset that runs out of time now says which step it was stuck on, and what each step before it took, so a slow connection and a camera that didn't answer read differently in the log.
 
 ## 0.1.0 — 2026-11-03
 
