@@ -214,6 +214,20 @@ function pinnedVersion(): string {
   return manifest.dependencies["@mega-yfue/eufy-sdk"] ?? "unknown";
 }
 
+interface Step {
+  doing: string;
+  at: number;
+}
+
+/** Each step and how long it took, up to now, with the last one unfinished. Nothing when the work named no steps. */
+function timeline(steps: Step[], now: number): string {
+  const parts = steps.map(({ doing, at }, index) => {
+    const next = steps[index + 1];
+    return next === undefined ? `${doing} (${((now - at) / 1000).toFixed(1)} s, unfinished)` : `${doing} (${((next.at - at) / 1000).toFixed(1)} s)`;
+  });
+  return parts.length === 0 ? "" : `: ${parts.join(", ")}`;
+}
+
 function codecName(codec: string): VideoCodecName {
   if (codec === "h265") return "h265";
   if (codec === "h264") return "h264";
@@ -668,19 +682,21 @@ export class MegaAdapter implements CameraAdapter {
   }
 
   /** Holds the connection open like an attempt does, so the sweep doesn't close it, and shuts it the same way afterwards, unless it's wanted next. */
-  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>) => Promise<T>, { timeoutMs = POSITION_TIMEOUT_MS, keepOpen = false }: { timeoutMs?: number; keepOpen?: boolean } = {}): Promise<T> {
+  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>, step: (doing: string) => void) => Promise<T>, { timeoutMs = POSITION_TIMEOUT_MS, keepOpen = false }: { timeoutMs?: number; keepOpen?: boolean } = {}): Promise<T> {
     this.attemptActive = true;
     let deadline: NodeJS.Timeout | undefined;
     let succeeded = false;
+    // Work that names its steps gets a timeout that says which one never finished, and what the others cost.
+    const steps: Step[] = [];
     try {
       await this.restoreLogin();
       const positions = (await this.deviceFor(cameraKey)).ptz?.()?.preset?.();
       const list = positions?.list?.bind(positions);
       if (positions === undefined || list === undefined) throw new CaptureFailure("camera_unreachable", "position", "The SDK offers no saved positions for this camera.");
       const expired = new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => reject(new CaptureFailure("camera_unreachable", "position", `The camera didn't finish with its saved positions within ${timeoutMs / 1000} seconds.`)), timeoutMs);
+        deadline = setTimeout(() => reject(new CaptureFailure("camera_unreachable", "position", `The camera didn't finish with its saved positions within ${timeoutMs / 1000} seconds${timeline(steps, Date.now())}.`)), timeoutMs);
       });
-      const result = await Promise.race([work(positions, list), expired]);
+      const result = await Promise.race([work(positions, list, (doing) => steps.push({ doing, at: Date.now() })), expired]);
       succeeded = true;
       return result;
     } catch (error) {
@@ -716,15 +732,22 @@ export class MegaAdapter implements CameraAdapter {
     this.relayUsed = false;
     return this.withPositions(
       cameraKey,
-      async (positions, list) => {
+      async (positions, list, step) => {
+        // On its own, though the first command would connect anyway, so a timeout can tell a slow connection from a silent camera.
+        step("connecting");
+        await this.client.connectStation(cameraKey);
         // First, so a frame taken without its position still can't be taken mid-chase.
+        step("turning tracking off");
         this.tracking = "turning-off";
         await this.setMotionTracking(cameraKey, false);
         this.tracking = "off";
         // A position can be deleted in the app, and there's nothing to go to then.
+        step("reading its saved positions");
         if ((await list()).find((position) => position.id === positionId)?.raw.enable !== 1) return "gone";
+        step("moving to the saved position");
         await positions.preview(positionId);
         // Closing the connection straight away could stop the camera on its way.
+        step("letting the move finish");
         await delay(this.settle.moveMs);
         return "ready";
       },

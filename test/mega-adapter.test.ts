@@ -532,6 +532,64 @@ describe("MegaAdapter saved positions", () => {
     await adapter.shutdown();
   });
 
+  describe("when the reset runs out of time", () => {
+    const untilTrue = async (done: () => boolean): Promise<void> => {
+      while (!done()) await new Promise((resolve) => setImmediate(resolve));
+    };
+
+    it("says which step never finished, and what the ones before it took", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 3]);
+      let listed = false;
+      c.positions.list = () => {
+        listed = true;
+        return new Promise(() => {});
+      };
+      const { adapter, client } = withPositions(c.positions);
+      client.connect = async () => {
+        t.mock.timers.tick(4_000);
+        client.sessions.set(SERIAL, {});
+      };
+      const reset = assert.rejects(adapter.prepareFrame(SERIAL, 3), { message: "The camera didn't finish with its saved positions within 45 seconds: connecting (4.0 s), turning tracking off (0.0 s), reading its saved positions (41.0 s, unfinished)." });
+      await untilTrue(() => listed);
+      t.mock.timers.tick(41_000);
+      await reset;
+      await adapter.shutdown();
+    });
+
+    it("tells a connection that never came up from a camera that didn't answer", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 3]);
+      const { adapter, client } = withPositions(c.positions);
+      let connecting = false;
+      client.connect = () => {
+        connecting = true;
+        return new Promise(() => {});
+      };
+      const reset = assert.rejects(adapter.prepareFrame(SERIAL, 3), { message: "The camera didn't finish with its saved positions within 45 seconds: connecting (45.0 s, unfinished)." });
+      await untilTrue(() => connecting);
+      t.mock.timers.tick(45_000);
+      await reset;
+      assert.deepEqual(c.calls, [], "nothing was asked of a camera it never reached");
+      await adapter.shutdown();
+    });
+
+    it("keeps the plain message for work that names no steps", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const { adapter, client } = withPositions(camera([0, 3]).positions);
+      let routed = false;
+      client.routeCommand = () => {
+        routed = true;
+        return new Promise(() => {});
+      };
+      const resume = assert.rejects(adapter.resumeTracking(SERIAL), { message: "The camera didn't finish with its saved positions within 45 seconds." });
+      await untilTrue(() => routed);
+      t.mock.timers.tick(45_000);
+      await resume;
+      await adapter.shutdown();
+    });
+  });
+
   for (const message of ["timeout waiting for p2p control query 6034 reply from SN", "timeout waiting for p2p query 12 reply from SN", "P2P session SN is not connected", "P2P session closed before connecting for station SN", "P2P connect timeout for SN (relay: list)"]) {
     it(`calls "${message}" a capture failure, because the camera just didn't answer`, async () => {
       const c = camera([0, 3]);
