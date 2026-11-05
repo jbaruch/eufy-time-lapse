@@ -738,12 +738,17 @@ export class MegaAdapter implements CameraAdapter {
   async savePosition(cameraKey: string): Promise<number> {
     return this.withPositions(
       cameraKey,
-      async (positions, list) => {
+      async (positions, list, step) => {
+        step("reading its saved positions");
         const slot = (await list()).find((position) => position.raw.enable === 0);
         if (slot === undefined) throw new CaptureFailure("camera_unreachable", "position", "Every saved-position slot on the camera is in use. Delete one in the Eufy app and try again.");
+        // A list that answers after the deadline stops here, so a failure already reported can't still save.
+        step(`saving in slot ${slot.id}`);
         await positions.save(slot.id);
         // The camera answers before it has stored the position, and only its own list can say that it did.
+        step("letting the camera store it");
         await delay(this.settle.saveMs);
+        step("checking the camera kept it");
         const kept = (await list()).find((position) => position.id === slot.id)?.raw.enable === 1;
         if (!kept) throw new CaptureFailure("camera_unreachable", "position", `The camera didn't keep the position saved in slot ${slot.id}. Try again, or save one in the Eufy app.`);
         return slot.id;
@@ -834,8 +839,12 @@ export class MegaAdapter implements CameraAdapter {
   async forgetPosition(cameraKey: string, positionId: number): Promise<void> {
     await this.withPositions(
       cameraKey,
-      async (positions, list) => {
-        if ((await list()).find((position) => position.id === positionId)?.raw.enable === 1) await positions.delete(positionId);
+      async (positions, list, step) => {
+        step("reading its saved positions");
+        if ((await list()).find((position) => position.id === positionId)?.raw.enable !== 1) return;
+        // A list that answers after the deadline stops here, so a failure already reported can't still delete.
+        step(`deleting slot ${positionId}`);
+        await positions.delete(positionId);
       },
       // It deletes only a position that's still there.
       { advice: "Trying again is safe." },

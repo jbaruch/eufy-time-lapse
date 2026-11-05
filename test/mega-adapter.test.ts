@@ -624,19 +624,43 @@ describe("MegaAdapter saved positions", () => {
       await adapter.shutdown();
     });
 
-    it("says trying again is safe for a deletion cut short, since it deletes only what's still there", async (t) => {
+    /** A list that answers only when told to, with whatever the camera holds by then. */
+    function lateList(c: ReturnType<typeof camera>): { answer: () => void; asked: () => boolean } {
+      let resolveList: ((value: Slot[]) => void) | undefined;
+      c.positions.list = () =>
+        new Promise((resolve) => {
+          resolveList = resolve;
+        });
+      return { answer: () => resolveList?.(slots(c.used)), asked: () => resolveList !== undefined };
+    }
+
+    it("says trying again is safe for a deletion cut short, and doesn't delete on a list that answers late", async (t) => {
       t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
       const c = camera([0, 3]);
-      let listed = false;
-      c.positions.list = () => {
-        listed = true;
-        return new Promise(() => {});
-      };
+      const late = lateList(c);
       const { adapter } = withPositions(c.positions);
-      const forget = assert.rejects(adapter.forgetPosition(SERIAL, 3), { message: "The camera didn't finish with its saved positions within 90 seconds. Trying again is safe." });
-      await untilTrue(() => listed);
+      const forget = assert.rejects(adapter.forgetPosition(SERIAL, 3), { message: "The camera didn't finish with its saved positions within 90 seconds: reading its saved positions (90.0 s, unfinished). Trying again is safe." });
+      await untilTrue(late.asked);
       t.mock.timers.tick(90_000);
       await forget;
+      late.answer();
+      for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(c.calls, [], "the position the caller was told is still there stays there");
+      await adapter.shutdown();
+    });
+
+    it("doesn't save on a list that answers late with a free slot", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 1, 2]);
+      const late = lateList(c);
+      const { adapter } = withPositions(c.positions);
+      const save = assert.rejects(adapter.savePosition(SERIAL), /reading its saved positions \(90\.0 s, unfinished\)/);
+      await untilTrue(late.asked);
+      t.mock.timers.tick(90_000);
+      await save;
+      late.answer();
+      for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(c.calls, [], "no position saved after the caller was told the save failed");
       await adapter.shutdown();
     });
 
@@ -654,7 +678,7 @@ describe("MegaAdapter saved positions", () => {
             resolve(slots(c.used));
           };
         });
-      const save = assert.rejects(adapter.savePosition(SERIAL), { message: "The camera didn't finish with its saved positions within 90 seconds. It may have saved the position anyway: before trying again, delete any saved position in the Eufy app that you don't recognize." });
+      const save = assert.rejects(adapter.savePosition(SERIAL), { message: "The camera didn't finish with its saved positions within 90 seconds: reading its saved positions (90.0 s, unfinished). It may have saved the position anyway: before trying again, delete any saved position in the Eufy app that you don't recognize." });
       await untilTrue(() => answer !== undefined);
       t.mock.timers.tick(90_000);
       await save;
