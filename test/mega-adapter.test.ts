@@ -554,7 +554,7 @@ describe("MegaAdapter saved positions", () => {
         t.mock.timers.tick(4_000);
         client.sessions.set(SERIAL, {});
       };
-      const reset = assert.rejects(adapter.prepareFrame(SERIAL, 3), { message: "The camera didn't finish with its saved positions within 45 seconds: connecting (4.0 s), turning tracking off (0.0 s), reading its saved positions (41.0 s, unfinished)." });
+      const reset = assert.rejects(adapter.prepareFrame(SERIAL, 3), { message: "The camera didn't finish with its saved positions within 45 seconds: connecting (4.0 s), turning tracking off (0.0 s), reading its saved positions (41.0 s, unfinished). Trying again is safe, and the unfinished step says whether the connection or the camera was slow." });
       await untilTrue(() => listed);
       t.mock.timers.tick(41_000);
       await reset;
@@ -570,7 +570,7 @@ describe("MegaAdapter saved positions", () => {
         connecting = true;
         return new Promise(() => {});
       };
-      const reset = assert.rejects(adapter.prepareFrame(SERIAL, 3), { message: "The camera didn't finish with its saved positions within 45 seconds: connecting (45.0 s, unfinished)." });
+      const reset = assert.rejects(adapter.prepareFrame(SERIAL, 3), { message: "The camera didn't finish with its saved positions within 45 seconds: connecting (45.0 s, unfinished). Trying again is safe, and the unfinished step says whether the connection or the camera was slow." });
       await untilTrue(() => connecting);
       t.mock.timers.tick(45_000);
       await reset;
@@ -578,7 +578,7 @@ describe("MegaAdapter saved positions", () => {
       await adapter.shutdown();
     });
 
-    it("keeps the plain message for work that names no steps", async (t) => {
+    it("leaves the steps out of the message for work that names none", async (t) => {
       t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
       const { adapter, client } = withPositions(camera([0, 3]).positions);
       let routed = false;
@@ -586,12 +586,69 @@ describe("MegaAdapter saved positions", () => {
         routed = true;
         return new Promise(() => {});
       };
-      const resume = assert.rejects(adapter.resumeTracking(SERIAL), { message: "The camera didn't finish with its saved positions within 45 seconds." });
+      const resume = assert.rejects(adapter.resumeTracking(SERIAL), { message: "The camera didn't finish with its saved positions within 45 seconds. Trying again is safe." });
       await untilTrue(() => routed);
       t.mock.timers.tick(45_000);
       await resume;
       await adapter.shutdown();
     });
+
+    it("stops the connection at the deadline, and asks nothing of a camera it reaches late", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 3]);
+      const fatal: Error[] = [];
+      const { adapter, client } = withPositions(c.positions, (error) => fatal.push(error));
+      let comeUp: (() => void) | undefined;
+      let stopped = false;
+      client.connect = (signal) =>
+        new Promise((resolve) => {
+          signal?.addEventListener("abort", () => {
+            stopped = true;
+          });
+          comeUp = () => {
+            client.sessions.set(SERIAL, {});
+            resolve();
+          };
+        });
+      const reset = assert.rejects(adapter.prepareFrame(SERIAL, 3), /connecting \(45\.0 s, unfinished\)/);
+      await untilTrue(() => comeUp !== undefined);
+      t.mock.timers.tick(45_000);
+      await reset;
+      assert.equal(stopped, true, "the connection was told to stop");
+      // As an SDK that ignored the abort would.
+      comeUp?.();
+      for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(client.routed, [], "tracking left alone");
+      assert.deepEqual(c.calls, [], "no list, and no move");
+      assert.deepEqual(fatal, []);
+      await adapter.shutdown();
+    });
+
+    const late: Array<[string, Error, boolean]> = [
+      ["a bug", new TypeError("positions is not iterable"), true],
+      ["the camera's connection going", new StationUnreachableError("SN", 45000), false],
+    ];
+    for (const [name, error, surfaces] of late) {
+      it(`${surfaces ? "still surfaces" : "doesn't count"} ${name} that lands after the deadline`, async (t) => {
+        t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+        const c = camera([0, 3]);
+        let fail: ((reason: Error) => void) | undefined;
+        c.positions.list = () =>
+          new Promise((_resolve, reject) => {
+            fail = reject;
+          });
+        const fatal: Error[] = [];
+        const { adapter } = withPositions(c.positions, (reported) => fatal.push(reported));
+        const reset = assert.rejects(adapter.prepareFrame(SERIAL, 3), /reading its saved positions \(45\.0 s, unfinished\)/);
+        await untilTrue(() => fail !== undefined);
+        t.mock.timers.tick(45_000);
+        await reset;
+        fail?.(error);
+        for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+        assert.deepEqual(fatal, surfaces ? [error] : []);
+        await adapter.shutdown();
+      });
+    }
   });
 
   for (const message of ["timeout waiting for p2p control query 6034 reply from SN", "timeout waiting for p2p query 12 reply from SN", "P2P session SN is not connected", "P2P session closed before connecting for station SN", "P2P connect timeout for SN (relay: list)"]) {

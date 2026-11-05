@@ -682,21 +682,41 @@ export class MegaAdapter implements CameraAdapter {
   }
 
   /** Holds the connection open like an attempt does, so the sweep doesn't close it, and shuts it the same way afterwards, unless it's wanted next. */
-  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>, step: (doing: string) => void) => Promise<T>, { timeoutMs = POSITION_TIMEOUT_MS, keepOpen = false }: { timeoutMs?: number; keepOpen?: boolean } = {}): Promise<T> {
+  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>, step: (doing: string) => void, signal: AbortSignal) => Promise<T>, { timeoutMs = POSITION_TIMEOUT_MS, keepOpen = false }: { timeoutMs?: number; keepOpen?: boolean } = {}): Promise<T> {
     this.attemptActive = true;
     let deadline: NodeJS.Timeout | undefined;
     let succeeded = false;
     // Work that names its steps gets a timeout that says which one never finished, and what the others cost.
     const steps: Step[] = [];
+    // The race below doesn't stop the work. This does, at its next step, so nothing it does late reaches the camera.
+    const expiry = new AbortController();
     try {
       await this.restoreLogin();
       const positions = (await this.deviceFor(cameraKey)).ptz?.()?.preset?.();
       const list = positions?.list?.bind(positions);
       if (positions === undefined || list === undefined) throw new CaptureFailure("camera_unreachable", "position", "The SDK offers no saved positions for this camera.");
       const expired = new Promise<never>((_resolve, reject) => {
-        deadline = setTimeout(() => reject(new CaptureFailure("camera_unreachable", "position", `The camera didn't finish with its saved positions within ${timeoutMs / 1000} seconds${timeline(steps, Date.now())}.`)), timeoutMs);
+        deadline = setTimeout(() => {
+          const where = steps.length > 0 ? `${timeline(steps, Date.now())}. Trying again is safe, and the unfinished step says whether the connection or the camera was slow.` : ". Trying again is safe.";
+          const failure = new CaptureFailure("camera_unreachable", "position", `The camera didn't finish with its saved positions within ${timeoutMs / 1000} seconds${where}`);
+          expiry.abort(failure);
+          reject(failure);
+        }, timeoutMs);
       });
-      const result = await Promise.race([work(positions, list, (doing) => steps.push({ doing, at: Date.now() })), expired]);
+      const working = work(
+        positions,
+        list,
+        (doing) => {
+          expiry.signal.throwIfAborted();
+          steps.push({ doing, at: Date.now() });
+        },
+        expiry.signal,
+      );
+      // After the deadline has won, the work failing is it stopping as told, or the camera gone with its connection. A bug still surfaces.
+      working.catch((error: unknown) => {
+        if (expiry.signal.aborted && !isAbortRejection(error, expiry.signal) && !isCameraError(error)) this.onFatal(error instanceof Error ? error : new Error(String(error)));
+      });
+      const result = await Promise.race([working, expired]);
       succeeded = true;
       return result;
     } catch (error) {
@@ -732,10 +752,10 @@ export class MegaAdapter implements CameraAdapter {
     this.relayUsed = false;
     return this.withPositions(
       cameraKey,
-      async (positions, list, step) => {
+      async (positions, list, step, signal) => {
         // On its own, though the first command would connect anyway, so a timeout can tell a slow connection from a silent camera.
         step("connecting");
-        await this.client.connectStation(cameraKey);
+        await this.client.connectStation(cameraKey, signal);
         // First, so a frame taken without its position still can't be taken mid-chase.
         step("turning tracking off");
         this.tracking = "turning-off";
