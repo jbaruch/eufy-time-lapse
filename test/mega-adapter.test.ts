@@ -533,8 +533,12 @@ describe("MegaAdapter saved positions", () => {
   });
 
   describe("when the reset runs out of time", () => {
+    /** Bounded, so a step that never comes fails the test instead of spinning the process forever. */
     const untilTrue = async (done: () => boolean): Promise<void> => {
-      while (!done()) await new Promise((resolve) => setImmediate(resolve));
+      for (let turn = 0; !done(); turn += 1) {
+        if (turn === 1_000) throw new Error("the reset never got to the step this test waits for");
+        await new Promise((resolve) => setImmediate(resolve));
+      }
     };
 
     it("says which step never finished, and what the ones before it took", async (t) => {
