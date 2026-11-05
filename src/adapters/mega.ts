@@ -681,8 +681,11 @@ export class MegaAdapter implements CameraAdapter {
     return problems.length > 0 ? { status: "error", detail: problems.join("; ") } : { status: "ok", detail: null };
   }
 
-  /** Holds the connection open like an attempt does, so the sweep doesn't close it, and shuts it the same way afterwards, unless it's wanted next. */
-  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>, step: (doing: string) => void, signal: AbortSignal) => Promise<T>, { timeoutMs = POSITION_TIMEOUT_MS, keepOpen = false }: { timeoutMs?: number; keepOpen?: boolean } = {}): Promise<T> {
+  /**
+   * Holds the connection open like an attempt does, so the sweep doesn't close it, and shuts it the same way afterwards, unless
+   * it's wanted next. The advice ends a timeout's message, so each caller says what's safe after its own work was cut short.
+   */
+  private async withPositions<T>(cameraKey: string, work: (positions: MegaPositions, list: () => Promise<Array<{ id: number; raw: Record<string, unknown> }>>, step: (doing: string) => void, signal: AbortSignal) => Promise<T>, { timeoutMs = POSITION_TIMEOUT_MS, keepOpen = false, advice }: { timeoutMs?: number; keepOpen?: boolean; advice: string }): Promise<T> {
     this.attemptActive = true;
     let deadline: NodeJS.Timeout | undefined;
     let succeeded = false;
@@ -697,8 +700,7 @@ export class MegaAdapter implements CameraAdapter {
       if (positions === undefined || list === undefined) throw new CaptureFailure("camera_unreachable", "position", "The SDK offers no saved positions for this camera.");
       const expired = new Promise<never>((_resolve, reject) => {
         deadline = setTimeout(() => {
-          const where = steps.length > 0 ? `${timeline(steps, Date.now())}. Trying again is safe, and the unfinished step says whether the connection or the camera was slow.` : ". Trying again is safe.";
-          const failure = new CaptureFailure("camera_unreachable", "position", `The camera didn't finish with its saved positions within ${timeoutMs / 1000} seconds${where}`);
+          const failure = new CaptureFailure("camera_unreachable", "position", `The camera didn't finish with its saved positions within ${timeoutMs / 1000} seconds${timeline(steps, Date.now())}. ${advice}`);
           expiry.abort(failure);
           reject(failure);
         }, timeoutMs);
@@ -712,9 +714,11 @@ export class MegaAdapter implements CameraAdapter {
         },
         expiry.signal,
       );
-      // After the deadline has won, the work failing is it stopping as told, or the camera gone with its connection. A bug still surfaces.
+      // After the deadline has won, the work failing is it stopping as told, the camera gone with its connection, or an outcome
+      // the work reports on purpose, as it would have in time. Only a bug still surfaces.
       working.catch((error: unknown) => {
-        if (expiry.signal.aborted && !isAbortRejection(error, expiry.signal) && !isCameraError(error)) this.onFatal(error instanceof Error ? error : new Error(String(error)));
+        const expected = isAbortRejection(error, expiry.signal) || isCameraError(error) || error instanceof CaptureFailure || error instanceof SessionExpiredError;
+        if (expiry.signal.aborted && !expected) this.onFatal(error instanceof Error ? error : new Error(String(error)));
       });
       const result = await Promise.race([working, expired]);
       succeeded = true;
@@ -732,16 +736,21 @@ export class MegaAdapter implements CameraAdapter {
   }
 
   async savePosition(cameraKey: string): Promise<number> {
-    return this.withPositions(cameraKey, async (positions, list) => {
-      const slot = (await list()).find((position) => position.raw.enable === 0);
-      if (slot === undefined) throw new CaptureFailure("camera_unreachable", "position", "Every saved-position slot on the camera is in use. Delete one in the Eufy app and try again.");
-      await positions.save(slot.id);
-      // The camera answers before it has stored the position, and only its own list can say that it did.
-      await delay(this.settle.saveMs);
-      const kept = (await list()).find((position) => position.id === slot.id)?.raw.enable === 1;
-      if (!kept) throw new CaptureFailure("camera_unreachable", "position", `The camera didn't keep the position saved in slot ${slot.id}. Try again, or save one in the Eufy app.`);
-      return slot.id;
-    });
+    return this.withPositions(
+      cameraKey,
+      async (positions, list) => {
+        const slot = (await list()).find((position) => position.raw.enable === 0);
+        if (slot === undefined) throw new CaptureFailure("camera_unreachable", "position", "Every saved-position slot on the camera is in use. Delete one in the Eufy app and try again.");
+        await positions.save(slot.id);
+        // The camera answers before it has stored the position, and only its own list can say that it did.
+        await delay(this.settle.saveMs);
+        const kept = (await list()).find((position) => position.id === slot.id)?.raw.enable === 1;
+        if (!kept) throw new CaptureFailure("camera_unreachable", "position", `The camera didn't keep the position saved in slot ${slot.id}. Try again, or save one in the Eufy app.`);
+        return slot.id;
+      },
+      // Another try takes the next free slot, so one this try did save would be left behind.
+      { advice: "It may have saved the position anyway: before trying again, delete any saved position in the Eufy app that you don't recognize." },
+    );
   }
 
   private setMotionTracking(cameraKey: string, on: boolean): Promise<void> {
@@ -772,7 +781,7 @@ export class MegaAdapter implements CameraAdapter {
         return "ready";
       },
       // Left open for the frame. A new connection straight after closing this one came back at 720p, and ended within seconds.
-      { timeoutMs: FRAME_STEP_TIMEOUT_MS, keepOpen: true },
+      { timeoutMs: FRAME_STEP_TIMEOUT_MS, keepOpen: true, advice: "Trying again is safe, and the unfinished step says whether the connection or the camera was slow." },
     );
   }
 
@@ -786,7 +795,7 @@ export class MegaAdapter implements CameraAdapter {
         // As with a move, closing the connection straight away could lose it.
         await delay(this.settle.settingMs);
       },
-      { timeoutMs: FRAME_STEP_TIMEOUT_MS },
+      { timeoutMs: FRAME_STEP_TIMEOUT_MS, advice: "Trying again is safe." },
     );
     this.tracking = "on";
   }
@@ -823,9 +832,14 @@ export class MegaAdapter implements CameraAdapter {
   }
 
   async forgetPosition(cameraKey: string, positionId: number): Promise<void> {
-    await this.withPositions(cameraKey, async (positions, list) => {
-      if ((await list()).find((position) => position.id === positionId)?.raw.enable === 1) await positions.delete(positionId);
-    });
+    await this.withPositions(
+      cameraKey,
+      async (positions, list) => {
+        if ((await list()).find((position) => position.id === positionId)?.raw.enable === 1) await positions.delete(positionId);
+      },
+      // It deletes only a position that's still there.
+      { advice: "Trying again is safe." },
+    );
   }
 
   unexpectedConnectionCount(): number {

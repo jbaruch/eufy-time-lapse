@@ -624,9 +624,54 @@ describe("MegaAdapter saved positions", () => {
       await adapter.shutdown();
     });
 
+    it("says trying again is safe for a deletion cut short, since it deletes only what's still there", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 3]);
+      let listed = false;
+      c.positions.list = () => {
+        listed = true;
+        return new Promise(() => {});
+      };
+      const { adapter } = withPositions(c.positions);
+      const forget = assert.rejects(adapter.forgetPosition(SERIAL, 3), { message: "The camera didn't finish with its saved positions within 90 seconds. Trying again is safe." });
+      await untilTrue(() => listed);
+      t.mock.timers.tick(90_000);
+      await forget;
+      await adapter.shutdown();
+    });
+
+    it("says a save cut short may have landed, and doesn't crash over the answer arriving late", async (t) => {
+      t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+      const c = camera([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+      const fatal: Error[] = [];
+      const { adapter } = withPositions(c.positions, (error) => fatal.push(error));
+      let answer: (() => void) | undefined;
+      c.positions.list = () =>
+        new Promise((resolve) => {
+          answer = () => {
+            // By the time the camera answers, the last free slot has gone.
+            c.used.push(9);
+            resolve(slots(c.used));
+          };
+        });
+      const save = assert.rejects(adapter.savePosition(SERIAL), { message: "The camera didn't finish with its saved positions within 90 seconds. It may have saved the position anyway: before trying again, delete any saved position in the Eufy app that you don't recognize." });
+      await untilTrue(() => answer !== undefined);
+      t.mock.timers.tick(90_000);
+      await save;
+      answer?.();
+      for (let turn = 0; turn < 20; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(fatal, [], "every slot in use is an answer, not a bug");
+      await adapter.shutdown();
+    });
+
+    const aborted = new Error("The operation was aborted");
+    aborted.name = "AbortError";
     const late: Array<[string, Error, boolean]> = [
       ["a bug", new TypeError("positions is not iterable"), true],
       ["the camera's connection going", new StationUnreachableError("SN", 45000), false],
+      ["an outcome the work reports on purpose", new CaptureFailure("camera_unreachable", "position", "Every saved-position slot on the camera is in use."), false],
+      ["a login that ran out", new SessionExpiredError("token rejected"), false],
+      ["the SDK stopping as told", aborted, false],
     ];
     for (const [name, error, surfaces] of late) {
       it(`${surfaces ? "still surfaces" : "doesn't count"} ${name} that lands after the deadline`, async (t) => {
