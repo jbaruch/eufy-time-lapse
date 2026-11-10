@@ -6,6 +6,7 @@
 - Checks the framing of a frame it finishes after a crash, as it does any other, and at each start checks any frame a crash left between being stored and being checked. Before, such a frame skipped the check, so one shot off target went into renders unflagged.
 - A reset that runs out of time now says which step it was stuck on, and what each step before it took, so a slow connection and a camera that didn't answer read differently in the log.
 - A reset, `framing set` or `framing off` that runs out of time stops before its next camera command, instead of moving, saving or deleting after it was reported as failed, and its message says what's safe to do next.
+- No longer crashes when a frame's connection is closed while its "tracking on" is still waiting. The SDK reports that as a superseded session, which the service took for a bug, and restarted itself over, twice in the first week.
 
 ## 0.1.0 — 2026-11-03
 

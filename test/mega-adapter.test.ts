@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { EufyMega, FileSessionStore, LoginStatus, MegaApiError, SessionExpiredError, StationUnreachableError } from "@mega-yfue/eufy-sdk";
 import { CaptureFailure } from "../src/adapters/adapter.ts";
 import type { AuthChallenge, AuthInput, CleanupResult } from "../src/adapters/adapter.ts";
@@ -768,7 +769,7 @@ describe("MegaAdapter saved positions", () => {
     }
   });
 
-  for (const message of ["timeout waiting for p2p control query 6034 reply from SN", "timeout waiting for p2p query 12 reply from SN", "P2P session SN is not connected", "P2P session closed before connecting for station SN", "P2P connect timeout for SN (relay: list)"]) {
+  for (const message of ["timeout waiting for p2p control query 6034 reply from SN", "timeout waiting for p2p query 12 reply from SN", "P2P session SN is not connected", "P2P session closed before connecting for station SN", "P2P connect timeout for SN (relay: list)", "P2P session start superseded for SN"]) {
     it(`calls "${message}" a capture failure, because the camera just didn't answer`, async () => {
       const c = camera([0, 3]);
       c.positions.list = async () => {
@@ -985,6 +986,23 @@ describe("MegaAdapter saved positions", () => {
     assert.equal(fatal.length, 1, "a camera that answered late is no bug");
     t.mock.timers.reset();
     await gone.adapter.shutdown();
+  });
+
+  it("doesn't crash when the closed connection's late tracking command comes back superseded, as on 2026-11-06 and 2026-11-07", async (t) => {
+    // The SDK's own class, which it doesn't export: a bare Error subclass, told apart only by its message.
+    class SessionSupersededError extends Error {}
+    const fatal: Error[] = [];
+    const late = await frameWithHeldResume((error) => fatal.push(error));
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const closing = late.adapter.teardown(SERIAL, ROOMY_TEARDOWN_MS);
+    while (!late.log.includes("tracking 1")) await settled();
+    t.mock.timers.tick(50);
+    await closing;
+    late.release.reject(new SessionSupersededError("P2P session start superseded for SN"));
+    await settled();
+    assert.deepEqual(fatal, [], "a session closed under a waiting command is the teardown's doing, not a bug");
+    t.mock.timers.reset();
+    await late.adapter.shutdown();
   });
 
   it("leaves tracking to a new connection when the caller's budget has no room for it before the close", async () => {
@@ -1555,6 +1573,13 @@ describe("the pinned SDK still has what the adapter calls", () => {
 
   it("uses the login statuses the adapter's types assume", () => {
     assert.deepEqual([LoginStatus.Ok, LoginStatus.Captcha, LoginStatus.TwoFactor], ["ok", "captcha", "2fa"]);
+  });
+
+  it("still words a superseded session start the way the adapter recognizes it", async () => {
+    // The SDK doesn't export the class, so its message is the only way to tell this from a bug. An upgrade that rewords it
+    // has to fail here, not crash the service.
+    const source = await readFile(fileURLToPath(import.meta.resolve("@mega-yfue/eufy-sdk")), "utf8");
+    assert.match(source, /new SessionSupersededError\(`P2P session start superseded for \$\{key\}`\)/);
   });
 });
 
